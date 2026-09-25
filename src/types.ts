@@ -92,22 +92,37 @@ export interface CompactResult {
 // --------------------------------------------------
 // Опции и статистика
 // --------------------------------------------------
+/** Стратегия блокировки журнала одним владельцем. */
+export type LockMode = 'pid' | 'off';
+
 export interface JournalOptions {
   rowsPerSegment?: number;
   maxCachedSegments?: number;
   /** Размер пачки WAL: сколько строк накапливать в памяти перед записью на диск.
    *  1 — писать каждую строку сразу (максимальная устойчивость к краху, медленнее). */
   walBatchSize?: number;
+  /** Блокировка журнала одним владельцем (файл `.lock` + PID владельца):
+   * - `'pid'` (по умолчанию) — open() бросает ошибку, если журнал уже открыт
+   *   живым процессом; устаревшую блокировку (мёртвый PID) забирает себе.
+   * - `'off'` — библиотека не создаёт и не проверяет `.lock`: координация
+   *   владельцев целиком на стороне приложения. Нужно, например, когда база
+   *   живёт в worker_threads: воркер может умереть при живом процессе, и
+   *   PID-блокировка будет выглядеть «занятой» навсегда. */
+  lock?: LockMode;
 }
 
 export interface StoreOptions {
   maxCacheSize?: number;
   defaultRowsPerSegment?: number;
+  /** По умолчанию `'pid'` — см. `JournalOptions.lock`. */
+  lock?: LockMode;
 }
 
 export interface OpenJournalOptions {
   rowsPerSegment?: number;
   maxCachedSegments?: number;
+  /** Переопределяет `lock` из StoreOptions для этого журнала. */
+  lock?: LockMode;
 }
 
 export interface JournalStats {

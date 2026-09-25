@@ -1,6 +1,6 @@
 {
   "name": "vrack2-journal-db",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Append-only columnar journal DB for Node.js: gzip + dictionary/delta/RLE columns, WAL with crash-safe flush, time-range queries and pagination that skip whole files via .meta sidecars.",
   "keywords": [
     "database",
@@ -32,7 +32,7 @@
   ],
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json",
-    "test": "node test/test-basic.ts && node test/test-optimization.ts && node test/test-querying.ts && node test/test-compression.ts && node test/test-flexschema.ts && node test/test-compaction.ts && node test/test-durability.ts",
+    "test": "node test/test-basic.ts && node test/test-optimization.ts && node test/test-querying.ts && node test/test-compression.ts && node test/test-flexschema.ts && node test/test-compaction.ts && node test/test-durability.ts && node test/test-locking.ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build && npm test"
   },

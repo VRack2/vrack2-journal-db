@@ -9,6 +9,7 @@ import { Segment } from './segment.ts';
 import { LRUCache } from './cache.ts';
 import { decodeSegment } from './codec.ts';
 import type {
+  LockMode,
   Metadata,
   OpenJournalOptions,
   Schema,
@@ -21,6 +22,7 @@ export class Store {
   private readonly journalsDir: string;
   readonly maxCacheSize: number;
   readonly defaultRowsPerSegment: number;
+  readonly lockMode: LockMode;
 
   /** открытые журналы по имени */
   openJournals = new Map<string, Journal>();
@@ -33,6 +35,11 @@ export class Store {
     this.journalsDir = path.join(baseDir, 'journals');
     this.maxCacheSize = opts.maxCacheSize ?? 20;
     this.defaultRowsPerSegment = opts.defaultRowsPerSegment ?? 100;
+    const lock = opts.lock ?? 'pid';
+    if (lock !== 'pid' && lock !== 'off') {
+      throw new RangeError("Store: lock должно быть 'pid' или 'off'");
+    }
+    this.lockMode = lock;
     this.segmentCache = new LRUCache<string, Segment>(this.maxCacheSize);
   }
 
@@ -52,7 +59,8 @@ export class Store {
 
     const journal = new Journal(this.baseDir, {
       rowsPerSegment: opts.rowsPerSegment ?? this.defaultRowsPerSegment,
-      maxCachedSegments: opts.maxCachedSegments ?? this.maxCacheSize
+      maxCachedSegments: opts.maxCachedSegments ?? this.maxCacheSize,
+      lock: opts.lock ?? this.lockMode
     });
 
     journal.open(name, schema, metadata);

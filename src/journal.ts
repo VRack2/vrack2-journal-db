@@ -23,6 +23,7 @@ import type {
   CompactResult,
   JournalOptions,
   JournalStats,
+  LockMode,
   Metadata,
   Row,
   Schema,
@@ -92,6 +93,10 @@ export class Journal {
   /** id сегмента → имя файла на диске */
   private segmentIndex = new Map<string, string>();
 
+  /** Уникальный суффикс ID сегментов: два открытых инстанса (lock:'off')
+   *  в одной миллисекунде не должны получить одинаковый ID и перезаписать файл. */
+  private readonly _idNonce = Math.random().toString(16).slice(2, 8);
+
   /** id сегмента → объект Segment (LRU) */
   private _segmentCache: LRUCache<string, Segment>;
 
@@ -100,6 +105,9 @@ export class Journal {
 
   /** Пачка WAL: сколько строк копится в памяти перед записью на диск. */
   readonly walBatchSize: number;
+
+  /** Стратегия блокировки одним владельцем ('pid' | 'off'). */
+  readonly lockMode: LockMode;
 
   /** Буфер WAL (сериализованные строки) — пишется одной append'ом. */
   private _walBuf: string[] = [];
@@ -118,6 +126,12 @@ export class Journal {
       throw new RangeError('Journal: walBatchSize должно быть целым числом >= 1');
     }
     this.walBatchSize = batch;
+
+    const lock = opts.lock ?? 'pid';
+    if (lock !== 'pid' && lock !== 'off') {
+      throw new RangeError("Journal: lock должно быть 'pid' или 'off'");
+    }
+    this.lockMode = lock;
     this._segmentCache = new LRUCache<string, Segment>(this.maxCachedSegments);
   }
 
@@ -316,7 +330,7 @@ export class Journal {
     }
 
     const merged = new Segment(
-      `seg_${Date.now()}_${this.segmentCounter++}`,
+      `seg_${Date.now()}_${this.segmentCounter++}_${this._idNonce}`,
       this.schema!,
       { ...(this.metadata ?? {}) }
     );
@@ -628,7 +642,7 @@ export class Journal {
   }
 
   private _createNewActiveSegment(): void {
-    const id = `seg_${Date.now()}_${this.segmentCounter++}`;
+    const id = `seg_${Date.now()}_${this.segmentCounter++}_${this._idNonce}`;
     this.activeSegment = new Segment(id, this.schema!, this.metadata ?? {});
   }
 
@@ -763,6 +777,7 @@ export class Journal {
 
   /** Захватывает блокировку; устаревшую (мёртвый PID) забирает себе. */
   private _acquireLock(): void {
+    if (this.lockMode === 'off') return; // координация владельцев — на стороне приложения
     const lockPath = this._lockPath();
     try {
       fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, ts: Date.now() }), { flag: 'wx' });
@@ -781,13 +796,18 @@ export class Journal {
     }
 
     if (this._pidAlive(holderPid)) {
-      throw new Error(`Журнал заблокирован процессом ${holderPid} (${lockPath})`);
+      throw new Error(
+        `Журнал заблокирован процессом ${holderPid} (${lockPath}). ` +
+        'Если других владельцев действительно нет (например, умер worker_threads), ' +
+        "откройте журнал с { lock: 'off' } или удалите .lock"
+      );
     }
 
     fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, ts: Date.now() }));
   }
 
   private _releaseLock(): void {
+    if (this.lockMode === 'off') return; // блокировки не было — снимать нечего
     try {
       const info = JSON.parse(fs.readFileSync(this._lockPath(), 'utf-8')) as { pid?: number };
       if (info.pid === process.pid) {
