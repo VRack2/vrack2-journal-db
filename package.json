@@ -1,6 +1,6 @@
 {
   "name": "vrack2-journal-db",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Append-only columnar journal DB for Node.js: gzip + dictionary/delta/RLE columns, WAL with crash-safe flush, time-range queries and pagination that skip whole files via .meta sidecars.",
   "keywords": [
     "database",
@@ -21,6 +21,7 @@
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
+      "require": "./lib/index.js",
       "import": "./lib/index.js"
     },
     "./package.json": "./package.json"
