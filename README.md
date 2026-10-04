@@ -243,8 +243,11 @@ const r = journal.compact();
 `ts` не удаляются никогда — они не участвуют во временных запросах и считаются
 вечными.
 
+`beforeTs` — число (мс) **или строка** «языка интервалов» (VRackDB):
+
 ```ts
-const r = journal.purge(Date.now() - 30 * 24 * 3600 * 1000); // 30 дней назад
+journal.purge(Date.now() - 30 * 24 * 3600 * 1000); // 30 дней назад (в мс)
+journal.purge('now-30d');                            // то же, только короче
 // { removedRows: 1_204_113, removedSegments: 18, rewrittenSegments: 1 }
 ```
 
@@ -268,7 +271,7 @@ const r = journal.purge(Date.now() - 30 * 24 * 3600 * 1000); // 30 дней на
 разбивает период на равные бакеты и в каждом считает строки:
 
 ```ts
-const tl = journal.timeline(86_400_000, [from, to]); // бакет = 1 день
+const tl = journal.timeline('1d', 'now-7d:now'); // бакет = 1 день, за последние 7 дней
 // → [
 //    { start: 1727942400000, end: 1728028800000, count: 1240, hasData: true },
 //    { start: 1728028800000, end: 1728115200000, count: 0,    hasData: false },
@@ -276,7 +279,19 @@ const tl = journal.timeline(86_400_000, [from, to]); // бакет = 1 день
 //  ]
 ```
 
-- Первый параметр — ширина бакета в мс, второй — период `[start, end]`.
+- Первый параметр — ширина бакета, второй — период.
+- Оба принимают **и мс (число), и строку** — «язык интервалов» из VRackDB
+  (`src/interval.ts`, базовая единица — миллисекунды):
+  - интервал: `'30s'`, `'5m'`, `'1h'`, `'1d'`, `'2w'`, `'3mon'`, `'1y'`;
+  - относительные моменты: `'now-1h'`, `'now+1h'`, `'now-1h-1m'`;
+  - период: `'now-7d:now'`, `'now-2h-15m:now'` (или абсолютный `'1700000000000:1700000500000'`).
+
+  ```ts
+  journal.timeline('1h', 'now-24h:now')       // 24 почасовых бакета
+  Interval.parseInterval('1h')                // 3_600_000
+  Interval.period('now-1d:now')               // [start, end] в мс
+  Interval.roundTime(t, 3_600_000)            // округление вниз до часа
+  ```
 - **Дёшево:** сегмент, не пересекающий период, не читается вообще — решение
   по `minTs`/`maxTs` из сайдкар'а `.meta`. Читаются только сегменты, лежащие
   на границах бакетов.
@@ -356,6 +371,7 @@ for (let i = 0; i < 12; i++) {
 }
 
 j.query(startTs, endTs);   // выборка по временному диапазону (границы включены)
+j.query('now-1h', 'now');  // то же, строкой «языка интервалов» (VRackDB)
 j.allRows();               // все строки в порядке записи
 j.tail(10);                // последние 10 строк; старые сегменты не читаются зря
 j.page(10, 20);            // limit/offset по журналу (asc/desc); см. «Пагинация» ниже
@@ -569,6 +585,7 @@ data/
 | `src/columns.ts` | Шесть типов колонок: Raw, Dictionary, Delta, RLE, Auto, Catchall |
 | `src/segment.ts` | Сегмент: набор колонок + дедупликация строк (dedupMap) |
 | `src/journal.ts` | Журнал: открытие/закрытие, WAL, блокировки, flush, clear(), purge(), timeline(), page()/tail(), compact(), запросы |
+| `src/interval.ts` | «Язык интервалов» (VRackDB-совместимо, в мс): parseInterval, partOfPeriod, period, roundTime, getIntervals |
 | `src/store.ts` | Хранилище нескольких журналов с общим кэшем сегментов |
 | `src/cache.ts` | LRU-кэш (используется Journal и Store) |
 | `src/codec.ts` | Формат файла v2: gzip + CRC32; чтение старых v1-файлов |
@@ -576,7 +593,7 @@ data/
 ## Тесты
 
 ```bash
-npm test          # 10 сценариев, ~545 проверок
+npm test          # 11 сценариев, ~590 проверок
 npm run typecheck # tsc --noEmit в strict-режиме
 ```
 
@@ -587,6 +604,8 @@ npm run typecheck # tsc --noEmit в strict-режиме
 (быстрое удаление сегментов по .meta, перекодирование пересекающего, строки
 без ts не удаляются, WAL не «оживляет» после reopen); timeline
 (бакеты по времени: счётчики, «где есть данные», сегменты вне периода не читаются);
+interval
+(«язык интервалов» VRackDB: parseInterval, relative periods, roundTime);
 надёжность
 (WAL-восстановление после имитированного краха, блокировки).
 

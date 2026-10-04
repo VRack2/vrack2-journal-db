@@ -5,6 +5,7 @@
 export { Journal } from './journal.ts';
 export { Store } from './store.ts';
 export { Segment } from './segment.ts';
+export { Interval } from './interval.ts';
 export { LRUCache } from './cache.ts';
 export { encodeSegment, decodeSegment, isCompressedFormat } from './codec.ts';
 export {

@@ -19,6 +19,7 @@ import path from 'node:path';
 import { Segment } from './segment.ts';
 import { LRUCache } from './cache.ts';
 import { decodeSegment, encodeSegment } from './codec.ts';
+import { Interval } from './interval.ts';
 import type {
   CompactResult,
   JournalOptions,
@@ -40,6 +41,20 @@ const META_SUFFIX = '.meta';
 const DEFAULT_WAL_BATCH_ROWS = 512;
 /** ...или сколько байтов накоплено (защита от больших строк). */
 const WAL_FLUSH_BYTES = 1_000_000;
+
+/**
+ * Число (мс) или строка «языка интервалов» (VRackDB-совместимо, см. Interval)
+ * вида 'now-1d'/'now'/'1700000000000' → миллисекунды. Числа проходят как есть.
+ */
+function resolveTs(value: number | string, label: string): number {
+  if (typeof value === 'string') {
+    return Interval.partOfPeriod(value);
+  }
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new RangeError(`Journal: ${label} — число (мс) или строка вида now-1d/now`);
+  }
+  return value;
+}
 
 // --------------------------------------------------
 // Сброс WAL-буферов всех открытых журналов при выходе процесса:
@@ -380,14 +395,16 @@ export class Journal {
    * границу, перекодируется без старых строк (атомарно). Активный сегмент
    * сначала дописывается на диск, WAL обрезается — после purge() reopen
    * не вернёт удалённые строки. Журнал остаётся открытым и пригодным к записи.
+   *
+   * `beforeTs` — число (мс) или строка «языка интервалов» (VRackDB):
+   * `purge('now-30d')` = удалить всё старше 30 дней назад.
    */
-  purge(beforeTs: number): PurgeResult {
+  purge(beforeTs: number | string): PurgeResult {
     if (!this.isOpen) {
       throw new Error('Journal not open. Call open() first.');
     }
-    if (typeof beforeTs !== 'number' || !Number.isFinite(beforeTs)) {
-      throw new RangeError('Journal: purge() принимает конечное число ts');
-    }
+    // Граница: число (мс) или строка вида 'now-1d' (удалить всё старше N дней назад)
+    const before = resolveTs(beforeTs, 'purge(beforeTs)');
 
     // Активный сегмент — на диск, WAL — срезан: дальше всё единообразно
     if (this.activeSegment) {
@@ -414,7 +431,7 @@ export class Journal {
       // Безопасно только если знаем, что строк без ts НЕТ: иначе fast-path
       // удалил бы и их (строки без ts не удаляются никогда).
       if (
-        maxTs !== null && maxTs < beforeTs &&
+        maxTs !== null && maxTs < before &&
         rowCount !== null && tsCount !== null && tsCount === rowCount
       ) {
         removedRows += rowCount;
@@ -423,7 +440,7 @@ export class Journal {
         continue;
       }
       // Целиком новее границы — не трогаем
-      if (minTs !== null && minTs >= beforeTs) {
+      if (minTs !== null && minTs >= before) {
         continue;
       }
 
@@ -433,7 +450,7 @@ export class Journal {
       for (let i = 0; i < seg.rowCount; i++) {
         const row = seg.getRow(i);
         const ts = row.ts;
-        if (typeof ts !== 'number' || ts >= beforeTs) kept.push(row);
+        if (typeof ts !== 'number' || ts >= before) kept.push(row);
       }
       const dropped = seg.rowCount - kept.length;
       if (dropped === 0) continue; // старых строк нет — файл остаётся как есть
@@ -474,36 +491,56 @@ export class Journal {
    * и считает в каждом, сколько строк с ts в [start_бакета, end_бакета).
    * `hasData` = count > 0. Строки без ts не попадают в таймлайн.
    *
+   * `interval` — число (мс) или строка вида '1h'/'30m' (VRackDB-совместимо, см. Interval).
+   * `period` — [start, end] в мс или строка вида 'now-7d:now'.
+   *
    * Дёшево: сегмент, не пересекающий период, не читается (решение по min/max
    * из сайдкар'а .meta). Читаются только сегменты, пересекающие хотя бы один
    * бакет — и то один раз (кэш), строки бинуются в бакет по ts.
    */
-  timeline(interval: number, period: [number, number]): TimelineBucket[] {
+  timeline(interval: number | string, period: [number, number] | string): TimelineBucket[] {
     if (!this.isOpen) {
       throw new Error('Journal not open. Call open() first.');
     }
-    if (typeof interval !== 'number' || !Number.isFinite(interval) || interval <= 0) {
-      throw new RangeError('Journal: timeline() — interval должно быть положительным числом (мс)');
+
+    // Интервал: число (мс) или строка вида '1h'/'30m' (VRackDB-совместимо)
+    let int: number;
+    if (typeof interval === 'string') {
+      int = Interval.parseInterval(interval);
+    } else if (typeof interval !== 'number' || !Number.isFinite(interval)) {
+      throw new RangeError('Journal: timeline() — interval: число (мс) или строка вида 1h/30m');
+    } else {
+      int = interval;
     }
-    if (!Array.isArray(period) || period.length < 2) {
-      throw new RangeError('Journal: timeline() — период должен быть [start, end]');
+    if (int <= 0) {
+      throw new RangeError('Journal: timeline() — interval должно быть > 0 (мс)');
     }
-    const [start, end] = period;
+
+    // Период: [start, end] в мс или строка вида 'now-7d:now'
+    let start: number;
+    let end: number;
+    if (typeof period === 'string') {
+      [start, end] = Interval.period(period);
+    } else if (!Array.isArray(period) || period.length < 2) {
+      throw new RangeError('Journal: timeline() — период: [start, end] (мс) или строка вида now-7d:now');
+    } else {
+      [start, end] = period;
+    }
     if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
-      throw new RangeError('Journal: timeline() — период должен быть [число, число] (мс)');
+      throw new RangeError('Journal: timeline() — период: [число, число] (мс)');
     }
     if (end < start) {
       throw new RangeError('Journal: timeline() — период: start должен быть <= end');
     }
     if (end === start) return [];
 
-    const n = Math.ceil((end - start) / interval);
+    const n = Math.ceil((end - start) / int);
     const counts = new Array<number>(n).fill(0);
 
     /** ts из [start, end) → индекс бакета; иначе игнорируем. */
     const bin = (ts: number): void => {
       if (ts < start || ts >= end) return;
-      counts[Math.floor((ts - start) / interval)]++;
+      counts[Math.floor((ts - start) / int)]++;
     };
 
     // Закрытые сегменты: по .meta пропускаем те, что точно вне периода
@@ -530,10 +567,10 @@ export class Journal {
 
     const buckets: TimelineBucket[] = new Array(n);
     for (let i = 0; i < n; i++) {
-      const bStart = start + i * interval;
+      const bStart = start + i * int;
       buckets[i] = {
         start: bStart,
-        end: Math.min(bStart + interval, end), // последний бакет = period.end
+        end: Math.min(bStart + int, end), // последний бакет = period.end
         count: counts[i],
         hasData: counts[i] > 0
       };
@@ -589,25 +626,28 @@ export class Journal {
     return marks.sort((a, b) => a - b);
   }
 
-  query(startTime: number, endTime: number): Row[] {
+  query(startTime: number | string, endTime: number | string): Row[] {
+    // Границы: число (мс) или строка «языка интервалов» (VRackDB): 'now-7d', 'now'
+    const start = resolveTs(startTime, 'query(startTime)');
+    const end = resolveTs(endTime, 'query(endTime)');
     const results: Row[] = [];
 
     for (const id of [...this.segmentIndex.keys()]) {
       // Границы из сайдкар'а .meta: сегмент вне диапазона не читается вообще
       const meta = this.segmentMeta.get(id);
       if (meta && meta.minTs !== null && meta.maxTs !== null) {
-        if (meta.maxTs < startTime || meta.minTs > endTime) continue;
+        if (meta.maxTs < start || meta.minTs > end) continue;
       }
 
       const seg = this._loadClosedSegment(id);
       if (seg.minTs !== null && seg.maxTs !== null) {
         // Повторная проверка на данных (сайдкар мог отсутствовать/устаревать)
-        if (seg.maxTs < startTime || seg.minTs > endTime) continue;
+        if (seg.maxTs < start || seg.minTs > end) continue;
       }
 
       for (let i = 0; i < seg.rowCount; i++) {
         const ts = seg.get('ts', i);
-        if (typeof ts === 'number' && ts >= startTime && ts <= endTime) {
+        if (typeof ts === 'number' && ts >= start && ts <= end) {
           results.push(this._normalizeRow(seg.getRow(i)));
         }
       }
@@ -618,7 +658,7 @@ export class Journal {
     if (active && active.rowCount > 0) {
       for (let i = 0; i < active.rowCount; i++) {
         const ts = active.get('ts', i);
-        if (typeof ts === 'number' && ts >= startTime && ts <= endTime) {
+        if (typeof ts === 'number' && ts >= start && ts <= end) {
           results.push(this._normalizeRow(active.getRow(i)));
         }
       }

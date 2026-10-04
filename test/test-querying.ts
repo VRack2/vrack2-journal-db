@@ -218,5 +218,34 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   q.close();
 }
 
+// --------------------------------------------------
+// 11. Строковые границы (VRackDB-совместимо) — то же, что числа
+// --------------------------------------------------
+{
+  const j = new Journal(baseDir, { rowsPerSegment: 3 });
+  j.open('strq', schema);
+  for (let i = 0; i < 10; i++) j.append({ ts: i * 10, val: `v${i}` }); // ts = 0..90
+  j.close();
+
+  const q = new Journal(baseDir);
+  q.open('strq', schema);
+
+  // абсолютные строки === числа
+  const abs = q.query('20', '60');
+  assert(abs.length === 5, `query('20','60'): 5 строк (факт ${abs.length})`);
+  assert(abs.map(x => x.ts).join(',') === '20,30,40,50,60', `те же, что query(20,60) (факт ${abs.map(x => x.ts).join(',')})`);
+
+  // пустой диапазон строкой
+  const empty = q.query('95', '100');
+  assert(empty.length === 0, `query('95','100'): пусто (факт ${empty.length})`);
+
+  // некорректная строка → RangeError
+  let threw = false;
+  try { q.query('yesterday', 'now'); } catch (e) { threw = e instanceof RangeError; }
+  assert(threw, "query('yesterday','now') → RangeError");
+
+  q.close();
+}
+
 console.log(`\nТесты запросов: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

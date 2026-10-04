@@ -166,5 +166,36 @@ const TS_RAW: Schema = { ts: 'raw', val: 'dictionary' };
   j.close();
 }
 
+// --------------------------------------------------
+// 8. Строковые интервалы и период (VRackDB-совместимо)
+// --------------------------------------------------
+{
+  const j = new Journal(baseDir, { rowsPerSegment: 100 });
+  j.open('t8', TS_DELTA);
+  j.append({ ts: base + 1000, val: 'a' });   // день 0
+  j.append({ ts: base + 2000, val: 'b' });   // день 0
+
+  // interval как строка '1d'
+  const tl = j.timeline('1d', [base, base + 2 * DAY]);
+  assert(tl.length === 2, `interval '1d': 2 бакета (факт ${tl.length})`);
+  assert(tl[0].count === 2 && tl[1].count === 0, `day0=2, day1=0 (факт ${tl[0].count}/${tl[1].count})`);
+  assert(tl[0].start === base && tl[0].end === base + DAY, "границы бакета для '1d'");
+
+  // period как строка (абсолютное время → детерминированно)
+  const tlStr = j.timeline('1d', `${base}:${base + 2 * DAY}`);
+  assert(tlStr.length === 2 && tlStr[0].count === 2, `period строкой: day0=2 (факт ${tlStr[0]?.count})`);
+
+  // interval '30m' = 1_800_000 мс → за день 48 бакетов
+  const tl30 = j.timeline('30m', [base, base + DAY]);
+  assert(tl30.length === 48, `'30m' за день → 48 бакетов (факт ${tl30.length})`);
+  assert(tl30[0].count === 2, "первый бакет '30m' содержит обе строки");
+
+  // string interval '0' → ошибка (<= 0)
+  let threw = false;
+  try { j.timeline('0', [base, base + DAY]); } catch { threw = true; }
+  assert(threw, "interval '0' → RangeError");
+  j.close();
+}
+
 console.log(`\nТесты timeline: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

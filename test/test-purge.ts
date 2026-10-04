@@ -168,5 +168,39 @@ const segFiles = (name: string): string[] =>
   j.close();
 }
 
+// --------------------------------------------------
+// 6. Строковая граница (VRackDB-совместимо): 'now-1d', абсолютное время
+// --------------------------------------------------
+{
+  const D = 86_400_000;
+  const now = Date.now();
+  const j = new Journal(baseDir, { rowsPerSegment: 3 });
+  j.open('str', schema);
+  j.append({ ts: now - 2 * D, val: 'old' });     // старше now-1d
+  j.append({ ts: now - 3_600_000, val: 'recent' }); // новее now-1d
+  j.append({ ts: now, val: 'now' });
+
+  // относительная граница: 'now-1d' — удалит только 'old' (ts < now-1d)
+  const resRel = j.purge('now-1d');
+  assert(resRel.removedRows === 1, `'now-1d': удалена 1 строка (факт ${resRel.removedRows})`);
+  assert(j.allRows().length === 2, `'now-1d': остались 2 свежие (факт ${j.allRows().length})`);
+
+  j.close();
+
+  // абсолютная строка === то же число
+  const j2 = new Journal(baseDir, { rowsPerSegment: 3 });
+  j2.open('str2', schema);
+  j2.append({ ts: now - 2 * D, val: 'old' });
+  j2.append({ ts: now, val: 'now' });
+  const boundary = String(now - 3_600_000);
+  const resAbs = j2.purge(boundary);
+  assert(resAbs.removedRows === 1, `абсолютная строка: удалена 1 (факт ${resAbs.removedRows})`);
+  assert(
+    j2.allRows().every(r => (r.ts as number) >= now - 3_600_000),
+    'абсолютная строка: остались ts >= границы'
+  );
+  j2.close();
+}
+
 console.log(`\nТесты purge: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
