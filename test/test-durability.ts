@@ -143,7 +143,9 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
 // 5. clear(): полный сброс памяти и диска, журнал готов к записи
 // --------------------------------------------------
 {
-  const j = new Journal(baseDir); // rowsPerSegment=100 по умолчанию
+  // Явное маленькое rowsPerSegment: проверяем, что flush сработал на диске,
+  // а clear() его стирает (не зависит от дефолта сегмента).
+  const j = new Journal(baseDir, { rowsPerSegment: 100 });
   j.open('wiped', schema);
   for (let i = 0; i < 150; i++) {
     j.append({ ts: i, val: `x${i}` });

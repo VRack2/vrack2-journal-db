@@ -4,7 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Journal } from './journal.ts';
+import { Journal, DEFAULT_ROWS_PER_SEGMENT } from './journal.ts';
 import { Segment } from './segment.ts';
 import { LRUCache } from './cache.ts';
 import { decodeSegment } from './codec.ts';
@@ -34,7 +34,7 @@ export class Store {
     this.baseDir = baseDir;
     this.journalsDir = path.join(baseDir, 'journals');
     this.maxCacheSize = opts.maxCacheSize ?? 20;
-    this.defaultRowsPerSegment = opts.defaultRowsPerSegment ?? 100;
+    this.defaultRowsPerSegment = opts.defaultRowsPerSegment ?? DEFAULT_ROWS_PER_SEGMENT;
     const lock = opts.lock ?? 'pid';
     if (lock !== 'pid' && lock !== 'off') {
       throw new RangeError("Store: lock должно быть 'pid' или 'off'");

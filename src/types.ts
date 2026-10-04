@@ -120,6 +120,10 @@ export interface TimelineBucket {
 export type LockMode = 'pid' | 'off';
 
 export interface JournalOptions {
+  /** Сколько строк в одном файле сегмента до flush'а (по умолчанию 10 000).
+   *  Меньше — больше файлов (удобно для тестов и точной дедупликации);
+   *  больше — меньше операций ФС и износа SSD, но крупнее перекодирование
+   *  «пересекающего» сегмента при purge/compact. */
   rowsPerSegment?: number;
   maxCachedSegments?: number;
   /** Размер пачки WAL: сколько строк накапливать в памяти перед записью на диск.

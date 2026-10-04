@@ -37,6 +37,16 @@ const LOCK_FILE = '.lock';
 const WAL_FILE = 'wal.log';
 const META_SUFFIX = '.meta';
 
+/**
+ * Сколько строк набирается в один сегмент до flush'а на диск (по умолчанию).
+ * Крупный дефолт осознанно: меньше файлов/unlink на SSD (меньше износа и
+ * метаданных, записи постраничные и последовательные), а «пересекающий»
+ * сегмент при purge/compact остаётся перекодируемым за разумное время.
+ * Для чёткого контроля числа файлов сегментов (тесты, дедупликация)
+ * передавайте меньшее `rowsPerSegment` явно.
+ */
+export const DEFAULT_ROWS_PER_SEGMENT = 10_000;
+
 /** Пачка WAL по умолчанию: сколько строк копится в памяти перед записью на диск. */
 const DEFAULT_WAL_BATCH_ROWS = 512;
 /** ...или сколько байтов накоплено (защита от больших строк). */
@@ -138,7 +148,7 @@ export class Journal {
   constructor(baseDir: string, opts: JournalOptions = {}) {
     this.baseDir = baseDir;
     this.journalsDir = path.join(baseDir, 'journals');
-    this.rowsPerSegment = opts.rowsPerSegment ?? 100;
+    this.rowsPerSegment = opts.rowsPerSegment ?? DEFAULT_ROWS_PER_SEGMENT;
     this.maxCachedSegments = opts.maxCachedSegments ?? 32;
     const batch = opts.walBatchSize ?? DEFAULT_WAL_BATCH_ROWS;
     if (!Number.isInteger(batch) || batch < 1) {
