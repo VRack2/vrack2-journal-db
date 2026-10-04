@@ -219,7 +219,60 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
 }
 
 // --------------------------------------------------
-// 11. Строковые границы (VRackDB-совместимо) — то же, что числа
+// 11. Хронологический порядок сегментов по id (регрессия: сортировка по nonce)
+//     id сегмента — seg_<tsMs>_<counter>_<nonce>; порядок = (tsMs, counter).
+//     Имена файлов подстроены так, что старая сортировка «по последнему
+//     числовому суффиксу» (который теперь — nonce) ставила сегменты не в
+//     хронологическом порядке:
+//       - старые данные (ts=0)  → nonce из цифр  → старый ключ = большое число
+//       - новые данные (ts=100) → nonce с буквой → старый ключ = -1
+//     Старый код читал бы новые данные первыми; новый — строго по хронологии.
+// --------------------------------------------------
+{
+  const dir = path.join(baseDir, 'journals', 'ordid');
+
+  const a = new Journal(baseDir, { rowsPerSegment: 1000 });
+  a.open('ordid', schema);
+  a.append({ ts: 0, val: 'old' });
+  a.close();
+
+  const b = new Journal(baseDir, { rowsPerSegment: 1000 });
+  b.open('ordid', schema);
+  b.append({ ts: 100, val: 'new' });
+  b.close();
+
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  assert(files.length === 2, `ordid: 2 сегмента на диске (факт ${files.length})`);
+  const metaOf = (f: string) => JSON.parse(fs.readFileSync(path.join(dir, `${f}.meta`), 'utf-8'));
+  const oldFile = files.find(f => metaOf(f).minTs === 0);
+  const newFile = files.find(f => metaOf(f).minTs === 100);
+  assert(!!oldFile && !!newFile, 'ordid: сегменты с ts 0 и 100 найдены');
+  const renames: Array<[string, string]> = [
+    [oldFile!, 'seg_2000_0_123456.json'], // старый — nonce из цифр
+    [newFile!, 'seg_3000_1_abcdef.json']  // новый — nonce с буквой
+  ];
+  for (const [src, dst] of renames) {
+    if (src === dst) continue;
+    fs.renameSync(path.join(dir, src), path.join(dir, dst));
+    fs.renameSync(path.join(dir, `${src}.meta`), path.join(dir, `${dst}.meta`));
+  }
+
+  const q = new Journal(baseDir);
+  q.open('ordid', schema);
+
+  const all = q.allRows().map(x => `${x.ts}:${x.val}`).join(',');
+  assert(all === '0:old,100:new', `allRows: старые данные раньше новых, независимо от nonce (факт ${all})`);
+
+  assert(q.page(2).map(x => x.ts).join(',') === '0,100', `page(2): хронология (факт ${q.page(2).map(x => x.ts).join(',')})`);
+  assert(q.page(2, 0, 'desc').map(x => x.ts).join(',') === '100,0', `page(2,'desc'): новые → старые (факт ${q.page(2, 0, 'desc').map(x => x.ts).join(',')})`);
+  assert(q.tail(2).map(x => x.ts).join(',') === '0,100', `tail(2): старые → новые (факт ${q.tail(2).map(x => x.ts).join(',')})`);
+  assert(q.query(0, 100).map(x => x.ts).join(',') === '0,100', `query(0..100): хронология (факт ${q.query(0, 100).map(x => x.ts).join(',')})`);
+
+  q.close();
+}
+
+// --------------------------------------------------
+// 12. Строковые границы (VRackDB-совместимо) — то же, что числа
 // --------------------------------------------------
 {
   const j = new Journal(baseDir, { rowsPerSegment: 3 });

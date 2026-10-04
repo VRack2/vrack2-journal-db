@@ -642,7 +642,7 @@ export class Journal {
     const end = resolveTs(endTime, 'query(endTime)');
     const results: Row[] = [];
 
-    for (const id of [...this.segmentIndex.keys()]) {
+    for (const id of this._sortedClosedIds()) {
       // Границы из сайдкар'а .meta: сегмент вне диапазона не читается вообще
       const meta = this.segmentMeta.get(id);
       if (meta && meta.minTs !== null && meta.maxTs !== null) {
@@ -903,7 +903,9 @@ export class Journal {
   }
 
   private _loadAllClosed(): Segment[] {
-    return [...this.segmentIndex.keys()].map(id => this._loadClosedSegment(id));
+    // Хронологический порядок (см. _sortedClosedIds) — порядок строк в
+    // allRows()/allSegments() должен совпадать с порядком записи.
+    return this._sortedClosedIds().map(id => this._loadClosedSegment(id));
   }
 
   allSegments(): Segment[] {
@@ -929,13 +931,26 @@ export class Journal {
     fs.renameSync(`${metaPath}.tmp`, metaPath); // атомарно — «сироты» не остаются
   }
 
-  /** id закрытых сегментов в хронологическом порядке (по числовому суффиксу). */
+  /**
+   * id закрытых сегментов в хронологическом порядке.
+   * Формат id: `seg_<tsMs>_<counter>_<nonce>` (nonce — случайный хекс,
+   * защита от коллизий между инстансами). Порядок определяется парой
+   * (tsMs, counter) — порядком создания; nonce — лишь финальный
+   * детерминированный тай-брейкер для id, созданных в одну миллисекунду.
+   * (Сортировка «по последнему числовому суффиксу» не работает: суффикс —
+   * это nonce, и при буквах в нём regex не срабатывает.)
+   */
   private _sortedClosedIds(): string[] {
-    const key = (id: string): number => {
-      const m = id.match(/_(\d+)$/);
-      return m ? Number(m[1]) : -1;
+    const key = (id: string): [number, number, string] => {
+      const m = id.match(/^seg_(\d+)_(\d+)_(.+)$/);
+      return m ? [Number(m[1]), Number(m[2]), m[3]] : [0, 0, id];
     };
-    return [...this.segmentIndex.keys()].sort((a, b) => key(a) - key(b));
+    return [...this.segmentIndex.keys()].sort((a, b) => {
+      const ka = key(a), kb = key(b);
+      if (ka[0] !== kb[0]) return ka[0] - kb[0];
+      if (ka[1] !== kb[1]) return ka[1] - kb[1];
+      return ka[2] < kb[2] ? -1 : ka[2] > kb[2] ? 1 : 0;
+    });
   }
 
   // --------------------------------------------------
