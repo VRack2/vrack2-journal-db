@@ -75,6 +75,9 @@ export interface SerializedSegment {
   metadata: Metadata;
   rowCount: number;
   physicalRowCount: number;
+  /** Сколько строк несёт числовой ts (строки без ts не учитываются).
+   *  Опционально: отсутствует в файлах до этой версии поля. */
+  tsCount?: number;
   minTs: number | null;
   maxTs: number | null;
   rowMap: number[];
@@ -87,6 +90,27 @@ export interface CompactResult {
   logicalRows: number;
   physicalBefore: number;
   physicalAfter: number;
+}
+
+export interface PurgeResult {
+  /** Сколько строк удалено из журнала. */
+  removedRows: number;
+  /** Сколько сегментов удалено целиком (старше границы, без чтения файлов). */
+  removedSegments: number;
+  /** Сколько сегментов перекодировано без старых строк (пересекали границу). */
+  rewrittenSegments: number;
+}
+
+/** Один бакет таймлайна: интервал времени и сколько строк в нём. */
+export interface TimelineBucket {
+  /** Начало бакета (ms, включительно). */
+  start: number;
+  /** Конец бакета (ms, не включительно; у последнего = period.end). */
+  end: number;
+  /** Сколько строк с ts в [start, end). Строки без ts не считаются. */
+  count: number;
+  /** Есть ли данные в бакете (count > 0). */
+  hasData: boolean;
 }
 
 // --------------------------------------------------

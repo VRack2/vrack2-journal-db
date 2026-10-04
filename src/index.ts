@@ -28,12 +28,15 @@ export type {
   JsonValue,
   JournalOptions,
   JournalStats,
+  LockMode,
   Metadata,
   OpenJournalOptions,
+  PurgeResult,
   Row,
   Schema,
   SerializedColumn,
   SerializedSegment,
   StoreOptions,
-  StoreStats
+  StoreStats,
+  TimelineBucket
 } from './types.ts';

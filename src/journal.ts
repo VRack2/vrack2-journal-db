@@ -25,9 +25,11 @@ import type {
   JournalStats,
   LockMode,
   Metadata,
+  PurgeResult,
   Row,
   Schema,
   SerializedSegment,
+  TimelineBucket,
 } from './types.ts';
 
 const LOCK_FILE = '.lock';
@@ -77,6 +79,8 @@ interface SegmentMeta {
   maxTs: number | null;
   rowCount: number;
   physicalRowCount: number;
+  /** Сколько строк несёт числовой ts. `null` — неизвестно (старый .meta). */
+  tsCount: number | null;
 }
 
 export class Journal {
@@ -175,7 +179,8 @@ export class Journal {
               minTs: typeof m.minTs === 'number' ? m.minTs : null,
               maxTs: typeof m.maxTs === 'number' ? m.maxTs : null,
               rowCount: m.rowCount,
-              physicalRowCount: typeof m.physicalRowCount === 'number' ? m.physicalRowCount : m.rowCount
+              physicalRowCount: typeof m.physicalRowCount === 'number' ? m.physicalRowCount : m.rowCount,
+              tsCount: typeof m.tsCount === 'number' ? m.tsCount : null
             });
           }
         } catch {
@@ -366,6 +371,174 @@ export class Journal {
       physicalBefore,
       physicalAfter: merged.physicalRowCount
     };
+  }
+
+  /**
+   * Удаляет строки старше границы: остаются строки с ts >= beforeTs.
+   * Строки без ts никогда не удаляются. Сегменты, целиком старше границы,
+   * удаляются по сайдкар'у .meta без чтения файла; сегмент, пересекающий
+   * границу, перекодируется без старых строк (атомарно). Активный сегмент
+   * сначала дописывается на диск, WAL обрезается — после purge() reopen
+   * не вернёт удалённые строки. Журнал остаётся открытым и пригодным к записи.
+   */
+  purge(beforeTs: number): PurgeResult {
+    if (!this.isOpen) {
+      throw new Error('Journal not open. Call open() first.');
+    }
+    if (typeof beforeTs !== 'number' || !Number.isFinite(beforeTs)) {
+      throw new RangeError('Journal: purge() принимает конечное число ts');
+    }
+
+    // Активный сегмент — на диск, WAL — срезан: дальше всё единообразно
+    if (this.activeSegment) {
+      this._walDrain();
+      if (this.activeSegment.rowCount > 0) {
+        this.flush();
+      } else {
+        this._truncateWAL();
+      }
+    }
+
+    let removedRows = 0;
+    let removedSegments = 0;
+    let rewrittenSegments = 0;
+
+    for (const id of [...this._sortedClosedIds()]) {
+      const meta = this.segmentMeta.get(id);
+      const minTs = meta?.minTs ?? null;
+      const maxTs = meta?.maxTs ?? null;
+      const rowCount = meta?.rowCount ?? null;
+      const tsCount = meta?.tsCount ?? null;
+
+      // Целиком старше границы — удаляем без чтения данных.
+      // Безопасно только если знаем, что строк без ts НЕТ: иначе fast-path
+      // удалил бы и их (строки без ts не удаляются никогда).
+      if (
+        maxTs !== null && maxTs < beforeTs &&
+        rowCount !== null && tsCount !== null && tsCount === rowCount
+      ) {
+        removedRows += rowCount;
+        this._dropClosedSegment(id);
+        removedSegments++;
+        continue;
+      }
+      // Целиком новее границы — не трогаем
+      if (minTs !== null && minTs >= beforeTs) {
+        continue;
+      }
+
+      // Пересекает границу (или границы/состав неизвестны) — перекодируем
+      const seg = this._loadClosedSegment(id);
+      const kept: Row[] = [];
+      for (let i = 0; i < seg.rowCount; i++) {
+        const row = seg.getRow(i);
+        const ts = row.ts;
+        if (typeof ts !== 'number' || ts >= beforeTs) kept.push(row);
+      }
+      const dropped = seg.rowCount - kept.length;
+      if (dropped === 0) continue; // старых строк нет — файл остаётся как есть
+
+      removedRows += dropped;
+      const fresh = new Segment(seg.id, this.schema!, this.metadata ?? {});
+      for (const row of kept) fresh.append(row);
+
+      const fileName = this.segmentIndex.get(id)!;
+      const filePath = path.join(this.journalPath(), fileName);
+      fs.writeFileSync(`${filePath}.tmp`, encodeSegment(fresh.serialize()));
+      fs.renameSync(`${filePath}.tmp`, filePath); // атомарно — краш не оставит «половину»
+      this._writeMeta(fresh, fileName);
+      this._segmentCache.set(id, fresh);
+      rewrittenSegments++;
+    }
+
+    // Свободный активный сегмент — журнал открыт и готов к записи
+    this._createNewActiveSegment();
+
+    return { removedRows, removedSegments, rewrittenSegments };
+  }
+
+  /** Убирает закрытый сегмент: файл, сайдкар, индекс, кэш, метаданные. */
+  private _dropClosedSegment(id: string): void {
+    const oldFile = this.segmentIndex.get(id);
+    if (oldFile) {
+      fs.unlinkSync(path.join(this.journalPath(), oldFile));
+      fs.rmSync(path.join(this.journalPath(), `${oldFile}${META_SUFFIX}`), { force: true });
+    }
+    this.segmentIndex.delete(id);
+    this._segmentCache.delete(id);
+    this.segmentMeta.delete(id);
+  }
+
+  /**
+   * Таймлайн: разбивает период [start, end] на бакеты шириной `interval` (мс)
+   * и считает в каждом, сколько строк с ts в [start_бакета, end_бакета).
+   * `hasData` = count > 0. Строки без ts не попадают в таймлайн.
+   *
+   * Дёшево: сегмент, не пересекающий период, не читается (решение по min/max
+   * из сайдкар'а .meta). Читаются только сегменты, пересекающие хотя бы один
+   * бакет — и то один раз (кэш), строки бинуются в бакет по ts.
+   */
+  timeline(interval: number, period: [number, number]): TimelineBucket[] {
+    if (!this.isOpen) {
+      throw new Error('Journal not open. Call open() first.');
+    }
+    if (typeof interval !== 'number' || !Number.isFinite(interval) || interval <= 0) {
+      throw new RangeError('Journal: timeline() — interval должно быть положительным числом (мс)');
+    }
+    if (!Array.isArray(period) || period.length < 2) {
+      throw new RangeError('Journal: timeline() — период должен быть [start, end]');
+    }
+    const [start, end] = period;
+    if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
+      throw new RangeError('Journal: timeline() — период должен быть [число, число] (мс)');
+    }
+    if (end < start) {
+      throw new RangeError('Journal: timeline() — период: start должен быть <= end');
+    }
+    if (end === start) return [];
+
+    const n = Math.ceil((end - start) / interval);
+    const counts = new Array<number>(n).fill(0);
+
+    /** ts из [start, end) → индекс бакета; иначе игнорируем. */
+    const bin = (ts: number): void => {
+      if (ts < start || ts >= end) return;
+      counts[Math.floor((ts - start) / interval)]++;
+    };
+
+    // Закрытые сегменты: по .meta пропускаем те, что точно вне периода
+    for (const id of this._sortedClosedIds()) {
+      const meta = this.segmentMeta.get(id);
+      if (meta && meta.minTs !== null && meta.maxTs !== null) {
+        if (meta.maxTs < start || meta.minTs >= end) continue; // не пересекает период
+      }
+      const seg = this._loadClosedSegment(id);
+      for (let i = 0; i < seg.rowCount; i++) {
+        const ts = seg.get('ts', i);
+        if (typeof ts === 'number') bin(ts);
+      }
+    }
+
+    // Активный сегмент — уже в памяти
+    const active = this.activeSegment;
+    if (active) {
+      for (let i = 0; i < active.rowCount; i++) {
+        const ts = active.get('ts', i);
+        if (typeof ts === 'number') bin(ts);
+      }
+    }
+
+    const buckets: TimelineBucket[] = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const bStart = start + i * interval;
+      buckets[i] = {
+        start: bStart,
+        end: Math.min(bStart + interval, end), // последний бакет = period.end
+        count: counts[i],
+        hasData: counts[i] > 0
+      };
+    }
+    return buckets;
   }
 
   // --------------------------------------------------
@@ -672,7 +845,8 @@ export class Journal {
       minTs: seg.minTs,
       maxTs: seg.maxTs,
       rowCount: seg.rowCount,
-      physicalRowCount: seg.physicalRowCount || seg.rowCount
+      physicalRowCount: seg.physicalRowCount || seg.rowCount,
+      tsCount: seg.tsCount
     });
     this._segmentCache.set(id, seg);
     return seg;
@@ -696,7 +870,8 @@ export class Journal {
       minTs: seg.minTs,
       maxTs: seg.maxTs,
       rowCount: seg.rowCount,
-      physicalRowCount: seg.physicalRowCount || seg.rowCount
+      physicalRowCount: seg.physicalRowCount || seg.rowCount,
+      tsCount: seg.tsCount
     };
     this.segmentMeta.set(seg.id, meta);
     const metaPath = path.join(this.journalPath(), `${fileName}${META_SUFFIX}`);

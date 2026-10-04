@@ -14,6 +14,8 @@ export class Segment {
   rowMap: number[] = [];       // логический индекс → физический индекс
   rowCount = 0;
   physicalRowCount = 0;
+  /** Сколько строк несёт числовой ts — нужно purge(), чтобы не удалять строки без ts. */
+  tsCount = 0;
   minTs: number | null = null;
   maxTs: number | null = null;
 
@@ -40,6 +42,7 @@ export class Segment {
   append(row: Row): void {
     const ts = row.ts;
     if (typeof ts === 'number') {
+      this.tsCount++;
       if (this.minTs === null || ts < this.minTs) this.minTs = ts;
       if (this.maxTs === null || ts > this.maxTs) this.maxTs = ts;
     }
@@ -136,6 +139,7 @@ export class Segment {
       metadata: this.metadata,
       rowCount: this.rowCount,
       physicalRowCount: this.physicalRowCount,
+      tsCount: this.tsCount,
       minTs: this.minTs,
       maxTs: this.maxTs,
       rowMap: this.rowMap,
@@ -159,6 +163,20 @@ export class Segment {
       segment.columns[fieldName].deserialize(serializedData);
     }
 
+    // tsCount берём из файла; для старых сегментов (до этого поля) считаем сами —
+    // purge() опирается на него, чтобы не удалить строки без ts.
+    segment.tsCount = typeof data.tsCount === 'number' ? data.tsCount : segment._countTsRows();
     return segment;
+  }
+
+  /** Сколько строк несёт числовой ts (строки без ts не учитываются). */
+  private _countTsRows(): number {
+    const tsCol = this.columns['ts'];
+    if (!tsCol) return 0;
+    let n = 0;
+    for (let i = 0; i < this.rowCount; i++) {
+      if (typeof this.get('ts', i) === 'number') n++;
+    }
+    return n;
   }
 }
