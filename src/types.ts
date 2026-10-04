@@ -82,6 +82,50 @@ export interface SerializedSegment {
   maxTs: number | null;
   rowMap: number[];
   columns: Record<string, SerializedColumn>;
+  /** Сегментные саммари числовых колонок (min/max/sum/count по непустым
+   *  числовым значениям). Опционально: отсутствует в старых файлах —
+   *  Segment.deserialize() пересчитывает на лету. */
+  summaries?: Record<string, ColumnSummary>;
+}
+
+// --------------------------------------------------
+// Агрегации (Фаза 1) — min/max/sum/avg/count по диапазону
+// --------------------------------------------------
+
+/** Поддерживаемые агрегационные функции. */
+export type AggFn = 'min' | 'max' | 'sum' | 'avg' | 'count';
+
+/** Выражение агрегации: поле + функция. */
+export interface AggregateExpr {
+  field: string;
+  fn: AggFn;
+}
+
+/** Саммари числовой колонки на сегмент: min/max/sum/count по непустым
+ *  числовым значениям (null/не-числа не считаются). */
+export interface ColumnSummary {
+  min: number;
+  max: number;
+  sum: number;
+  /** Сколько числовых значений учтено (0 — в сегменте их нет). */
+  count: number;
+}
+
+/** Бакет даунсэмплинга: границы + агрегаты `field` в бакете.
+ *  Присутствуют только запрошенные функции (и всегда `count`). */
+export interface DownsampleBucket {
+  /** Начало бакета (ms, включительно). */
+  start: number;
+  /** Конец бакета (ms, не включительно; у последнего = период.end). */
+  end: number;
+  /** Сколько числовых значений `field` в бакете (0 — пустой). */
+  count: number;
+  /** Есть ли данные в бакете (count > 0). */
+  hasData: boolean;
+  min?: number | null;
+  max?: number | null;
+  sum?: number | null;
+  avg?: number | null;
 }
 
 /** Результат компактизации журнала */

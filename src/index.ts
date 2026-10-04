@@ -21,8 +21,12 @@ export {
 } from './columns.ts';
 
 export type {
+  AggregateExpr,
+  AggFn,
+  ColumnSummary,
   CompactResult,
   ColumnType,
+  DownsampleBucket,
   JsonArray,
   JsonObject,
   JsonPrimitive,

@@ -21,7 +21,11 @@ import { LRUCache } from './cache.ts';
 import { decodeSegment, encodeSegment } from './codec.ts';
 import { Interval } from './interval.ts';
 import type {
+  AggregateExpr,
+  AggFn,
+  ColumnSummary,
   CompactResult,
+  DownsampleBucket,
   JournalOptions,
   JournalStats,
   LockMode,
@@ -106,6 +110,44 @@ interface SegmentMeta {
   physicalRowCount: number;
   /** Сколько строк несёт числовой ts. `null` — неизвестно (старый .meta). */
   tsCount: number | null;
+  /** Саммари числовых колонок. `null` — нет в .meta (старый файл). */
+  summaries: Record<string, ColumnSummary> | null;
+}
+
+// --------------------------------------------------
+// Агрегации (Фаза 1) — min/max/sum/avg/count по диапазону
+// --------------------------------------------------
+
+/** Накопитель агрегата: min/max/sum/count по числовым значениям поля. */
+interface AggAcc {
+  min: number;
+  max: number;
+  sum: number;
+  count: number;
+}
+
+const newAcc = (): AggAcc => ({ min: Infinity, max: -Infinity, sum: 0, count: 0 });
+
+/** Прибавляет одно числовое значение к накопителю. */
+function addValue(acc: AggAcc, v: number): void {
+  if (v < acc.min) acc.min = v;
+  if (v > acc.max) acc.max = v;
+  acc.sum += v;
+  acc.count++;
+}
+
+/** Склеивает сегментное саммари в накопитель (fast-path без чтения данных). */
+function addSummary(acc: AggAcc, s: ColumnSummary): void {
+  if (s.count === 0) return;
+  if (s.min < acc.min) acc.min = s.min;
+  if (s.max > acc.max) acc.max = s.max;
+  acc.sum += s.sum;
+  acc.count += s.count;
+}
+
+const AGG_FNS: ReadonlySet<string> = new Set(['min', 'max', 'sum', 'avg', 'count']);
+function isAggFn(fn: unknown): fn is AggFn {
+  return typeof fn === 'string' && AGG_FNS.has(fn);
 }
 
 export class Journal {
@@ -205,7 +247,8 @@ export class Journal {
               maxTs: typeof m.maxTs === 'number' ? m.maxTs : null,
               rowCount: m.rowCount,
               physicalRowCount: typeof m.physicalRowCount === 'number' ? m.physicalRowCount : m.rowCount,
-              tsCount: typeof m.tsCount === 'number' ? m.tsCount : null
+              tsCount: typeof m.tsCount === 'number' ? m.tsCount : null,
+              summaries: (m.summaries && typeof m.summaries === 'object') ? m.summaries : null
             });
           }
         } catch {
@@ -589,6 +632,223 @@ export class Journal {
   }
 
   // --------------------------------------------------
+  // Агрегации (Фаза 1)
+  // --------------------------------------------------
+
+  /**
+   * Агрегация по диапазону [startTs, endTs] (включительно с обеих сторон) —
+   * без материализации строк. Для сегментов, целиком лежащих в диапазоне,
+   * значения берутся из сегментных саммари (сайдкар .meta) без чтения данных;
+   * только граничные сегменты сканируются — и то только запрошенные колонки.
+   *
+   * ```ts
+   * j.aggregate('now-1h', 'now', [
+   *   { field: 'value', fn: 'avg' },
+   *   { field: 'value', fn: 'min' },
+   *   { field: 'value', fn: 'max' },
+   *   { field: 'value', fn: 'count' },
+   * ]);
+   * // → { avg: 42.3, min: 1.0, max: 99.9, count: 7184 }
+   * ```
+   *
+   * Семантика: все функции работают по числовым (конечным) значениям поля;
+   * null/не-числа пропускаются. `count` — количество числовых значений
+   * (0, если их нет); `min/max/sum/avg` — null, если числовых значений нет.
+   * Строки без числового ts не участвуют.
+   * Ключ результата — имя функции; если одна функция запрошена по нескольким
+   * полям, ключи различаются: `поле__fn`.
+   */
+  aggregate(
+    startTs: number | string,
+    endTs: number | string,
+    exprs: AggregateExpr[],
+  ): Record<string, number | null> {
+    if (!this.isOpen) {
+      throw new Error('Journal not open. Call open() first.');
+    }
+    if (!Array.isArray(exprs) || exprs.length === 0) {
+      throw new RangeError('Journal: aggregate() — exprs: непустой массив { field, fn }');
+    }
+    for (const e of exprs) {
+      if (!e || typeof e.field !== 'string' || e.field.length === 0) {
+        throw new RangeError('Journal: aggregate() — expr.field: непустое имя поля');
+      }
+      if (!isAggFn(e.fn)) {
+        throw new RangeError(`Journal: aggregate() — expr.fn: min|max|sum|avg|count (получено ${String(e.fn)})`);
+      }
+    }
+
+    const start = resolveTs(startTs, 'aggregate(startTs)');
+    const end = resolveTs(endTs, 'aggregate(endTs)');
+    if (end < start) {
+      throw new RangeError('Journal: aggregate() — startTs должен быть <= endTs');
+    }
+
+    const fields: string[] = [...new Set(exprs.map(e => e.field))];
+    const accs: Record<string, AggAcc> = {};
+    for (const f of fields) accs[f] = newAcc();
+
+    // Закрытые сегменты
+    for (const id of this._sortedClosedIds()) {
+      const meta = this.segmentMeta.get(id);
+      const minTs = meta?.minTs ?? null;
+      const maxTs = meta?.maxTs ?? null;
+      const summaries = meta?.summaries ?? null;
+
+      // Вне диапазона — не читаем вообще
+      if (minTs !== null && maxTs !== null && (maxTs < start || minTs > end)) {
+        continue;
+      }
+
+      // Целиком в диапазоне + есть саммари → fast-path без чтения данных
+      if (minTs !== null && maxTs !== null && minTs >= start && maxTs <= end && summaries) {
+        let slow: string[] = [];
+        for (const f of fields) {
+          const s = summaries[f];
+          if (s) addSummary(accs[f], s);
+          else slow.push(f);
+        }
+        if (slow.length > 0) {
+          this._scanAggregate(this._loadClosedSegment(id), start, end, slow, accs);
+        }
+        continue;
+      }
+
+      // Граничный / нет .meta / нет саммари — скан запрошенных колонок
+      const seg = this._loadClosedSegment(id);
+      this._scanAggregate(seg, start, end, fields, accs);
+    }
+
+    // Активный сегмент — в памяти
+    const active = this.activeSegment;
+    if (active && active.rowCount > 0) {
+      this._aggregateActive(active, start, end, fields, accs);
+    }
+
+    return this._buildResult(exprs, accs);
+  }
+
+  /**
+   * Даунсэмплинг [startTs, endTs) (конец не включительно, как в timeline())
+   * на бакеты шириной `bucketMs` (выровнены по эпохе через roundTime) +
+   * агрегаты `field` в каждом бакете. Расширение timeline(): там только count,
+   * здесь — min/max/sum/avg/count.
+   *
+   * ```ts
+   * j.downsample('now-1d', 'now', '15m', 'value', ['avg', 'min', 'max']);
+   * // → [{ start, end, count, hasData, avg, min, max }, …]  (96 бакетов)
+   * ```
+   *
+   * Сегмент, не пересекающий период, не читается (решение по .meta).
+   */
+  downsample(
+    startTs: number | string,
+    endTs: number | string,
+    bucketMs: number | string,
+    field: string,
+    fns: AggFn[],
+  ): DownsampleBucket[] {
+    if (!this.isOpen) {
+      throw new Error('Journal not open. Call open() first.');
+    }
+    if (typeof field !== 'string' || field.length === 0) {
+      throw new RangeError('Journal: downsample() — field: непустое имя поля');
+    }
+    if (!Array.isArray(fns) || fns.length === 0) {
+      throw new RangeError('Journal: downsample() — fns: непустой массив min|max|sum|avg|count');
+    }
+    for (const fn of fns) {
+      if (!isAggFn(fn)) {
+        throw new RangeError(`Journal: downsample() — fn: min|max|sum|avg|count (получено ${String(fn)})`);
+      }
+    }
+
+    let bucket: number;
+    if (typeof bucketMs === 'string') {
+      bucket = Interval.parseInterval(bucketMs);
+    } else if (typeof bucketMs !== 'number' || !Number.isFinite(bucketMs)) {
+      throw new RangeError('Journal: downsample() — bucketMs: число (мс) или строка вида 15m/1h');
+    } else {
+      bucket = bucketMs;
+    }
+    if (bucket <= 0) {
+      throw new RangeError('Journal: downsample() — bucketMs должно быть > 0 (мс)');
+    }
+
+    const start = resolveTs(startTs, 'downsample(startTs)');
+    const end = resolveTs(endTs, 'downsample(endTs)');
+    if (end < start) {
+      throw new RangeError('Journal: downsample() — startTs должен быть <= endTs');
+    }
+    if (end === start) return [];
+
+    // Бакеты выровнены по эпохе (roundTime) — границы детерминированы,
+    // что нужно для идемпотентного rollup (Фаза 4).
+    const first = Interval.roundTime(start, bucket); // <= start, кратен bucket
+    const n = Math.max(1, Math.ceil((end - first) / bucket));
+    const accs: AggAcc[] = new Array(n);
+    for (let i = 0; i < n; i++) accs[i] = newAcc();
+
+    const bin = (ts: number): number => {
+      let idx = Math.floor((ts - first) / bucket);
+      if (idx < 0) idx = 0;
+      if (idx >= n) idx = n - 1;
+      return idx;
+    };
+
+    const processSegment = (seg: Segment): void => {
+      if (seg.minTs !== null && seg.maxTs !== null && (seg.maxTs < start || seg.minTs >= end)) {
+        return; // не пересекает период
+      }
+      for (let i = 0; i < seg.rowCount; i++) {
+        const ts = seg.get('ts', i);
+        if (typeof ts !== 'number' || ts < start || ts >= end) continue;
+        const v = seg.get(field, i);
+        if (typeof v !== 'number' || !Number.isFinite(v)) continue;
+        addValue(accs[bin(ts)], v);
+      }
+    };
+
+    for (const id of this._sortedClosedIds()) {
+      // Пропускаем по .meta без чтения файла
+      const meta = this.segmentMeta.get(id);
+      if (meta && meta.minTs !== null && meta.maxTs !== null &&
+        (meta.maxTs < start || meta.minTs >= end)) {
+        continue;
+      }
+      processSegment(this._loadClosedSegment(id));
+    }
+
+    const active = this.activeSegment;
+    if (active && active.rowCount > 0) processSegment(active);
+
+    const buckets: DownsampleBucket[] = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const acc = accs[i];
+      const bStart = first + i * bucket;
+      const bucketObj: Record<string, unknown> = {
+        start: Math.max(bStart, start),
+        end: Math.min(bStart + bucket, end),
+        count: acc.count,
+        hasData: acc.count > 0
+      };
+      for (const fn of fns) {
+        let value: number | null;
+        switch (fn) {
+          case 'count': value = acc.count; break;
+          case 'sum':   value = acc.count > 0 ? acc.sum : null; break;
+          case 'min':   value = acc.count > 0 ? acc.min : null; break;
+          case 'max':   value = acc.count > 0 ? acc.max : null; break;
+          case 'avg':   value = acc.count > 0 ? acc.sum / acc.count : null; break;
+        }
+        bucketObj[fn] = value;
+      }
+      buckets[i] = bucketObj as unknown as DownsampleBucket;
+    }
+    return buckets;
+  }
+
+  // --------------------------------------------------
   // Чтение
   // --------------------------------------------------
 
@@ -896,7 +1156,8 @@ export class Journal {
       maxTs: seg.maxTs,
       rowCount: seg.rowCount,
       physicalRowCount: seg.physicalRowCount || seg.rowCount,
-      tsCount: seg.tsCount
+      tsCount: seg.tsCount,
+      summaries: seg.summaries
     });
     this._segmentCache.set(id, seg);
     return seg;
@@ -916,6 +1177,87 @@ export class Journal {
     return segments;
   }
 
+  // --------------------------------------------------
+  // Агрегации — внутренние
+  // --------------------------------------------------
+
+  /**
+   * Скан сегмента по запрошенным колонкам с фильтром ts в [start, end]
+   * (включительно). Числовые значения прибавляются в накопители.
+   */
+  private _scanAggregate(
+    seg: Segment,
+    start: number,
+    end: number,
+    fields: string[],
+    accs: Record<string, AggAcc>,
+  ): void {
+    if (fields.length === 0) return;
+    for (let i = 0; i < seg.rowCount; i++) {
+      const ts = seg.get('ts', i);
+      if (typeof ts !== 'number' || ts < start || ts > end) continue;
+      for (const f of fields) {
+        const v = seg.get(f, i);
+        if (typeof v === 'number' && Number.isFinite(v)) addValue(accs[f], v);
+      }
+    }
+  }
+
+  /** Активный сегмент: fast-path по своим саммари, иначе скан. */
+  private _aggregateActive(
+    seg: Segment,
+    start: number,
+    end: number,
+    fields: string[],
+    accs: Record<string, AggAcc>,
+  ): void {
+    const minTs = seg.minTs;
+    const maxTs = seg.maxTs;
+    if (minTs !== null && maxTs !== null && (maxTs < start || minTs > end)) return;
+    if (minTs !== null && maxTs !== null && minTs >= start && maxTs <= end) {
+      let slow: string[] = [];
+      for (const f of fields) {
+        const s = seg.summaries[f];
+        if (s) addSummary(accs[f], s);
+        else slow.push(f);
+      }
+      if (slow.length > 0) this._scanAggregate(seg, start, end, slow, accs);
+      return;
+    }
+    this._scanAggregate(seg, start, end, fields, accs);
+  }
+
+  /** Накопители → результат: ключ = fn (или поле__fn при конфликте), пустые → null. */
+  private _buildResult(
+    exprs: AggregateExpr[],
+    accs: Record<string, AggAcc>,
+  ): Record<string, number | null> {
+    // fn → множество полей, использующих его (для различения ключей)
+    const fnFields = new Map<AggFn, Set<string>>();
+    for (const e of exprs) {
+      let s = fnFields.get(e.fn);
+      if (!s) { s = new Set(); fnFields.set(e.fn, s); }
+      s.add(e.field);
+    }
+    const keyFor = (field: string, fn: AggFn): string =>
+      fnFields.get(fn)!.size > 1 ? `${field}__${fn}` : fn;
+
+    const result: Record<string, number | null> = {};
+    for (const e of exprs) {
+      const acc = accs[e.field];
+      let value: number | null;
+      switch (e.fn) {
+        case 'count': value = acc.count; break;
+        case 'sum':   value = acc.count > 0 ? acc.sum : null; break;
+        case 'min':   value = acc.count > 0 ? acc.min : null; break;
+        case 'max':   value = acc.count > 0 ? acc.max : null; break;
+        case 'avg':   value = acc.count > 0 ? acc.sum / acc.count : null; break;
+      }
+      result[keyFor(e.field, e.fn)] = value;
+    }
+    return result;
+  }
+
   /** Сайдкар <файл>.meta — min/max ts + счётчики для query()/stats() без загрузки файла. */
   private _writeMeta(seg: Segment, fileName: string): void {
     const meta: SegmentMeta = {
@@ -923,7 +1265,8 @@ export class Journal {
       maxTs: seg.maxTs,
       rowCount: seg.rowCount,
       physicalRowCount: seg.physicalRowCount || seg.rowCount,
-      tsCount: seg.tsCount
+      tsCount: seg.tsCount,
+      summaries: seg.summaries
     };
     this.segmentMeta.set(seg.id, meta);
     const metaPath = path.join(this.journalPath(), `${fileName}${META_SUFFIX}`);

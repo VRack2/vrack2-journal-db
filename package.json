@@ -32,7 +32,7 @@
   ],
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json",
-    "test": "node test/test-basic.ts && node test/test-optimization.ts && node test/test-querying.ts && node test/test-compression.ts && node test/test-flexschema.ts && node test/test-compaction.ts && node test/test-purge.ts && node test/test-timeline.ts && node test/test-interval.ts && node test/test-durability.ts && node test/test-locking.ts",
+    "test": "node test/test-basic.ts && node test/test-optimization.ts && node test/test-querying.ts && node test/test-compression.ts && node test/test-flexschema.ts && node test/test-compaction.ts && node test/test-purge.ts && node test/test-timeline.ts && node test/test-aggregate.ts && node test/test-interval.ts && node test/test-durability.ts && node test/test-locking.ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build && npm test"
   },

@@ -3,7 +3,7 @@
 // ============================================================
 
 import { createColumn, type Column } from './columns.ts';
-import type { JsonValue, Metadata, Row, Schema, SerializedColumn, SerializedSegment } from './types.ts';
+import type { ColumnSummary, JsonValue, Metadata, Row, Schema, SerializedColumn, SerializedSegment } from './types.ts';
 
 export class Segment {
   readonly id: string;
@@ -18,6 +18,12 @@ export class Segment {
   tsCount = 0;
   minTs: number | null = null;
   maxTs: number | null = null;
+
+  /** Сегментные саммари числовых колонок: поле → {min,max,sum,count}.
+   *  Ведутся по логическим строкам (дубли учитываются, как в getRow).
+   *  Используются aggregate()/downsample() как fast-path для сегментов,
+   *  целиком лежащих в диапазоне. */
+  summaries: Record<string, ColumnSummary> = {};
 
   /** Имя поля-«корзины» (тип catchall) для полей вне схемы, либо null */
   private _catchAllField: string | null = null;
@@ -41,7 +47,8 @@ export class Segment {
 
   append(row: Row): void {
     const ts = row.ts;
-    if (typeof ts === 'number') {
+    const hasTs = typeof ts === 'number';
+    if (hasTs) {
       this.tsCount++;
       if (this.minTs === null || ts < this.minTs) this.minTs = ts;
       if (this.maxTs === null || ts > this.maxTs) this.maxTs = ts;
@@ -64,6 +71,18 @@ export class Segment {
     }
     if (this._catchAllField && Object.keys(extras).length > 0) {
       values[this._catchAllField] = extras;
+    }
+
+    // Саммари числовых колонок — по каждой логической строке (дубли учитываются),
+    // чтобы совпадать с getRow()/aggregate(). Учитываются только строки с числовым
+    // ts (aggregate() их исключает) и только конечные числа (null/не-числа — нет).
+    if (hasTs) {
+      for (const fieldName of this._fields) {
+        const v = values[fieldName];
+        if (typeof v === 'number' && Number.isFinite(v)) {
+          this._updateSummary(fieldName, v);
+        }
+      }
     }
 
     // Дедупликация: последняя уникальная строка всегда лежит под
@@ -126,6 +145,19 @@ export class Segment {
     return false;
   }
 
+  /** Прибавляет одно числовое значение к саммари колонки (создаёт при первом). */
+  private _updateSummary(fieldName: string, value: number): void {
+    let s = this.summaries[fieldName];
+    if (!s) {
+      this.summaries[fieldName] = { min: value, max: value, sum: value, count: 1 };
+      return;
+    }
+    if (value < s.min) s.min = value;
+    if (value > s.max) s.max = value;
+    s.sum += value;
+    s.count++;
+  }
+
   serialize(): SerializedSegment {
     const serializedColumns: Record<string, SerializedColumn> = {};
     for (const [fieldName, column] of Object.entries(this.columns)) {
@@ -143,7 +175,8 @@ export class Segment {
       minTs: this.minTs,
       maxTs: this.maxTs,
       rowMap: this.rowMap,
-      columns: serializedColumns
+      columns: serializedColumns,
+      summaries: this.summaries
     };
   }
 
@@ -166,6 +199,11 @@ export class Segment {
     // tsCount берём из файла; для старых сегментов (до этого поля) считаем сами —
     // purge() опирается на него, чтобы не удалить строки без ts.
     segment.tsCount = typeof data.tsCount === 'number' ? data.tsCount : segment._countTsRows();
+
+    // Саммари числовых колонок: из файла, либо пересчёт (старые сегменты).
+    segment.summaries = (data.summaries && typeof data.summaries === 'object')
+      ? data.summaries
+      : segment._computeSummaries();
     return segment;
   }
 
@@ -178,5 +216,31 @@ export class Segment {
       if (typeof this.get('ts', i) === 'number') n++;
     }
     return n;
+  }
+
+  /** Пересчитывает саммари числовых колонок по логическим строкам,
+   *  как aggregate(): только строки с числовым ts, только конечные числа.
+   *  Для сегментов, записанных до появления поля summaries. */
+  private _computeSummaries(): Record<string, ColumnSummary> {
+    const out: Record<string, ColumnSummary> = {};
+    for (let i = 0; i < this.rowCount; i++) {
+      const ts = this.get('ts', i);
+      if (typeof ts !== 'number') continue; // строки без ts вне агрегаций
+      for (const fieldName of this._fields) {
+        const v = this.get(fieldName, i);
+        if (typeof v === 'number' && Number.isFinite(v)) {
+          let s = out[fieldName];
+          if (!s) {
+            out[fieldName] = { min: v, max: v, sum: v, count: 1 };
+          } else {
+            if (v < s.min) s.min = v;
+            if (v > s.max) s.max = v;
+            s.sum += v;
+            s.count++;
+          }
+        }
+      }
+    }
+    return out;
   }
 }
