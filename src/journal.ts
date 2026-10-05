@@ -17,6 +17,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Segment } from './segment.ts';
+import type { Column } from './columns.ts';
 import { LRUCache } from './cache.ts';
 import { encodeSegment } from './codec.ts';
 import { encodeV3, readSegment } from './v3.ts';
@@ -30,10 +31,13 @@ import type {
   DownsampleBucket,
   JournalOptions,
   JournalStats,
+  JsonValue,
   LockMode,
   Metadata,
   PurgeResult,
   Row,
+  ScanOp,
+  ScanOptions,
   Schema,
   SegmentFormat,
   TimelineBucket,
@@ -161,6 +165,77 @@ function addSummary(acc: AggAcc, s: ColumnSummary): void {
 const AGG_FNS: ReadonlySet<string> = new Set(['min', 'max', 'sum', 'avg', 'count']);
 function isAggFn(fn: unknown): fn is AggFn {
   return typeof fn === 'string' && AGG_FNS.has(fn);
+}
+
+/** Значение агрегата по накопителю: count — число числовых значений,
+ *  остальные — null, если числовых значений нет. */
+function aggValue(acc: AggAcc, fn: AggFn): number | null {
+  switch (fn) {
+    case 'count': return acc.count;
+    case 'sum':   return acc.count > 0 ? acc.sum : null;
+    case 'min':   return acc.count > 0 ? acc.min : null;
+    case 'max':   return acc.count > 0 ? acc.max : null;
+    case 'avg':   return acc.count > 0 ? acc.sum / acc.count : null;
+  }
+}
+
+// --------------------------------------------------
+// Скан (Фаза 3) — операторы where + скомпилированный план
+// --------------------------------------------------
+
+const SCAN_OPS: readonly ScanOp[] = ['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'in', 'nin', 'isNull', 'isNotNull'];
+const SCAN_OP_SET: ReadonlySet<string> = new Set(SCAN_OPS);
+function isScanOp(op: unknown): op is ScanOp {
+  return typeof op === 'string' && SCAN_OP_SET.has(op);
+}
+
+/** Быстрый ключ ячейки для groupBy (без JSON.stringify на скалярах —
+ *  частый случай). Разные типы дают разные ключи (число 1 ≠ строка '1'). */
+function keyOf(v: JsonValue): string {
+  switch (typeof v) {
+    case 'string':  return 's' + v;
+    case 'number':  return 'n' + v;
+    case 'boolean': return 'b' + v;
+  }
+  if (v === null || v === undefined) return '\u0000n';
+  return 'j' + JSON.stringify(v); // объекты/массивы — fallback
+}
+
+/** Проверка одного условия where по значению ячейки. Числовые сравнения —
+ *  только для конечных чисел; null/не-число не проходит lt/le/gt/ge. */
+function whereOne(value: JsonValue, op: ScanOp, target: JsonValue): boolean {
+  switch (op) {
+    case 'eq':        return value === target;
+    case 'ne':        return value !== target;
+    case 'lt':        return typeof value === 'number' && typeof target === 'number' && value < target;
+    case 'le':        return typeof value === 'number' && typeof target === 'number' && value <= target;
+    case 'gt':        return typeof value === 'number' && typeof target === 'number' && value > target;
+    case 'ge':        return typeof value === 'number' && typeof target === 'number' && value >= target;
+    case 'in':        return Array.isArray(target) && target.includes(value);
+    case 'nin':       return Array.isArray(target) && !target.includes(value);
+    case 'isNull':    return value === null || value === undefined;
+    case 'isNotNull': return value !== null && value !== undefined;
+  }
+  return false;
+}
+
+/** Скомпилированный план скана — валидация и предвычисление один раз. */
+interface ScanPlan {
+  start: number | null;
+  end: number | null;
+  where: { field: string; op: ScanOp; value: JsonValue }[];
+  hasTsFilter: boolean;
+  groupBy: string[];
+  agg: boolean;
+  aggSpec: { field: string; fns: AggFn[] }[];
+  aggKeys: string[];
+  select: string[];
+  /** 1 = asc, -1 = desc */
+  order: 1 | -1;
+  limit: number | null;
+  offset: number;
+  /** Ключ, по которому сортируется результат. */
+  sortKey: string;
 }
 
 export class Journal {
@@ -897,6 +972,380 @@ export class Journal {
       buckets[i] = bucketObj as unknown as DownsampleBucket;
     }
     return buckets;
+  }
+
+  // --------------------------------------------------
+  // Векторный скан (Фаза 3)
+  // --------------------------------------------------
+
+  /**
+   * Векторный скан: select/where/groupBy/agg/order/limit — без материализации
+   * строк. Читаются только запрошенные колонки (каждая один раз, наружу из
+   * цикла), фильтр — плотный цикл с early-exit, агрегаты — накопители min/max/
+   * sum/count, groupBy — hashmap с частичными агрегатами на сегмент.
+   *
+   * Два режима:
+   *  - с `agg`: агрегированные строки — по одной на группу (или одна без groupBy).
+   *    Ключ агрегата — `поле_функция` (value_avg, ts_count, …). `order` — по
+   *    первому ключу агрегата; `limit` — top-k (по умолчанию desc).
+   *  - без `agg`: материализованные строки только по `select` (по умолчанию —
+   *    все поля схемы), отфильтрованные, отсортированные, offset/limit.
+   *
+   * ```ts
+   * j.scan({
+   *   start: 'now-1h', end: 'now',
+   *   where:   [{ field: 'value', op: 'gt', value: 90 }],
+   *   groupBy: 'host',
+   *   agg:     { value: ['avg', 'min', 'max'], ts: ['count'] },
+   *   order:   'desc', limit: 20,
+   * });
+   * // → [{ host: 'web-1', value_avg: 73.2, value_min: …, ts_count: 1420 }, …]
+   * ```
+   *
+   * Память: O(выбранные колонки × размер сегмента) + O(группы), а не
+   * O(строки × поля) как в allRows(). Сегмент вне [start, end] не читается
+   * с диска (решение по сайдкар'у .meta).
+   */
+  scan(opts: ScanOptions): Row[] {
+    if (!this.isOpen) {
+      throw new Error('Journal not open. Call open() first.');
+    }
+    const plan = this._compileScan(opts);
+
+    // Аккумуляция:
+    //  - agg-режим: groups — Map<ключ, {row, accs}> (одна группа '' без groupBy);
+    //  - raw-режим: rawRows — массив строк (только select-колонки).
+    const groups = new Map<string, { row: Row; accs: Record<string, AggAcc> }>();
+    let rawRows: Row[] | null = null;
+    if (!plan.agg) rawRows = [];
+
+    // Сколько строк реально нужно в raw-режиме (для early-exit при order=asc).
+    const rawNeed = plan.limit !== null ? plan.offset + plan.limit : Infinity;
+    const canEarlyStop = !plan.agg && plan.order === 1;
+
+    const getGroup = (key: string, row: Row): { row: Row; accs: Record<string, AggAcc> } => {
+      let g = groups.get(key);
+      if (!g) {
+        const accs: Record<string, AggAcc> = {};
+        for (const spec of plan.aggSpec) accs[spec.field] = newAcc();
+        g = { row, accs };
+        groups.set(key, g);
+      }
+      return g;
+    };
+
+    const processSegment = (seg: Segment): void => {
+      // Вне диапазона — не читаем вообще
+      if (plan.start !== null && plan.end !== null &&
+          seg.minTs !== null && seg.maxTs !== null &&
+          (seg.maxTs < plan.start || seg.minTs > plan.end)) {
+        return;
+      }
+
+      // fast-path (как в aggregate()): сегмент целиком в диапазоне, нет where
+      // и нет groupBy — саммари колонки дают min/max/sum/count без чтения данных.
+      if (plan.agg && plan.where.length === 0 && plan.groupBy.length === 0 &&
+          plan.start !== null && plan.end !== null &&
+          seg.minTs !== null && seg.maxTs !== null &&
+          seg.minTs >= plan.start && seg.maxTs <= plan.end) {
+        let slow: string[] = [];
+        for (const spec of plan.aggSpec) {
+          const s = seg.summaries[spec.field];
+          if (s && s.count > 0) {
+            const acc = groups.get('')!.accs[spec.field];
+            addSummary(acc, s);
+          } else {
+            slow.push(spec.field);
+          }
+        }
+        if (slow.length > 0) this._scanAggregate(seg, plan.start!, plan.end!, slow, groups.get('')!.accs);
+        return;
+      }
+
+      const rowMap = seg.rowMap;
+      const n = seg.rowCount;
+
+      // Колонки, которые реально читаем — одна ссылка на колонку, наружу из цикла.
+      const cols: Record<string, Column | undefined> = {};
+      const fieldsNeeded = new Set<string>();
+      if (plan.hasTsFilter) fieldsNeeded.add('ts');
+      for (const c of plan.where) fieldsNeeded.add(c.field);
+      if (plan.agg) {
+        for (const a of plan.aggSpec) fieldsNeeded.add(a.field);
+        for (const g of plan.groupBy) fieldsNeeded.add(g);
+      } else {
+        for (const f of plan.select) fieldsNeeded.add(f);
+      }
+      for (const f of fieldsNeeded) cols[f] = seg.columns[f];
+
+      const tsCol = plan.hasTsFilter ? cols['ts'] : null;
+      const conds = plan.where;
+      const nc = conds.length;
+      const start = plan.start;
+      const end = plan.end;
+
+      if (plan.agg) {
+        const gb = plan.groupBy;
+        const ngb = gb.length;
+        const spec = plan.aggSpec;
+        for (let li = 0; li < n; li++) {
+          const pi = rowMap[li];
+
+          // Диапазон ts (обе границы включительно; отсутствующая граница не фильтрует)
+          if (tsCol) {
+            const ts = tsCol.get(pi);
+            if (typeof ts !== 'number') continue;
+            if (start !== null && ts < start) continue;
+            if (end !== null && ts > end) continue;
+          }
+
+          // where — early-exit
+          let pass = true;
+          for (let ci = 0; ci < nc; ci++) {
+            const c = conds[ci];
+            const col = cols[c.field];
+            const v = col ? col.get(pi) : null;
+            if (!whereOne(v, c.op, c.value)) { pass = false; break; }
+          }
+          if (!pass) continue;
+
+          // Ключ группы
+          let key: string;
+          let grow: Row = {};
+          if (ngb === 0) {
+            key = '';
+          } else if (ngb === 1) {
+            const gcol = cols[gb[0]];
+            const gv = gcol ? gcol.get(pi) : null;
+            key = keyOf(gv);
+            grow = { [gb[0]]: gv };
+          } else {
+            grow = {};
+            let kk = '';
+            for (let gi = 0; gi < ngb; gi++) {
+              const gcol = cols[gb[gi]];
+              const gv = gcol ? gcol.get(pi) : null;
+              grow[gb[gi]] = gv;
+              kk += (gi ? '\u0000' : '') + keyOf(gv);
+            }
+            key = kk;
+          }
+
+          const g = key === '' ? (groups.has('') ? groups.get('')! : getGroup('', {})) : getGroup(key, grow);
+          for (let si = 0; si < spec.length; si++) {
+            const f = spec[si].field;
+            const col = cols[f];
+            const v = col ? col.get(pi) : null;
+            if (typeof v === 'number' && Number.isFinite(v)) addValue(g.accs[f], v);
+          }
+        }
+      } else {
+        // raw-режим: материализуем только select-колонки
+        const sel = plan.select;
+        const nsel = sel.length;
+        for (let li = 0; li < n; li++) {
+          const pi = rowMap[li];
+
+          if (tsCol) {
+            const ts = tsCol.get(pi);
+            if (typeof ts !== 'number') continue;
+            if (start !== null && ts < start) continue;
+            if (end !== null && ts > end) continue;
+          }
+          let pass = true;
+          for (let ci = 0; ci < nc; ci++) {
+            const c = conds[ci];
+            const col = cols[c.field];
+            const v = col ? col.get(pi) : null;
+            if (!whereOne(v, c.op, c.value)) { pass = false; break; }
+          }
+          if (!pass) continue;
+
+          const row: Row = {};
+          for (let si = 0; si < nsel; si++) {
+            const f = sel[si];
+            const col = cols[f];
+            row[f] = col ? col.get(pi) : null;
+          }
+          rawRows!.push(row);
+          if (canEarlyStop && rawRows!.length >= rawNeed) return;
+        }
+      }
+    };
+
+    // Гарантируем, что в agg-режиме существует группа '' (без groupBy).
+    if (plan.agg && plan.groupBy.length === 0) getGroup('', {});
+
+    for (const id of this._sortedClosedIds()) {
+      const meta = this.segmentMeta.get(id);
+      if (meta && meta.minTs !== null && meta.maxTs !== null &&
+          plan.start !== null && plan.end !== null &&
+          (meta.maxTs < plan.start || meta.minTs > plan.end)) {
+        continue; // не пересекает диапазон
+      }
+      processSegment(this._loadClosedSegment(id));
+      if (canEarlyStop && rawRows!.length >= rawNeed) break;
+    }
+
+    const active = this.activeSegment;
+    if (active && active.rowCount > 0) {
+      processSegment(active);
+    }
+
+    // Собираем результат
+    if (plan.agg) {
+      const out: Row[] = [];
+      for (const g of groups.values()) {
+        const row: Row = { ...g.row };
+        for (const spec of plan.aggSpec) {
+          const acc = g.accs[spec.field];
+          for (const fn of spec.fns) {
+            row[`${spec.field}_${fn}`] = aggValue(acc, fn);
+          }
+        }
+        out.push(row);
+      }
+      // Сортировка по первому ключу агрегата
+      if (out.length > 1) {
+        const key = plan.aggKeys[0];
+        out.sort((a, b) => {
+          const av = a[key], bv = b[key];
+          if (av === bv) return 0;
+          if (av === null || av === undefined) return 1;
+          if (bv === null || bv === undefined) return -1;
+          return (av < bv ? -1 : 1) * plan.order;
+        });
+      }
+      const from = plan.offset;
+      const to = plan.limit !== null ? from + plan.limit : out.length;
+      return out.slice(from, to);
+    }
+
+    // raw-режим
+    if (rawRows!.length > 1) {
+      const key = plan.sortKey;
+      rawRows!.sort((a, b) => {
+        const av = a[key], bv = b[key];
+        if (av === bv) return 0;
+        if (av === null || av === undefined) return 1;
+        if (bv === null || bv === undefined) return -1;
+        return (av < bv ? -1 : 1) * plan.order;
+      });
+    }
+    const from = plan.offset;
+    const to = plan.limit !== null ? from + plan.limit : rawRows!.length;
+    return rawRows!.slice(from, to);
+  }
+
+  /** Компиляция опций скана в план (валидация + предвычисление). */
+  private _compileScan(opts: ScanOptions): ScanPlan {
+    const start = opts.start !== undefined ? resolveTs(opts.start, 'scan(start)') : null;
+    const end = opts.end !== undefined ? resolveTs(opts.end, 'scan(end)') : null;
+    if (start !== null && end !== null && end < start) {
+      throw new RangeError('Journal: scan() — start должен быть <= end');
+    }
+
+    // where
+    const where: { field: string; op: ScanOp; value: JsonValue }[] = [];
+    if (opts.where) {
+      for (const w of opts.where) {
+        if (!w || typeof w.field !== 'string' || w.field.length === 0) {
+          throw new RangeError('Journal: scan() — where[].field: непустое имя поля');
+        }
+        if (!isScanOp(w.op)) {
+          throw new RangeError(`Journal: scan() — where[].op: ${SCAN_OPS.join('|')} (получено ${String(w.op)})`);
+        }
+        if (w.op === 'in' || w.op === 'nin') {
+          if (!Array.isArray(w.value)) {
+            throw new RangeError('Journal: scan() — where[].value для in/nin: массив значений');
+          }
+        }
+        where.push({ field: w.field, op: w.op, value: w.value ?? null });
+      }
+    }
+
+    // agg
+    const agg: boolean = opts.agg !== undefined && Object.keys(opts.agg).length > 0;
+    const aggSpec: { field: string; fns: AggFn[] }[] = [];
+    const aggKeys: string[] = [];
+    if (agg) {
+      for (const [field, fns] of Object.entries(opts.agg!)) {
+        if (typeof field !== 'string' || field.length === 0) {
+          throw new RangeError('Journal: scan() — agg: непустое имя поля');
+        }
+        if (!Array.isArray(fns) || fns.length === 0) {
+          throw new RangeError('Journal: scan() — agg.поле: непустой массив функций');
+        }
+        for (const fn of fns) {
+          if (!isAggFn(fn)) {
+            throw new RangeError(`Journal: scan() — agg.поле: min|max|sum|avg|count (получено ${String(fn)})`);
+          }
+        }
+        aggSpec.push({ field, fns });
+        for (const fn of fns) aggKeys.push(`${field}_${fn}`);
+      }
+    }
+
+    // groupBy (только в agg-режиме)
+    let groupBy: string[] = [];
+    if (opts.groupBy !== undefined) {
+      if (!agg) {
+        throw new RangeError('Journal: scan() — groupBy требует agg');
+      }
+      const gb = Array.isArray(opts.groupBy) ? opts.groupBy : [opts.groupBy];
+      for (const g of gb) {
+        if (typeof g !== 'string' || g.length === 0) {
+          throw new RangeError('Journal: scan() — groupBy: непустое имя поля');
+        }
+      }
+      groupBy = gb;
+    }
+
+    // select (raw-режим) — по умолчанию все поля схемы
+    let select: string[];
+    if (!agg) {
+      select = opts.select && opts.select.length > 0
+        ? [...opts.select]
+        : (this.schema ? Object.keys(this.schema) : []);
+      if (select.length === 0) {
+        throw new RangeError('Journal: scan() — select: непустой список полей (схема пуста?)');
+      }
+      for (const f of select) {
+        if (typeof f !== 'string' || f.length === 0) {
+          throw new RangeError('Journal: scan() — select[].field: непустое имя поля');
+        }
+      }
+    } else {
+      select = [];
+    }
+
+    // order: agg — desc (top-k), raw — asc (хронология)
+    const order = opts.order ?? (agg ? 'desc' : 'asc');
+    if (order !== 'asc' && order !== 'desc') {
+      throw new RangeError("Journal: scan() — order: 'asc' или 'desc'");
+    }
+    const orderSign: 1 | -1 = order === 'asc' ? 1 : -1;
+
+    // limit / offset
+    let limit: number | null = null;
+    if (opts.limit !== undefined) {
+      if (!Number.isInteger(opts.limit) || opts.limit < 0) {
+        throw new RangeError('Journal: scan() — limit: целое число >= 0');
+      }
+      limit = opts.limit;
+    }
+    const offset = opts.offset !== undefined
+      ? (Number.isInteger(opts.offset) && opts.offset >= 0 ? opts.offset : (() => { throw new RangeError('Journal: scan() — offset: целое число >= 0'); })())
+      : 0;
+
+    // hasTsFilter — нужен ли диапазон ts в цикле (условия where по 'ts'
+    // проверяются отдельно, через whereOne).
+    const hasTsFilter = start !== null || end !== null;
+
+    // sortKey: agg — первый ключ агрегата; raw — 'ts' (если в select), иначе select[0]
+    const sortKey = agg ? aggKeys[0] : (select.includes('ts') ? 'ts' : select[0]);
+
+    return { start, end, where, hasTsFilter, groupBy, agg, aggSpec, aggKeys, select, order: orderSign, limit, offset, sortKey };
   }
 
   // --------------------------------------------------

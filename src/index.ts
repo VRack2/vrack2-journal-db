@@ -56,6 +56,8 @@ export type {
   OpenJournalOptions,
   PurgeResult,
   Row,
+  ScanOp,
+  ScanOptions,
   Schema,
   SegmentFormat,
   SerializedColumn,
