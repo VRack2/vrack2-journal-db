@@ -33,7 +33,7 @@ const V3 = 3;
 export type Compression = 'none' | 'gzip' | 'zstd';
 
 export interface V3EncodeOptions {
-  /** Способ сжатия блобов: 'gzip' (по умолчанию, Node ≥ 18) или 'zstd' (Node ≥ 23.8). */
+  /** Способ сжатия блобов: 'zstd' (по умолчанию при Node ≥ 23.8) или 'gzip'. */
   compression?: Compression;
   /** Явный выбор числового кодека для колонки (field → имя кодека).
    *  Пропущенные колонки — авто-выбор по данным (autoPickNumCodec). */
@@ -63,8 +63,23 @@ interface V3Header {
 }
 
 // --------------------------------------------------
-// Сжатие (gzip по умолчанию, zstd — опция)
+// Сжатие (zstd по умолчанию при Node >= 23.8, иначе gzip)
 // --------------------------------------------------
+/** Есть ли zstd в zlib (Node >= 23.8). */
+export function zstdAvailable(): boolean {
+  const z = zlib as unknown as { zstdCompressSync?: unknown };
+  return typeof z.zstdCompressSync === 'function';
+}
+
+/**
+ * Дефолт сжатия: zstd при Node >= 23.8 (где он есть в zlib), иначе gzip.
+ * Явный opts.compression в Journal всегда переопределяет этот дефолт.
+ */
+export function defaultCompression(): 'gzip' | 'zstd' {
+  if (zstdAvailable()) return 'zstd';
+  return 'gzip';
+}
+
 function compress(buf: Buffer, mode: Compression): Buffer {
   if (mode === 'none') return buf;
   if (mode === 'zstd') {
@@ -229,7 +244,7 @@ export function isV3(buf: Buffer): boolean {
 
 /** Сериализует сегмент в буфер v3 (бинарные блобы + сжатие + CRC32). */
 export function encodeV3(segment: Segment, opts: V3EncodeOptions = {}): Buffer {
-  const compression: Compression = opts.compression ?? 'gzip';
+  const compression: Compression = opts.compression ?? defaultCompression();
   const columnOrder = Object.keys(segment.schema);
 
   const specs: Record<string, V3ColSpec> = {};

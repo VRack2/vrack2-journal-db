@@ -20,7 +20,7 @@ import { Segment } from './segment.ts';
 import type { Column } from './columns.ts';
 import { LRUCache } from './cache.ts';
 import { encodeSegment } from './codec.ts';
-import { encodeV3, readSegment } from './v3.ts';
+import { encodeV3, readSegment, defaultCompression } from './v3.ts';
 import { Interval } from './interval.ts';
 import { RetentionEngine } from './retention.ts';
 import { parseSql } from './sql.ts';
@@ -313,7 +313,9 @@ export class Journal {
     }
     this.format = format;
 
-    const compression = opts.compression ?? 'gzip';
+    // zstd — по умолчанию при Node >= 23.8 (Фаза 5); явный opts.compression
+    // переопределяет. На старых Node — gzip.
+    const compression = opts.compression ?? defaultCompression();
     if (compression !== 'gzip' && compression !== 'zstd') {
       throw new RangeError("Journal: compression должно быть 'gzip' или 'zstd'");
     }

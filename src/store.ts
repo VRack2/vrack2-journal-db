@@ -7,7 +7,7 @@ import path from 'node:path';
 import { Journal, DEFAULT_ROWS_PER_SEGMENT } from './journal.ts';
 import type { Segment } from './segment.ts';
 import { LRUCache } from './cache.ts';
-import { readSegment } from './v3.ts';
+import { readSegment, defaultCompression } from './v3.ts';
 import { Table, openTable as createTable } from './table.ts';
 import type {
   CompressionMode,
@@ -55,7 +55,8 @@ export class Store {
     }
     this.lockMode = lock;
     this.format = opts.format ?? 'v2';
-    this.compression = opts.compression ?? 'gzip';
+    // zstd по умолчанию при Node >= 23.8 (Фаза 5); явный opts.compression — выше.
+    this.compression = opts.compression ?? defaultCompression();
     this.codecs = opts.codecs && typeof opts.codecs === 'object' ? { ...opts.codecs } : {};
     this.segmentCache = new LRUCache<string, Segment>(this.maxCacheSize);
   }

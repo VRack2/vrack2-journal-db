@@ -9,7 +9,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/journal.ts';
 import { Segment } from '../src/segment.ts';
-import { encodeV3, decodeV3, readSegment, isV3 } from '../src/v3.ts';
+import { encodeV3, decodeV3, readSegment, isV3, zstdAvailable, defaultCompression } from '../src/v3.ts';
 import { encodeSegment } from '../src/codec.ts';
 import { autoPickNumCodec, getNumCodec } from '../src/numcodecs.ts';
 import type { Schema } from '../src/types.ts';
@@ -255,6 +255,40 @@ fs.rmSync(baseDir, { recursive: true, force: true });
     assert(/контрольная сумма|повреждён/i.test(String(e)), 'ошибка упоминает контрольную сумму/повреждение');
   }
   assert(threw, 'чтение повреждённого v3-сегмента бросает ошибку');
+}
+
+// --------------------------------------------------
+// 7. zstd по умолчанию (Фаза 5): Node ≥ 23.8 → zstd, иначе gzip; round-trip
+// --------------------------------------------------
+{
+  // Дефолт согласован с наличием zstd в runtime.
+  const def = defaultCompression();
+  if (zstdAvailable()) {
+    assert(def === 'zstd', 'defaultCompression() = zstd при Node ≥ 23.8');
+  } else {
+    assert(def === 'gzip', 'defaultCompression() = gzip без zstd');
+  }
+
+  // Журнал без явного compression → сегмент v3 сжимается по умолчанию (zstd/gzip),
+  // и данные читаются обратно без потерь.
+  const schema: Schema = { ts: 'raw', val: 'raw' };
+  const j = new Journal(baseDir, { format: 'v3' });
+  j.open('zstdDefault', schema);
+  const N = 400;
+  for (let i = 0; i < N; i++) j.append({ ts: i * 1000, val: Math.cos(i / 5) * 1000 });
+  j.close();
+
+  const dir = path.join(baseDir, 'journals', 'zstdDefault');
+  const file = fs.readdirSync(dir).find(f => f.endsWith('.seg'))!;
+  const h = v3Header(fs.readFileSync(path.join(dir, file)));
+  assert(h.compression === def, `v3-сегмент по умолчанию: compression=${def} (факт ${h.compression})`);
+
+  const j2 = new Journal(baseDir);
+  j2.open('zstdDefault', schema);
+  const rows = j2.allRows();
+  assert(rows.length === N, `zstd/gzip по умолчанию: ${N} строк (факт ${rows.length})`);
+  assert(rows[0].val === 1000 && Math.abs(rows[1].val - Math.cos(0.2) * 1000) < 1e-9, 'значения совпадают');
+  j2.close();
 }
 
 console.log(`\nТесты формата v3: ${passed} passed, ${failed} failed`);
