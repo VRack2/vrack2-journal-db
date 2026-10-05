@@ -547,6 +547,11 @@ export class Journal {
       throw new Error('Journal not open. Call open() first.');
     }
 
+    // Lazy-миграция (Фаза 5): старые v1/v2 сегменты → v3 перед слиянием.
+    // Для ≥2 сегментов слияние ниже само пишет результат в v3; migrateToV3()
+    // закрывает случай единственного старого сегмента и делает миграцию явной.
+    this.migrateToV3();
+
     const ids = this._sortedClosedIds();
     if (ids.length < 2) {
       return { mergedSegments: 0, logicalRows: 0, physicalBefore: 0, physicalAfter: 0 };
@@ -601,6 +606,55 @@ export class Journal {
       physicalBefore,
       physicalAfter: merged.physicalRowCount
     };
+  }
+
+  /** Формат сегмента на диске: v3 (magic вер. 3), v2 (magic вер. 1), v1 (JSON). */
+  private _detectSegFormat(file: string): 'v1' | 'v2' | 'v3' {
+    let buf: Buffer;
+    try {
+      const fd = fs.openSync(path.join(this.journalPath(), file), 'r');
+      try {
+        buf = Buffer.alloc(5);
+        if (fs.readSync(fd, buf, 0, 5, 0) < 5) return 'v1';
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      return 'v1';
+    }
+    if (buf.subarray(0, 4).toString('ascii') === 'JSDB') {
+      return buf[4] === 3 ? 'v3' : 'v2';
+    }
+    return 'v1';
+  }
+
+  /**
+   * Lazy-миграция старых сегментов (v1/v2) в v3 (Фаза 5). Каждый старый сегмент
+   * перекодируется в текущий формат журнала (v3) атомарно с тем же id
+   * (расширение .json → .seg). Если журнал не v3 — ничего не делает.
+   * Идемпотентен: уже v3 сегменты пропускаются. Активный сегмент v3-журнала
+   * всегда v3, поэтому затрагивает только закрытые сегменты.
+   *
+   * ```ts
+   * j.migrateToV3(); // → { migrated: 2, logicalRows: 50000 }
+   * ```
+   */
+  migrateToV3(): { migrated: number; logicalRows: number } {
+    if (!this.isOpen) throw new Error('Journal not open. Call open() first.');
+    if (this.format !== 'v3') return { migrated: 0, logicalRows: 0 };
+
+    const encode = (s: Segment) => encodeV3(s, { compression: this.compression, codecs: this.codecs });
+    let migrated = 0;
+    let logicalRows = 0;
+    for (const id of this._sortedClosedIds()) {
+      const file = this.segmentIndex.get(id);
+      if (!file || this._detectSegFormat(file) === 'v3') continue;
+      this.reencodeClosedSegment(id, encode);
+      migrated++;
+      const seg = this._segmentCache.get(id);
+      if (seg) logicalRows += seg.rowCount;
+    }
+    return { migrated, logicalRows };
   }
 
   /**
@@ -681,6 +735,7 @@ export class Journal {
       fs.renameSync(`${filePath}.tmp`, filePath); // атомарно — краш не оставит «половину»
       if (oldFile !== fileName) {
         fs.rmSync(path.join(this.journalPath(), oldFile), { force: true }); // старый файл (другое расширение)
+        fs.rmSync(path.join(this.journalPath(), `${oldFile}${META_SUFFIX}`), { force: true }); // старый сайдкар
       }
       this._writeMeta(fresh, fileName);
       this._segmentCache.set(id, fresh);
@@ -768,6 +823,7 @@ export class Journal {
     fs.renameSync(`${filePath}.tmp`, filePath);
     if (oldFile && oldFile !== fileName) {
       fs.rmSync(path.join(this.journalPath(), oldFile), { force: true }); // старый файл (другое расширение)
+      fs.rmSync(path.join(this.journalPath(), `${oldFile}${META_SUFFIX}`), { force: true }); // старый сайдкар
     }
     this._writeMeta(seg, fileName);
     this._segmentCache.set(id, seg);
