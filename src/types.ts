@@ -218,6 +218,71 @@ export type SegmentFormat = 'v2' | 'v3';
  *  'zstd' (Node ≥ 23.8; при отсутствии — автоматический откат на gzip). */
 export type CompressionMode = 'gzip' | 'zstd';
 
+// --------------------------------------------------
+// Retention (Фаза 4) — тир'ы и отчётность движка
+// --------------------------------------------------
+
+/** Тир хранения: данные заданного возраста перекодируются по нему. */
+export interface RetentionTier {
+  /** Идентификатор тира ('hot'|'warm'|'cold'|'archive' или свой). */
+  id: string;
+  /** Минимальный возраст данных (мс, включительно). 0 — самые свежие. */
+  from: number;
+  /** Максимальный возраст (мс, исключительно). Infinity — самые старые. */
+  to: number;
+  /** Числовой кодек колонки значений ('f64'|'doubleDelta'|'gorilla'|'rle'). */
+  codec: string;
+  /** Целевой размер блока (мс) при слиянии (1h → 1d). */
+  block: number;
+  /** Сжатие: 'none' (raw), 'gzip', 'zstd'. */
+  compress: 'none' | 'gzip' | 'zstd';
+  /** Минимальный интервал ts (мс) для даунсэмплинга; 0 — без потерь данных. */
+  minInterval: number;
+  /** Дельта-кодировать колонку ts (doubleDelta). */
+  tsDelta: boolean;
+}
+
+/** Статус тира: сколько сегментов/байт/строк и диапазон ts. */
+export interface TierStatus {
+  id: string;
+  from: number;
+  to: number;
+  segments: number;
+  bytes: number;
+  rows: number;
+  oldestTs: number | null;
+  newestTs: number | null;
+}
+
+/** Пункт плана: что сделать с сегментом (reencode / merge / ничего). */
+export interface ConversionPlan {
+  segId: string;
+  tier: string;
+  action: 'none' | 'reencode' | 'merge';
+  targetCodec: string;
+  targetCompress: string;
+  groupSize: number;
+}
+
+/** Отчёт применения retention: что перекодировано/слито, до/после. */
+export interface ApplyReport {
+  reencoded: number;
+  merged: number;
+  skipped: number;
+  beforeSegments: number;
+  afterSegments: number;
+  beforeBytes: number;
+  afterBytes: number;
+}
+
+/** Отчёт компактизации одного тира (слияние блоков). */
+export interface CompactTierReport {
+  tier: string;
+  mergedGroups: number;
+  beforeSegments: number;
+  afterSegments: number;
+}
+
 export interface JournalOptions {
   /** Сколько строк в одном файле сегмента до flush'а (по умолчанию 10 000).
    *  Меньше — больше файлов (удобно для тестов и точной дедупликации);
@@ -244,6 +309,8 @@ export interface JournalOptions {
   /** Явный выбор числового кодека для колонки в v3: поле → имя кодека
    *  ('f64' | 'doubleDelta' | 'gorilla' | 'rle'). Пропущенные — авто-выбор. */
   codecs?: Record<string, string>;
+  /** Тир'ы retention (Фаза 4). По умолчанию defaultTiers() — см. retention.ts. */
+  retention?: RetentionTier[];
 }
 
 export interface StoreOptions {

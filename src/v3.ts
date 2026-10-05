@@ -30,7 +30,7 @@ import type { JsonValue, Metadata, Schema, ColumnSummary } from './types.ts';
 const MAGIC = Buffer.from('JSDB', 'ascii');
 const V3 = 3;
 
-export type Compression = 'gzip' | 'zstd';
+export type Compression = 'none' | 'gzip' | 'zstd';
 
 export interface V3EncodeOptions {
   /** Способ сжатия блобов: 'gzip' (по умолчанию, Node ≥ 18) или 'zstd' (Node ≥ 23.8). */
@@ -66,6 +66,7 @@ interface V3Header {
 // Сжатие (gzip по умолчанию, zstd — опция)
 // --------------------------------------------------
 function compress(buf: Buffer, mode: Compression): Buffer {
+  if (mode === 'none') return buf;
   if (mode === 'zstd') {
     const z = zlib as unknown as { zstdCompressSync?: (b: Buffer, o?: unknown) => Buffer };
     if (typeof z.zstdCompressSync === 'function') {
@@ -76,6 +77,7 @@ function compress(buf: Buffer, mode: Compression): Buffer {
 }
 
 function decompress(buf: Buffer, mode: Compression): Buffer {
+  if (mode === 'none') return buf;
   if (mode === 'zstd') {
     const z = zlib as unknown as { zstdDecompressSync?: (b: Buffer) => Buffer };
     if (typeof z.zstdDecompressSync === 'function') {

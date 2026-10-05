@@ -22,6 +22,7 @@ import { LRUCache } from './cache.ts';
 import { encodeSegment } from './codec.ts';
 import { encodeV3, readSegment } from './v3.ts';
 import { Interval } from './interval.ts';
+import { RetentionEngine } from './retention.ts';
 import type {
   AggregateExpr,
   AggFn,
@@ -35,6 +36,7 @@ import type {
   LockMode,
   Metadata,
   PurgeResult,
+  RetentionTier,
   Row,
   ScanOp,
   ScanOptions,
@@ -275,6 +277,11 @@ export class Journal {
   /** Явные числовые кодек'и v3: поле → имя кодека. Пустое — авто-выбор. */
   readonly codecs: Record<string, string>;
 
+  /** Тир'ы retention (Фаза 4); null — дефолтные (см. retention.defaultTiers()). */
+  private retentionTiers: RetentionTier[] | null = null;
+  /** Ленивый движок retention (см. getter `retention`). */
+  private retentionEngine: RetentionEngine | null = null;
+
   /** Буфер WAL (сериализованные строки) — пишется одной append'ом. */
   private _walBuf: string[] = [];
   private _walBufBytes = 0;
@@ -312,7 +319,18 @@ export class Journal {
     this.compression = compression;
 
     this.codecs = opts.codecs && typeof opts.codecs === 'object' ? { ...opts.codecs } : {};
+    this.retentionTiers = Array.isArray(opts.retention) && opts.retention.length > 0
+      ? opts.retention.slice()
+      : null;
     this._segmentCache = new LRUCache<string, Segment>(this.maxCachedSegments);
+  }
+
+  /** Движок retention (Фаза 4): тир'ы из opts.retention или defaultTiers(). */
+  get retention(): RetentionEngine {
+    if (!this.retentionEngine) {
+      this.retentionEngine = new RetentionEngine(this, this.retentionTiers ?? undefined);
+    }
+    return this.retentionEngine;
   }
 
   /** Расширение файла сегмента при записи: v3 → .seg, v2 → .json. */
@@ -663,6 +681,111 @@ export class Journal {
     this.segmentIndex.delete(id);
     this._segmentCache.delete(id);
     this.segmentMeta.delete(id);
+  }
+
+  // --------------------------------------------------
+  // Retention (Фаза 4) — перекодирование / слияние закрытых сегментов
+  // --------------------------------------------------
+
+  /** ID закрытых сегментов в хронологическом порядке. */
+  closedSegmentIds(): string[] {
+    if (!this.isOpen) throw new Error('Journal not open. Call open() first.');
+    return this._sortedClosedIds();
+  }
+
+  /** Закрытый сегмент из кэша/диска (для RetentionEngine). */
+  getClosedSegment(id: string): Segment {
+    if (!this.isOpen) throw new Error('Journal not open. Call open() first.');
+    return this._loadClosedSegment(id);
+  }
+
+  /** Имя файла сегмента на диске — null, если неизвестно. */
+  closedSegmentFile(id: string): string | null {
+    return this.segmentIndex.get(id) ?? null;
+  }
+
+  /** Границы + счётчики сегмента (из .meta/кэша) + размер файла — null, если неизвестно. */
+  closedSegmentInfo(id: string): {
+    minTs: number | null; maxTs: number | null;
+    rowCount: number | null; physicalRowCount: number | null; bytes: number | null;
+  } | null {
+    const file = this.segmentIndex.get(id);
+    const meta = this.segmentMeta.get(id) ?? null;
+    if (!file && !meta) return null;
+    let bytes: number | null = null;
+    if (file) {
+      try { bytes = fs.statSync(path.join(this.journalPath(), file)).size; } catch { bytes = null; }
+    }
+    return {
+      minTs: meta?.minTs ?? null,
+      maxTs: meta?.maxTs ?? null,
+      rowCount: meta?.rowCount ?? null,
+      physicalRowCount: meta?.physicalRowCount ?? null,
+      bytes
+    };
+  }
+
+  /** Новый уникальный ID сегмента. */
+  newSegmentId(): string {
+    return `seg_${Date.now()}_${this.segmentCounter++}_${this._idNonce}`;
+  }
+
+  /**
+   * Перекодирует закрытый сегмент (те же данные, новый кодек/сжатие) атомарно.
+   * `encode` — как закодировать (обычно encodeV3 с параметрами тира).
+   * Возвращает имя нового файла.
+   */
+  reencodeClosedSegment(id: string, encode: (seg: Segment) => Buffer): string {
+    if (!this.isOpen) throw new Error('Journal not open. Call open() first.');
+    const seg = this._loadClosedSegment(id);
+    const fileName = `${id}${SEG_V3_EXT}`;
+    const filePath = path.join(this.journalPath(), fileName);
+    const oldFile = this.segmentIndex.get(id);
+    fs.writeFileSync(`${filePath}.tmp`, encode(seg));
+    fs.renameSync(`${filePath}.tmp`, filePath);
+    if (oldFile && oldFile !== fileName) {
+      fs.rmSync(path.join(this.journalPath(), oldFile), { force: true }); // старый файл (другое расширение)
+    }
+    this._writeMeta(seg, fileName);
+    this._segmentCache.set(id, seg);
+    this.segmentIndex.set(id, fileName);
+    return fileName;
+  }
+
+  /**
+   * Сливает несколько закрытых сегментов в один (дедупликация на границах,
+   * Фаза 4: блоки 1h → 1d). Возвращает ID нового сегмента.
+   * `encode` — как закодировать слитый сегмент (тир целевой).
+   */
+  mergeClosedSegments(ids: string[], encode: (seg: Segment) => Buffer): string {
+    if (!this.isOpen) throw new Error('Journal not open. Call open() first.');
+    const sorted = [...new Set(ids)];
+    if (sorted.length === 0) throw new RangeError('mergeClosedSegments: пустой список');
+    const rows: Row[] = [];
+    for (const id of sorted) {
+      const seg = this._loadClosedSegment(id);
+      for (let i = 0; i < seg.rowCount; i++) rows.push(seg.getRow(i));
+    }
+    const merged = new Segment(this.newSegmentId(), this.schema!, { ...(this.metadata ?? {}) });
+    for (const row of rows) merged.append(row);
+    const fileName = `${merged.id}${SEG_V3_EXT}`;
+    const filePath = path.join(this.journalPath(), fileName);
+    fs.writeFileSync(`${filePath}.tmp`, encode(merged));
+    fs.renameSync(`${filePath}.tmp`, filePath);
+    this._writeMeta(merged, fileName);
+    for (const id of sorted) {
+      const oldFile = this.segmentIndex.get(id);
+      if (oldFile) {
+        fs.unlinkSync(path.join(this.journalPath(), oldFile));
+        fs.rmSync(path.join(this.journalPath(), `${oldFile}${META_SUFFIX}`), { force: true });
+      }
+      this.segmentIndex.delete(id);
+      this._segmentCache.delete(id);
+      this.segmentMeta.delete(id);
+    }
+    this.segmentIndex.set(merged.id, fileName);
+    this._segmentCache.set(merged.id, merged);
+    return merged.id;
   }
 
   /**

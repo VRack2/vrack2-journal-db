@@ -26,6 +26,11 @@ export {
   type NumCodec
 } from './numcodecs.ts';
 export {
+  RetentionEngine,
+  defaultTiers,
+  type SegmentEncoding
+} from './retention.ts';
+export {
   AutoColumn,
   CatchAllColumn,
   COLUMN_TYPES,
@@ -40,9 +45,12 @@ export {
 export type {
   AggregateExpr,
   AggFn,
+  ApplyReport,
   ColumnSummary,
   CompactResult,
+  CompactTierReport,
   ColumnType,
+  ConversionPlan,
   DownsampleBucket,
   JsonArray,
   JsonObject,
@@ -55,6 +63,7 @@ export type {
   Metadata,
   OpenJournalOptions,
   PurgeResult,
+  RetentionTier,
   Row,
   ScanOp,
   ScanOptions,
@@ -64,5 +73,6 @@ export type {
   SerializedSegment,
   StoreOptions,
   StoreStats,
+  TierStatus,
   TimelineBucket
 } from './types.ts';
