@@ -9,6 +9,23 @@ export { Interval } from './interval.ts';
 export { LRUCache } from './cache.ts';
 export { encodeSegment, decodeSegment, isCompressedFormat } from './codec.ts';
 export {
+  encodeV3,
+  decodeV3,
+  readSegment,
+  isV3,
+  type V3EncodeOptions
+} from './v3.ts';
+export {
+  F64Codec,
+  DoubleDeltaCodec,
+  GorillaCodec,
+  RleCodec,
+  NUM_CODECS,
+  getNumCodec,
+  autoPickNumCodec,
+  type NumCodec
+} from './numcodecs.ts';
+export {
   AutoColumn,
   CatchAllColumn,
   COLUMN_TYPES,
@@ -31,6 +48,7 @@ export type {
   JsonObject,
   JsonPrimitive,
   JsonValue,
+  CompressionMode,
   JournalOptions,
   JournalStats,
   LockMode,
@@ -39,6 +57,7 @@ export type {
   PurgeResult,
   Row,
   Schema,
+  SegmentFormat,
   SerializedColumn,
   SerializedSegment,
   StoreOptions,

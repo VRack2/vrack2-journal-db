@@ -163,6 +163,14 @@ export interface TimelineBucket {
 /** Стратегия блокировки журнала одним владельцем. */
 export type LockMode = 'pid' | 'off';
 
+/** Формат файлов сегментов: v1/v2 (gzip+JSON) или v3 (бинарные блобы колонок).
+ *  Чтение прозрачное — любой формат читается; запись идёт в выбранном формате. */
+export type SegmentFormat = 'v2' | 'v3';
+
+/** Способ сжатия блобов в v3: 'gzip' (по умолчанию, Node ≥ 18) или
+ *  'zstd' (Node ≥ 23.8; при отсутствии — автоматический откат на gzip). */
+export type CompressionMode = 'gzip' | 'zstd';
+
 export interface JournalOptions {
   /** Сколько строк в одном файле сегмента до flush'а (по умолчанию 10 000).
    *  Меньше — больше файлов (удобно для тестов и точной дедупликации);
@@ -181,6 +189,14 @@ export interface JournalOptions {
    *   живёт в worker_threads: воркер может умереть при живом процессе, и
    *   PID-блокировка будет выглядеть «занятой» навсегда. */
   lock?: LockMode;
+  /** Формат файлов сегментов (по умолчанию `'v2'`). `'v3'` — бинарные блобы
+   *  колонок (числовые кодек + словарь + сжатие), файлы `.seg`; v1/v2 читаются. */
+  format?: SegmentFormat;
+  /** Сжатие блобов в v3 (по умолчанию `'gzip'`). `compression` игнорируется в v2. */
+  compression?: CompressionMode;
+  /** Явный выбор числового кодека для колонки в v3: поле → имя кодека
+   *  ('f64' | 'doubleDelta' | 'gorilla' | 'rle'). Пропущенные — авто-выбор. */
+  codecs?: Record<string, string>;
 }
 
 export interface StoreOptions {
@@ -188,6 +204,12 @@ export interface StoreOptions {
   defaultRowsPerSegment?: number;
   /** По умолчанию `'pid'` — см. `JournalOptions.lock`. */
   lock?: LockMode;
+  /** Формат файлов сегментов для всех журналов (по умолчанию `'v2'`). */
+  format?: SegmentFormat;
+  /** Сжатие блобов в v3 (по умолчанию `'gzip'`). */
+  compression?: CompressionMode;
+  /** Числовые кодеки v3 по умолчанию: поле → имя кодека. */
+  codecs?: Record<string, string>;
 }
 
 export interface OpenJournalOptions {
@@ -195,6 +217,12 @@ export interface OpenJournalOptions {
   maxCachedSegments?: number;
   /** Переопределяет `lock` из StoreOptions для этого журнала. */
   lock?: LockMode;
+  /** Переопределяет `format` из StoreOptions для этого журнала. */
+  format?: SegmentFormat;
+  /** Переопределяет `compression` из StoreOptions. */
+  compression?: CompressionMode;
+  /** Переопределяет `codecs` из StoreOptions. */
+  codecs?: Record<string, string>;
 }
 
 export interface JournalStats {

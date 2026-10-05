@@ -5,17 +5,23 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Journal, DEFAULT_ROWS_PER_SEGMENT } from './journal.ts';
-import { Segment } from './segment.ts';
+import type { Segment } from './segment.ts';
 import { LRUCache } from './cache.ts';
-import { decodeSegment } from './codec.ts';
+import { readSegment } from './v3.ts';
 import type {
+  CompressionMode,
   LockMode,
   Metadata,
   OpenJournalOptions,
   Schema,
+  SegmentFormat,
   StoreOptions,
   StoreStats,
 } from './types.ts';
+
+const isSegmentFile = (f: string): boolean => f.endsWith('.seg') || f.endsWith('.json');
+const idFromFile = (f: string): string =>
+  f.endsWith('.seg') ? f.slice(0, -4) : f.endsWith('.json') ? f.slice(0, -5) : f;
 
 export class Store {
   readonly baseDir: string;
@@ -23,6 +29,9 @@ export class Store {
   readonly maxCacheSize: number;
   readonly defaultRowsPerSegment: number;
   readonly lockMode: LockMode;
+  readonly format: SegmentFormat;
+  readonly compression: CompressionMode;
+  readonly codecs: Record<string, string>;
 
   /** открытые журналы по имени */
   openJournals = new Map<string, Journal>();
@@ -40,6 +49,9 @@ export class Store {
       throw new RangeError("Store: lock должно быть 'pid' или 'off'");
     }
     this.lockMode = lock;
+    this.format = opts.format ?? 'v2';
+    this.compression = opts.compression ?? 'gzip';
+    this.codecs = opts.codecs && typeof opts.codecs === 'object' ? { ...opts.codecs } : {};
     this.segmentCache = new LRUCache<string, Segment>(this.maxCacheSize);
   }
 
@@ -60,7 +72,10 @@ export class Store {
     const journal = new Journal(this.baseDir, {
       rowsPerSegment: opts.rowsPerSegment ?? this.defaultRowsPerSegment,
       maxCachedSegments: opts.maxCachedSegments ?? this.maxCacheSize,
-      lock: opts.lock ?? this.lockMode
+      lock: opts.lock ?? this.lockMode,
+      format: opts.format ?? this.format,
+      compression: opts.compression ?? this.compression,
+      codecs: opts.codecs ?? this.codecs
     });
 
     journal.open(name, schema, metadata);
@@ -100,18 +115,18 @@ export class Store {
     const journalPath = path.join(this.journalsDir, name);
     try {
       const files = fs.readdirSync(journalPath)
-        .filter(f => f.endsWith('.json'))
+        .filter(isSegmentFile)
         .sort();
 
       if (files.length === 0) return null;
 
       const firstFile = path.join(journalPath, files[0]);
-      const data = decodeSegment(fs.readFileSync(firstFile));
+      const seg = readSegment(fs.readFileSync(firstFile)); // v1/v2/v3
 
       return {
         name,
         segmentCount: files.length,
-        ...data.metadata
+        ...seg.metadata
       };
     } catch {
       return null;
@@ -129,24 +144,29 @@ export class Store {
       return this.segmentCache.get(cacheKey)!;
     }
 
-    const segPath = path.join(this.journalsDir, journalName, `${segmentId}.json`);
-    try {
-      const data = decodeSegment(fs.readFileSync(segPath));
-      const seg = Segment.deserialize(data);
-      this.segmentCache.set(cacheKey, seg);
-      return seg;
-    } catch {
-      return null;
+    // Файл может быть .seg (v3) или .json (v1/v2) — пробуем оба
+    const dir = path.join(this.journalsDir, journalName);
+    for (const ext of ['.seg', '.json']) {
+      const segPath = path.join(dir, `${segmentId}${ext}`);
+      if (!fs.existsSync(segPath)) continue;
+      try {
+        const seg = readSegment(fs.readFileSync(segPath)); // v1/v2/v3
+        this.segmentCache.set(cacheKey, seg);
+        return seg;
+      } catch {
+        return null;
+      }
     }
+    return null;
   }
 
   listSegments(journalName: string): string[] {
     const journalPath = path.join(this.journalsDir, journalName);
     try {
       const files = fs.readdirSync(journalPath)
-        .filter(f => f.endsWith('.json'))
+        .filter(isSegmentFile)
         .sort()
-        .map(f => f.replace(/\.json$/, ''));
+        .map(idFromFile);
       return files;
     } catch {
       return [];

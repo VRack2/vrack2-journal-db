@@ -18,13 +18,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Segment } from './segment.ts';
 import { LRUCache } from './cache.ts';
-import { decodeSegment, encodeSegment } from './codec.ts';
+import { encodeSegment } from './codec.ts';
+import { encodeV3, readSegment } from './v3.ts';
 import { Interval } from './interval.ts';
 import type {
   AggregateExpr,
   AggFn,
   ColumnSummary,
   CompactResult,
+  CompressionMode,
   DownsampleBucket,
   JournalOptions,
   JournalStats,
@@ -33,13 +35,24 @@ import type {
   PurgeResult,
   Row,
   Schema,
-  SerializedSegment,
+  SegmentFormat,
   TimelineBucket,
 } from './types.ts';
 
 const LOCK_FILE = '.lock';
 const WAL_FILE = 'wal.log';
 const META_SUFFIX = '.meta';
+
+// Расширения файлов сегментов: v1/v2 → .json, v3 → .seg. Чтение прозрачное
+// (по магическим байтам), расширение — только для записи и индекса.
+const SEG_V3_EXT = '.seg';
+const SEG_V2_EXT = '.json';
+const isSegmentFile = (f: string): boolean =>
+  f.endsWith(SEG_V3_EXT) || f.endsWith(SEG_V2_EXT);
+const idFromFile = (f: string): string =>
+  f.endsWith(SEG_V3_EXT) ? f.slice(0, -SEG_V3_EXT.length)
+  : f.endsWith(SEG_V2_EXT) ? f.slice(0, -SEG_V2_EXT.length)
+  : f;
 
 /**
  * Сколько строк набирается в один сегмент до flush'а на диск (по умолчанию).
@@ -180,6 +193,13 @@ export class Journal {
   /** Стратегия блокировки одним владельцем ('pid' | 'off'). */
   readonly lockMode: LockMode;
 
+  /** Формат файлов сегментов при записи ('v2' | 'v3'); чтение — прозрачное. */
+  readonly format: SegmentFormat;
+  /** Сжатие блобов в v3 ('gzip' | 'zstd'); игнорируется в v2. */
+  readonly compression: CompressionMode;
+  /** Явные числовые кодек'и v3: поле → имя кодека. Пустое — авто-выбор. */
+  readonly codecs: Record<string, string>;
+
   /** Буфер WAL (сериализованные строки) — пишется одной append'ом. */
   private _walBuf: string[] = [];
   private _walBufBytes = 0;
@@ -203,7 +223,33 @@ export class Journal {
       throw new RangeError("Journal: lock должно быть 'pid' или 'off'");
     }
     this.lockMode = lock;
+
+    const format = opts.format ?? 'v2';
+    if (format !== 'v2' && format !== 'v3') {
+      throw new RangeError("Journal: format должно быть 'v2' или 'v3'");
+    }
+    this.format = format;
+
+    const compression = opts.compression ?? 'gzip';
+    if (compression !== 'gzip' && compression !== 'zstd') {
+      throw new RangeError("Journal: compression должно быть 'gzip' или 'zstd'");
+    }
+    this.compression = compression;
+
+    this.codecs = opts.codecs && typeof opts.codecs === 'object' ? { ...opts.codecs } : {};
     this._segmentCache = new LRUCache<string, Segment>(this.maxCachedSegments);
+  }
+
+  /** Расширение файла сегмента при записи: v3 → .seg, v2 → .json. */
+  private _segExt(): string {
+    return this.format === 'v3' ? SEG_V3_EXT : SEG_V2_EXT;
+  }
+
+  /** Кодирует сегмент в буфер файла (v2: gzip+JSON, v3: бинарные блобы). */
+  private _encodeSegment(segment: Segment): Buffer {
+    return this.format === 'v3'
+      ? encodeV3(segment, { compression: this.compression, codecs: this.codecs })
+      : encodeSegment(segment.serialize());
   }
 
   // --------------------------------------------------
@@ -226,15 +272,15 @@ export class Journal {
 
     try {
       // Индексируем файлы сегментов на диске (без парсинга — данные
-      // будут загружены лениво при первом обращении)
+      // будут загружены лениво при первом обращении). v1/v2 → .json, v3 → .seg
       const files = fs.readdirSync(journalPath)
-        .filter(f => f.endsWith('.json'))
+        .filter(isSegmentFile)
         .sort();
 
       this.segmentIndex.clear();
       this.segmentMeta.clear();
       for (const file of files) {
-        const id = file.replace(/\.json$/, '');
+        const id = idFromFile(file);
         this.segmentIndex.set(id, file);
         // Сайдкар с min/max ts + счётчиками: позволяет query()/stats()
         // пропускать чужие по времени файлы вообще без их загрузки.
@@ -319,13 +365,13 @@ export class Journal {
     // и только затем трим — в любой точке краха строки не теряются.
     this._walDrain();
 
-    const fileName = `${segment.id}.json`;
+    const fileName = `${segment.id}${this._segExt()}`;
     const filePath = path.join(this.journalPath(), fileName);
     const tmpPath = `${filePath}.tmp`;
 
     // Атомарная запись: сначала во временный файл, затем rename.
-    // Файл v2: gzip + CRC32 (см. codec.ts).
-    fs.writeFileSync(tmpPath, encodeSegment(segment.serialize()));
+    // v2: gzip + CRC32 (см. codec.ts); v3: бинарные блобы (см. v3.ts).
+    fs.writeFileSync(tmpPath, this._encodeSegment(segment));
     fs.renameSync(tmpPath, filePath);
 
     this._writeMeta(segment, fileName);
@@ -351,7 +397,7 @@ export class Journal {
       if (f === LOCK_FILE) continue;
       // Сегменты, их .meta, wal.log и .tmp-остатки — всё удаляем
       if (
-        f.endsWith('.json') ||
+        isSegmentFile(f) ||
         f.endsWith(`${META_SUFFIX}`) ||
         f.endsWith('.tmp') ||
         f === WAL_FILE
@@ -412,9 +458,9 @@ export class Journal {
     }
 
     // Атомарная запись слитого сегмента + его сайдкар с границами
-    const fileName = `${merged.id}.json`;
+    const fileName = `${merged.id}${this._segExt()}`;
     const filePath = path.join(this.journalPath(), fileName);
-    fs.writeFileSync(`${filePath}.tmp`, encodeSegment(merged.serialize()));
+    fs.writeFileSync(`${filePath}.tmp`, this._encodeSegment(merged));
     fs.renameSync(`${filePath}.tmp`, filePath);
     this._writeMeta(merged, fileName);
 
@@ -512,12 +558,17 @@ export class Journal {
       const fresh = new Segment(seg.id, this.schema!, this.metadata ?? {});
       for (const row of kept) fresh.append(row);
 
-      const fileName = this.segmentIndex.get(id)!;
+      const oldFile = this.segmentIndex.get(id)!;
+      const fileName = `${id}${this._segExt()}`; // текущий формат журнала
       const filePath = path.join(this.journalPath(), fileName);
-      fs.writeFileSync(`${filePath}.tmp`, encodeSegment(fresh.serialize()));
+      fs.writeFileSync(`${filePath}.tmp`, this._encodeSegment(fresh));
       fs.renameSync(`${filePath}.tmp`, filePath); // атомарно — краш не оставит «половину»
+      if (oldFile !== fileName) {
+        fs.rmSync(path.join(this.journalPath(), oldFile), { force: true }); // старый файл (другое расширение)
+      }
       this._writeMeta(fresh, fileName);
       this._segmentCache.set(id, fresh);
+      this.segmentIndex.set(id, fileName);
       rewrittenSegments++;
     }
 
@@ -1139,16 +1190,15 @@ export class Journal {
       throw new Error(`Неизвестный сегмент: ${id}`);
     }
 
-    let data: SerializedSegment;
+    let seg: Segment;
     try {
       const buf = fs.readFileSync(path.join(this.journalPath(), fileName));
-      data = decodeSegment(buf);
+      // Прозрачное чтение: v1 (JSON) / v2 (gzip+JSON) / v3 (бинарные блобы)
+      seg = readSegment(buf);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       throw new Error(`Не удалось прочитать сегмент ${fileName}: ${message}`);
     }
-
-    const seg = Segment.deserialize(data);
     // Кэшируем границы: для старых файлов без .meta это единственный способ,
     // и дальше query()/stats() смогут работать по этим данным.
     this.segmentMeta.set(id, {
