@@ -8,6 +8,7 @@ import { Journal, DEFAULT_ROWS_PER_SEGMENT } from './journal.ts';
 import type { Segment } from './segment.ts';
 import { LRUCache } from './cache.ts';
 import { readSegment } from './v3.ts';
+import { Table, openTable as createTable } from './table.ts';
 import type {
   CompressionMode,
   LockMode,
@@ -17,6 +18,7 @@ import type {
   SegmentFormat,
   StoreOptions,
   StoreStats,
+  TableConfig,
 } from './types.ts';
 
 const isSegmentFile = (f: string): boolean => f.endsWith('.seg') || f.endsWith('.json');
@@ -35,6 +37,9 @@ export class Store {
 
   /** открытые журналы по имени */
   openJournals = new Map<string, Journal>();
+
+  /** открытые таблицы (мультитирные, Фаза 4) по имени */
+  openTables = new Map<string, Table>();
 
   /** ключ «journal:segmentId» → Segment (LRU) */
   segmentCache: LRUCache<string, Segment>;
@@ -95,9 +100,48 @@ export class Store {
   }
 
   closeAll(): void {
+    // Сначала таблицы (закрывают свои тиры-журналы), потом прочие журналы.
+    for (const name of [...this.openTables.keys()]) {
+      this.closeTable(name);
+    }
     for (const name of [...this.openJournals.keys()]) {
       this.closeJournal(name);
     }
+  }
+
+  // --------------------------------------------------
+  // Таблицы (мультитирные, Фаза 4) — GraphiteMergeTree
+  // --------------------------------------------------
+
+  /**
+   * Открыть таблицу-метрик (несколько тиров разрешения, каждый — журнал
+   * `<name>/r<res>`). Повторный вызов с тем же именем вернёт открытую таблицу.
+   *
+   * @example
+   * const t = store.openTable('cpu', {
+   *   retention: '5s:1d,15s:1w,1m:1mon',
+   *   agg: { value: 'avg' },
+   *   schema: { ts: 'delta', value: 'auto', host: 'dictionary' },
+   * });
+   * t.append({ ts: Date.now(), value: 42.3, host: 'web-1' });
+   * t.query('now-30d', 'now');
+   */
+  openTable(name: string, config: TableConfig = {}): Table {
+    const existing = this.openTables.get(name);
+    if (existing) return existing;
+    const t = createTable(this, name, config);
+    this.openTables.set(name, t);
+    return t;
+  }
+
+  /** Закрыть таблицу (и все её тиры-журналы). */
+  closeTable(name: string): void {
+    const t = this.openTables.get(name);
+    if (!t) {
+      throw new Error(`Table not found: ${name}`);
+    }
+    t.close();
+    this.openTables.delete(name);
   }
 
   listJournals(): string[] {

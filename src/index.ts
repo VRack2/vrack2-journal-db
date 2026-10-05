@@ -75,5 +75,15 @@ export type {
   StoreOptions,
   StoreStats,
   TierStatus,
-  TimelineBucket
+  TimelineBucket,
+  ResolutionTier,
+  TableConfig,
+  TableTierStat,
+  RollupReport
 } from './types.ts';
+
+// ============================================================
+// Фаза 4 — Table (мультитирная таблица-метрик, GraphiteMergeTree)
+// ============================================================
+export { Table, openTable, parseRetention } from './table.ts';
+export type { TableStore } from './table.ts';
