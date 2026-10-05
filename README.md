@@ -6,6 +6,12 @@
 самая полная: строгие типы плюс сжатие файлов, гибкая схема, компактизация и
 защита от потери данных при крахе.
 
+Плюс метрический движок поверх того же журнала: векторные агрегации
+(`aggregate`, `downsample`, `scan`), retention-тиры с rollup'ом (стиль
+GraphiteMergeTree, `'5s:1d,15s:1w,1m:1mon'`), SQL-lite, точные квантили и
+бинарный формат v3 с числовыми кодеками (doubleDelta, Gorilla, RLE) — хранение
+метрических данных в разы плотнее, чем JSON.
+
 ## Для чего это
 
 vrack2-journal-db хорошо подходит для данных, которые **только добавляются**: логи приложения,
@@ -375,6 +381,133 @@ const j = new Journal('./data');
 j.open('events', { ts: 'delta', val: 'dictionary', extra: 'raw' });
 
 j.allRows(); // старые строки: extra === null; новые — с заполненным extra
+ ```
+
+### Формат v3 и числовые кодексы
+
+По умолчанию сегменты пишутся в формате v2 (gzip + CRC32, JSON внутри). Для
+метрических данных есть формат **v3**: числовые колонки кодируются не JSON'ом,
+а плотными числовыми кодеками, и только потом сжимаются (zstd при Node ≥ 23.8,
+иначе gzip). Включается опцией `format: 'v3'`:
+
+```ts
+import { Journal } from 'vrack2-journal-db';
+
+const j = new Journal('./data', {
+  format: 'v3',                                  // v3 вместо v2 (по умолчанию)
+  codecs: { ts: 'doubleDelta', value: 'gorilla' }, // явный кодек; иначе авто-выбор
+});
+j.open('metrics', { ts: 'delta', value: 'auto' });
+j.append({ ts: Date.now(), value: 42.3 });
+```
+
+Кодек выбирается под характер данных (задать явно через `codecs`, или оставить
+авто — `autoPickNumCodec` решает по 50 сэмплам):
+
+| Кодек | Когда | Что делает |
+|---|---|---|
+| `f64` | любой float | 8 байт на значение, базовый |
+| `doubleDelta` | таймстампы, счётчики | 2-я разность: у равномерных рядов почти все нули |
+| `gorilla` | осциллирующие float (CPU, RAM) | XOR-сжатие соседних значений, без потери точности |
+| `rle` | длинные пробеги одного значения | «значение × количество» |
+| `simple8b` | маленькие целые (коды, статусы) | 1 байт + run-length |
+| `dictionary` | строки | номер в общем словаре |
+
+Строка сегмента: `кодек → zstd|gzip → CRC32`. На метрических рядах v3 даёт
+~3× меньше, чем тот же JSON (v2) — это проверяется `test/test-v3-format.ts`.
+Ридер мульти-версионный: v1/v2-каталоги читаются без миграции (формат
+определяется по магическим байтам), а `j.migrateToV3()` дописывает старые
+сегменты уже в v3.
+
+### Векторный скан (scan())
+
+`scan()` — «мини-ClickHouse» поверх журнала: выбирает колонки, фильтрует,
+агрегирует, сортирует — и **не материализует строки в JSON**. Декодируются
+только запрошенные колонки, сразу в плотные массивы; фильтр — плотный цикл с
+ранним выходом. Память и CPU — O(выбранные колонки × сегмент), а не O(строки ×
+все поля):
+
+```ts
+// top-5: select + where + groupBy + агрегат + сортировка + limit
+const top5 = j.scan({
+  start: 'now-1h',
+  end:   'now',
+  select: ['host', 'value'],
+  where: [{ field: 'value', op: 'ge', value: 90 }],
+  groupBy: ['host'],
+  agg: { value: ['avg'] },
+  order: 'desc',
+  limit: 5,
+});
+
+// плоские строки (без groupBy) — scan() возвращает Row[]
+const rows = j.scan({ start: 'now-5m', end: 'now', select: ['ts', 'value'] });
+```
+
+Операции: `select`, `where` (операторы `eq`, `ne`, `lt`, `le`, `gt`, `ge`,
+`in`, `nin`, `isNull`, `isNotNull`; условия соединяются И), `groupBy`, `agg`
+(min/max/sum/avg/count), `order` (asc/desc), `limit`, `offset`.
+top-k — это `order` + `limit`. 10M точек (where + groupBy 50 групп + top-4) —
+~700 мс против ~1.5 с у `allRows() + reduce` (`test/test-scan.ts`).
+
+### Таблицы и retention-тиры
+
+Для «метрик на 30+ дней с предсказуемым размером» есть `Table` — журнал +
+retention-тиры + rollup (стиль GraphiteMergeTree). Одна логическая таблица =
+N журналов с разным разрешением; записываем в самый мелкий тир, а старые данные
+rollup'им в крупный и чистим по TTL:
+
+```ts
+import { Store } from 'vrack2-journal-db';
+
+const store = new Store('./data');
+const cpu = store.openTable('cpu', {
+  retention: '5s:1d,15s:1w,1m:1mon', // 5с/1день, 15с/1неделя, 1м/1месяц
+  agg: { value: 'avg' },             // как сводить при rollup (fine → coarse)
+});
+
+cpu.append({ ts: Date.now(), value: 42.3 });
+
+cpu.query('now-30d', 'now');              // сам собирает ответ из нужных тиров по возрасту
+cpu.rollup();                             // мелкий → крупний, чекпоинт до удаления → идемпотентно
+cpu.stats();                              // { tiers: [{ r: '5s', rows, size }, …] }
+cpu.percentile('now-1d', 'now', [0.5, 0.95]); // p50/p95 по полю value
+```
+
+- **Размер на 30 дней предсказуем:** `≤ Σ(TTL_тир × разрешение_тир)`. В
+  `test/test-retention.ts` 1000 сегментов сворачиваются в 345, ~600KB → 355KB.
+- **Rollup идемпотентен:** чекпоинт пишется в `table.ck` *до* удаления мелкого
+  сегмента — краш посередине не оставляет «дыру» и не дублирует данные.
+- **Запись всегда в самый мелкий тир**; `query` склеивает диапазоны по возрасту
+  (hot/warm/cold), старшие тиры — уже агрегированные.
+
+### SQL-lite и квантили
+
+`sql()` — тонкий парсер над `scan()`: не SQL-диалект, а подмножество
+(`SELECT … [WHERE …] [GROUP BY …] [ORDER BY …] [LIMIT/OFFSET]`), которое
+компилируется в опции `scan()` и исполняется тем же векторным движком:
+
+```ts
+const r = j.sql(`
+  SELECT host, avg(value), count(value)
+  WHERE value > 90 AND ts BETWEEN 'now-1h' AND 'now'
+  GROUP BY host
+  ORDER BY value_avg DESC
+  LIMIT 10
+`);
+// ключи агрегатов — «поле_функция»: value_avg, value_count (без AS-алиасов)
+```
+
+Поддерживается: `SELECT <поля | fn(поле)>`, `WHERE` (=, >, >=, <, <=, IN,
+BETWEEN, IS [NOT] NULL, AND), `GROUP BY`, `ORDER BY … [ASC|DESC]`, `LIMIT`,
+`OFFSET`. Агрегаты — `min/max/sum/avg/count`.
+
+Точные квантили (p50/p95/p99) — по материализованным значениям, линейная
+интерполяция (а не приближённый t-digest):
+
+```ts
+j.percentile('now-1h', 'now', 'value', [0.5, 0.95, 0.99]);
+// → { p50: 12.1, p95: 60.2, p99: 98.7 }
 ```
 
 ## Использование
@@ -579,6 +712,19 @@ node --max-old-space-size=8192 test/test-load.ts   # LOAD_ROWS=500000 — быс
 Полная целостность проверяется агрегатами по всем 2M строкам после холодного
 reopen и после compact'а.
 
+Для метрических рядов формат v3 плотнее (проверка `test/test-v3-format.ts`,
+одинаковые 40K точек):
+
+| Метрика | Значение |
+| --- | --- |
+| v3 (doubleDelta/gorilla/rle + gzip) | ~20.0KB |
+| тот же JSON (v2) | ~61.0KB |
+| Коэффициент | **~3.0× меньше**, чем JSON |
+
+На равномерных таймстампах `doubleDelta` даёт почти все нули, на осциллирующих
+float'ах `gorilla` — сжатие соседних значений. Компрессия v3 по умолчанию
+`zstd` (Node ≥ 23.8), иначе `gzip`.
+
 ## Формат данных на диске
 
 Каталог базы выглядит так:
@@ -593,6 +739,12 @@ data/
         ├── wal.log                    # строки, записанные ещё до flush'а; удаляется после него
         └── .lock                      # блокировка владельца; живёт пока журнал открыт
 ```
+
+В формате v3 сегмент — бинарный файл `<имя>.seg` (магические байты `JSDB` +
+версия, затем по блобу на колонку: числовой кодек или словарь, сжатый
+zstd/gzip, и CRC32 на файл). Старые `.json` (v1/v2) и новые `.seg` (v3) могут
+лежать в одном каталоге — ридер определяет формат по магическим байтам и читает
+оба.
 
 Содержимое сегмента (v1 — так он выглядит как JSON; v2 — тот же JSON, но gzip-сжатый
 и с контрольной суммой):
@@ -627,16 +779,21 @@ data/
 | `src/types.ts` | Общие типы; сериализованные колонки — дискриминированные union'ы |
 | `src/columns.ts` | Шесть типов колонок: Raw, Dictionary, Delta, RLE, Auto, Catchall |
 | `src/segment.ts` | Сегмент: набор колонок + дедупликация строк (dedupMap) |
-| `src/journal.ts` | Журнал: открытие/закрытие, WAL, блокировки, flush, clear(), purge(), timeline(), page()/tail(), compact(), запросы |
+| `src/journal.ts` | Журнал: WAL, блокировки, flush, clear(), purge(), timeline(), page()/tail(), compact(), `aggregate`/`downsample`, `scan()`, `sql()`, `percentile()`, `migrateToV3()` |
 | `src/interval.ts` | «Язык интервалов» (VRackDB-совместимо, в мс): parseInterval, partOfPeriod, period, roundTime, getIntervals |
-| `src/store.ts` | Хранилище нескольких журналов с общим кэшем сегментов |
+| `src/store.ts` | Хранилище нескольких журналов с общим кэшем сегментов; `openTable()` |
 | `src/cache.ts` | LRU-кэш (используется Journal и Store) |
 | `src/codec.ts` | Формат файла v2: gzip + CRC32; чтение старых v1-файлов |
+| `src/v3.ts` | Формат v3: бинарные блобы колонок (кодек + словарь + zstd/gzip + CRC32), мульти-версионный ридер v1/v2/v3 |
+| `src/numcodecs.ts` | Числовые кодексы v3: f64, doubleDelta, gorilla, rle8, simple8b, dictionary + `autoPickNumCodec` |
+| `src/retention.ts` | Retention-тиры: парсинг `'5s:1d,…'`, выбор тира по возрасту, rollup (fine→coarse) |
+| `src/table.ts` | `Table`: N журналов-тиров + retention + rollup + `query`/`percentile`/`stats` |
+| `src/sql.ts` | SQL-lite: парсер подмножества SQL → опции `scan()` |
 
 ## Тесты
 
 ```bash
-npm test          # 12 сценариев, ~650 проверок
+npm test          # 18 сценариев, 980 проверок (test-load.ts — отдельный, долгий)
 npm run typecheck # tsc --noEmit в strict-режиме
 ```
 
@@ -646,13 +803,21 @@ npm run typecheck # tsc --noEmit в strict-режиме
 компактизация (дедупликация на границах, перекодирование auto); purge
 (быстрое удаление сегментов по .meta, перекодирование пересекающего, строки
 без ts не удаляются, WAL не «оживляет» после reopen); timeline
-(бакеты по времени: счётчики, «где есть данные», сегменты вне периода не читаются);
-aggregate
-(min/max/sum/avg/count по саммари сегментов, сверка с brute-force, null-семантика,
-строки без ts, fallback без .meta, downsample, производительность); interval
-(«язык интервалов» VRackDB: parseInterval, relative periods, roundTime);
-надёжность
-(WAL-восстановление после имитированного краха, блокировки).
+(бакеты по времени); aggregate (min/max/sum/avg/count по саммари, сверка с
+brute-force, downsample); interval («язык интервалов» VRackDB); надёжность
+(WAL-восстановление после имитированного краха, блокировки); **v3-формат**
+(кодексы doubleDelta/gorilla/rle, сверка с эталоном, ~3× меньше JSON);
+**scan** (select/where/groupBy/agg/order/limit, сверка с brute-force, 10M точек);
+**retention** (тиры, rollup, идемпотентность, TTL, предсказуемый размер);
+**table** (запись в мелкий тир, query по возрасту, stats, percentile);
+**migration** (v2 → v3, идемпотентность, целостность); **sql**
+(парсер SQL → scan, WHERE/GROUP BY/ORDER BY/LIMIT, квантили).
+
+Долгий нагрузочный тест (2M строк) не в `npm test`:
+
+```sh
+node --max-old-space-size=8192 test/test-load.ts   # LOAD_ROWS=500000 — быстрее
+```
 
 ## Отличия от JS-версии (`../new`)
 
@@ -660,3 +825,9 @@ JS-версия — базовый функционал: журналы, кол�
 файлы v1. TypeScript-версия содержит всё то же плюс: строгую типизацию (strict mode),
 сжатие файлов с контрольной суммой (v2, старые файлы читает), гибкую схему
 (null-падинг, catchall, эволюция схемы), компактизацию и надёжность (WAL, блокировки).
+
+Плюс весь метрический движок, которого в JS-версии нет: формат **v3** с
+числовыми кодеками (doubleDelta, Gorilla, RLE) и мульти-версионный ридер;
+векторный `scan()` (select/where/groupBy/agg/order/limit); **Table** с
+retention-тирами и rollup'ом (стиль GraphiteMergeTree); SQL-lite (`sql()`);
+точные квантили (`percentile()`).
