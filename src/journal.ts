@@ -23,6 +23,7 @@ import { encodeSegment } from './codec.ts';
 import { encodeV3, readSegment } from './v3.ts';
 import { Interval } from './interval.ts';
 import { RetentionEngine } from './retention.ts';
+import { parseSql } from './sql.ts';
 import type {
   AggregateExpr,
   AggFn,
@@ -1358,6 +1359,23 @@ export class Journal {
     const from = plan.offset;
     const to = plan.limit !== null ? from + plan.limit : rawRows!.length;
     return rawRows!.slice(from, to);
+  }
+
+  /**
+   * SQL-lite поверх scan() (Фаза 5): тонкий парсер компилирует SQL-подобный
+   * запрос в опции scan() и выполняет его. Не диалект — только нужное подмножество:
+   *
+   *   SELECT avg(value), host WHERE value > 90 GROUP BY host ORDER BY value_avg DESC LIMIT 20
+   *   SELECT host, value WHERE ts BETWEEN 'now-1h' AND 'now' AND host = 'web-1' LIMIT 10
+   *   SELECT * WHERE level IN ('error','warn') ORDER BY ts DESC LIMIT 50
+   *
+   * Детали и синтаксис — см. sql.ts. Бросает SqlError при ошибке синтаксиса.
+   */
+  sql(query: string): Row[] {
+    if (!this.isOpen) {
+      throw new Error('Journal not open. Call open() first.');
+    }
+    return this.scan(parseSql(query));
   }
 
   /** Компиляция опций скана в план (валидация + предвычисление). */
