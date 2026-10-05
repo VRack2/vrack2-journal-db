@@ -287,7 +287,10 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   j2.open('zstdDefault', schema);
   const rows = j2.allRows();
   assert(rows.length === N, `zstd/gzip по умолчанию: ${N} строк (факт ${rows.length})`);
-  assert(rows[0].val === 1000 && Math.abs(rows[1].val - Math.cos(0.2) * 1000) < 1e-9, 'значения совпадают');
+  assert(
+    rows[0].val === 1000 && Math.abs((rows[1].val as number) - Math.cos(0.2) * 1000) < 1e-9,
+    'значения совпадают'
+  );
   j2.close();
 }
 

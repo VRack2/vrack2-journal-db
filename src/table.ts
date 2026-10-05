@@ -24,7 +24,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Journal } from './journal.ts';
+import { Journal, percentileKey, percentileOf } from './journal.ts';
 import { Interval } from './interval.ts';
 import type {
   AggFn,
@@ -352,6 +352,40 @@ export class Table {
         case 'avg': val = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null; break;
       }
       out[`${e.field}__${e.fn}`] = val;
+    }
+    return out;
+  }
+
+  /**
+   * Квантили (percentile) значения `value` в [start, end] (Фаза 5): p50/p90/p95/p99.
+   * Материализует строки через query() и считает линейной интерполяцией.
+   *
+   * ```ts
+   * t.percentile('now-1h', 'now', [0.5, 0.95, 0.99]);
+   * // → { p50: 41.2, p95: 98.7, p99: 99.9 }
+   * ```
+   */
+  percentile(
+    start: number | string,
+    end: number | string,
+    levels: number | number[],
+  ): Record<string, number | null> {
+    const lv = Array.isArray(levels) ? levels.slice() : [levels];
+    for (const q of lv) {
+      if (typeof q !== 'number' || !Number.isFinite(q) || q <= 0 || q >= 1) {
+        throw new RangeError(`Table: percentile() — level: число в (0, 1) (получено ${String(q)})`);
+      }
+    }
+    const rows = this.query(start, end);
+    const vals: number[] = [];
+    for (const r of rows) {
+      const v = r.value;
+      if (typeof v === 'number' && Number.isFinite(v)) vals.push(v);
+    }
+    vals.sort((a, b) => a - b);
+    const out: Record<string, number | null> = {};
+    for (const q of lv) {
+      out[percentileKey(q)] = vals.length === 0 ? null : percentileOf(vals, q);
     }
     return out;
   }

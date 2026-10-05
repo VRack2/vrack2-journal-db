@@ -334,5 +334,33 @@ const NOW = 1_700_000_000_000;
   store.closeAll();
 }
 
+// --------------------------------------------------
+// 10. Квантили (Фаза 5): Table.percentile()
+// --------------------------------------------------
+{
+  const store = new Store(baseDir);
+  const t = store.openTable('pctl', {
+    retention: '1s:1d',
+    nowProvider: () => NOW,
+  });
+  // значения 0..99 в одном тонком тире (все свежие)
+  const N = 100;
+  for (let i = 0; i < N; i++) {
+    t.append({ ts: NOW - (N - i) * 1 * SEC, value: i });
+  }
+  t.flush();
+
+  // values 0..99: p50=49.5, p90=89.1, p95=94.05
+  const res = t.percentile('now-1d', 'now', [0.5, 0.9, 0.95]);
+  assert(Math.abs((res['p50'] as number) - 49.5) < 1e-9, `T1 p50 (факт ${res['p50']})`);
+  assert(Math.abs((res['p90'] as number) - 89.1) < 1e-9, `T1 p90 (факт ${res['p90']})`);
+  assert(Math.abs((res['p95'] as number) - 94.05) < 1e-9, `T1 p95 (факт ${res['p95']})`);
+
+  // одиночный уровень + валидация
+  assert(Math.abs((t.percentile('now-1d', 'now', 0.5)['p50'] as number) - 49.5) < 1e-9, 'T2 одиночный уровень');
+  assertThrows(() => t.percentile('now-1d', 'now', 0), 'T3 level=0 бросает');
+  store.closeAll();
+}
+
 console.log(`\nТесты table: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

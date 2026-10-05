@@ -474,5 +474,41 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
   j.close();
 }
 
+// --------------------------------------------------
+// K. Квантили (Фаза 5): percentile() — сверка с brute-force
+// --------------------------------------------------
+{
+  const j = new Journal(baseDir);
+  j.open('pctl', SCHEMA);
+  const N = 1000;
+  for (let i = 0; i < N; i++) {
+    j.append({ ts: base + i * 1000, value: i, host: 'web-1' });
+  }
+  j.close();
+
+  const j2 = new Journal(baseDir);
+  j2.open('pctl', SCHEMA);
+  const s = base, e = base + (N - 1) * 1000;
+
+  // values = 0..999: p50=499.5, p90=899.1, p95=949.05, p99=989.01
+  const res = j2.percentile(s, e, 'value', [0.5, 0.9, 0.95, 0.99]);
+  assertClose(res['p50'], 499.5, 'K1 p50');
+  assertClose(res['p90'], 899.1, 'K1 p90');
+  assertClose(res['p95'], 949.05, 'K1 p95');
+  assertClose(res['p99'], 989.01, 'K1 p99');
+
+  const res2 = j2.percentile(s, e, 'value', 0.5); // одиночный уровень
+  assertClose(res2['p50'], 499.5, 'K2 одиночный уровень');
+
+  const res3 = j2.percentile(base - 100, base - 50, 'value', 0.5); // пустой диапазон
+  assert(res3['p50'] === null, 'K3 пустой диапазон → null');
+
+  let threw = false;
+  try { j2.percentile(s, e, 'value', 1.5); } catch (e2) { threw = true; }
+  assert(threw, 'K4 level вне (0,1) → ошибка');
+
+  j2.close();
+}
+
 console.log(`\nТесты aggregate: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

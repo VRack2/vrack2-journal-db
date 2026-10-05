@@ -183,6 +183,26 @@ function aggValue(acc: AggAcc, fn: AggFn): number | null {
 }
 
 // --------------------------------------------------
+// Квантили (Фаза 5) — точный расчёт по отсортированным значениям
+// --------------------------------------------------
+
+/** Ключ результата квантили: 0.95 → 'p95', 0.875 → 'p87.5'. */
+export function percentileKey(q: number): string {
+  return 'p' + Math.round(q * 1000) / 10;
+}
+
+/** Квантиль (linear interpolation, метод numpy 'linear') по отсортированному массиву. */
+export function percentileOf(sortedVals: number[], q: number): number {
+  const n = sortedVals.length;
+  if (n === 1) return sortedVals[0];
+  const pos = (n - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  if (lo === hi) return sortedVals[lo];
+  return sortedVals[lo] + (sortedVals[hi] - sortedVals[lo]) * (pos - lo);
+}
+
+// --------------------------------------------------
 // Скан (Фаза 3) — операторы where + скомпилированный план
 // --------------------------------------------------
 
@@ -978,6 +998,59 @@ export class Journal {
     }
 
     return this._buildResult(exprs, accs);
+  }
+
+  /**
+   * Квантили (percentile) поля `field` на [startTs, endTs] (Фаза 5):
+   * p50/p90/p95/p99 и т.п. Точный расчёт по материализованным значениям
+   * (linear interpolation); t-digest по сегментам — оптимизация на будущее
+   * (мин/макс/сумма из саммари квантили не дают).
+   *
+   * ```ts
+   * j.percentile('now-1h', 'now', 'value', [0.5, 0.9, 0.95, 0.99]);
+   * // → { p50: 12.1, p90: 45.0, p95: 60.2, p99: 98.7 }
+   * ```
+   *
+   * `levels` — число (0,1) или массив таких чисел. Берутся конечные числа поля;
+   * null/не-числа и строки вне диапазона ts пропускаются. Ключ — `p`+уровень*100.
+   */
+  percentile(
+    startTs: number | string,
+    endTs: number | string,
+    field: string,
+    levels: number | number[],
+  ): Record<string, number | null> {
+    if (!this.isOpen) {
+      throw new Error('Journal not open. Call open() first.');
+    }
+    if (typeof field !== 'string' || field.length === 0) {
+      throw new RangeError('Journal: percentile() — field: непустое имя поля');
+    }
+    const lv = Array.isArray(levels) ? levels.slice() : [levels];
+    for (const q of lv) {
+      if (typeof q !== 'number' || !Number.isFinite(q) || q <= 0 || q >= 1) {
+        throw new RangeError(`Journal: percentile() — level: число в (0, 1) (получено ${String(q)})`);
+      }
+    }
+    const start = resolveTs(startTs, 'percentile(startTs)');
+    const end = resolveTs(endTs, 'percentile(endTs)');
+    if (end < start) {
+      throw new RangeError('Journal: percentile() — startTs должен быть <= endTs');
+    }
+
+    const rows = this.scan({ start: startTs, end: endTs, select: [field] });
+    const vals: number[] = [];
+    for (const r of rows) {
+      const v = r[field];
+      if (typeof v === 'number' && Number.isFinite(v)) vals.push(v);
+    }
+    vals.sort((a, b) => a - b);
+
+    const out: Record<string, number | null> = {};
+    for (const q of lv) {
+      out[percentileKey(q)] = vals.length === 0 ? null : percentileOf(vals, q);
+    }
+    return out;
   }
 
   /**
