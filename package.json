@@ -1,7 +1,7 @@
 {
   "name": "vrack2-journal-db",
   "version": "2.0.0",
-  "description": "Append-only columnar journal DB for Node.js: gzip + dictionary/delta/RLE columns, WAL with crash-safe flush, time-range queries and pagination that skip whole files via .meta sidecars.",
+  "description": "Append-only columnar journal DB for Node.js: gzip/zstd, dictionary/delta/RLE/numeric-codec columns, WAL with crash-safe flush, time-range queries that skip whole files via .meta sidecars, plus a metric engine: summaries, aggregate/timeline, vector scan, SQL-lite, quantiles, and retention tiers with rollup.",
   "keywords": [
     "database",
     "journal",
@@ -12,7 +12,13 @@
     "dictionary-encoding",
     "delta-encoding",
     "rle",
-    "wal"
+    "wal",
+    "time-series",
+    "metrics",
+    "scan",
+    "sql",
+    "quantile",
+    "retention"
   ],
   "type": "module",
   "license": "MIT",
