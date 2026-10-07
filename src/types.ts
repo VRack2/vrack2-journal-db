@@ -322,6 +322,22 @@ export interface TableConfig {
   /** Провайдер «текущего времени» (для тестов и детерминированного rollup).
    *  По умолчанию Date.now. */
   nowProvider?: () => number;
+
+  // --- авто-обслуживание (включено по умолчанию; см. JournalOptions.autoCompact) ---
+  /** Авто-ролап: при append() переносить состарившиеся строки на грубее и чистить
+   *  мелкие тиры (по умолчанию true). Ручной эквивалент — t.rollup(). */
+  autoRollup?: boolean;
+  /** Авто-purge: при append() удалять из грубейшего тира строки старше его TTL
+   *  (по умолчанию true). Ручной эквивалент — t.tierJournals[i].purge(...). */
+  autoPurge?: boolean;
+  /** Авто-компакт тиров (по умолчанию true): сливать закрытые сегменты тира,
+   *  когда их накопилось >= compactMinSegments. Срабатывает после flush(). */
+  autoCompact?: boolean;
+  /** Порог закрытых сегментов тира перед авто-компактом (по умолчанию 4). */
+  compactMinSegments?: number;
+  /** Троттлинг авто-ролапа/авто-purge: не чаще, чем раз в N мс (по умолчанию 30 000).
+   *  0 — без троттлинга (проверка на каждый append). */
+  maintenanceMinIntervalMs?: number;
 }
 
 /** Статус одного тира таблицы. */
@@ -380,6 +396,12 @@ export interface JournalOptions {
   codecs?: Record<string, string>;
   /** Тир'ы retention (Фаза 4). По умолчанию defaultTiers() — см. retention.ts. */
   retention?: RetentionTier[];
+  /** Авто-компакт (по умолчанию true): после flush() автоматически сливать
+   *  закрытые сегменты, когда их накопилось >= compactMinSegments. Идемпотентно
+   *  (compact() требует >= 2 сегментов), самоограничивается. Выключить: false. */
+  autoCompact?: boolean;
+  /** Сколько закрытых сегментов накопить перед авто-компактом (по умолчанию 4). */
+  compactMinSegments?: number;
 }
 
 export interface StoreOptions {
@@ -393,6 +415,11 @@ export interface StoreOptions {
   compression?: CompressionMode;
   /** Числовые кодеки v3 по умолчанию: поле → имя кодека. */
   codecs?: Record<string, string>;
+  /** Авто-компакт по умолчанию для всех журналов (по умолчанию true).
+   *  Переопределяется OpenJournalOptions.autoCompact для отдельного журнала. */
+  autoCompact?: boolean;
+  /** Порог закрытых сегментов для авто-компакта (по умолчанию 4). */
+  compactMinSegments?: number;
 }
 
 export interface OpenJournalOptions {
@@ -406,6 +433,10 @@ export interface OpenJournalOptions {
   compression?: CompressionMode;
   /** Переопределяет `codecs` из StoreOptions. */
   codecs?: Record<string, string>;
+  /** Переопределяет `autoCompact` из StoreOptions. */
+  autoCompact?: boolean;
+  /** Переопределяет `compactMinSegments` из StoreOptions. */
+  compactMinSegments?: number;
 }
 
 export interface JournalStats {

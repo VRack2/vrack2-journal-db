@@ -57,6 +57,14 @@ const AGG_FNS: ReadonlySet<string> = new Set(['min', 'max', 'sum', 'avg', 'count
 const isAggFn = (fn: unknown): fn is AggFn => AGG_FNS.has(String(fn));
 
 /**
+ * Троттлинг авто-ролапа/авто-purge: не чаще, чем раз в 30 секунд. Дешёвая
+ * проверка «пора ли» выполняется на каждый append, но сама работа (rollup/purge
+ * перекодирует данные) не чаще, чем раз в этот интервал — чтобы горячий цикл
+ * записей не дёргал диск на каждую строку. 0 выключает троттлинг (тесты).
+ */
+export const DEFAULT_MAINTENANCE_INTERVAL_MS = 30_000;
+
+/**
  * Парсит retention-политику '5s:1d,15s:1w,1m:1mon' в массив тиров
  * (от тонких к грубым). Валидирует: res/ttl > 0, разрешения и ttl неубывающие.
  */
@@ -125,6 +133,16 @@ export class Table {
   private checkpoints: Record<string, number>;
   private readonly cpPath: string;
 
+  // --- авто-обслуживание (включено по умолчанию) ---------------------------
+  /** Авто-ролап при append (по умолчанию true). */
+  readonly autoRollup: boolean;
+  /** Авто-purge (TTL грубейшего тира) при append (по умолчанию true). */
+  readonly autoPurge: boolean;
+  /** Троттлинг авто-ролапа/авто-purge (по умолчанию 30 000 мс; 0 — каждый append). */
+  readonly maintenanceMinIntervalMs: number;
+  /** Время последнего авто-обслуживания (в единицах nowProvider). */
+  private _lastMaintain = 0;
+
   constructor(store: TableStore, name: string, config: TableConfig = {}) {
     if (typeof name !== 'string' || name.length === 0) {
       throw new RangeError('Table: name — непустая строка');
@@ -172,9 +190,23 @@ export class Table {
 
     this.nowProvider = config.nowProvider ?? Date.now;
 
+    // --- авто-обслуживание ------------------------------------------------
+    this.autoRollup = config.autoRollup ?? true;
+    this.autoPurge = config.autoPurge ?? true;
+    const minInterval = config.maintenanceMinIntervalMs ?? DEFAULT_MAINTENANCE_INTERVAL_MS;
+    if (minInterval < 0 || !Number.isFinite(minInterval)) {
+      throw new RangeError('Table: maintenanceMinIntervalMs — число >= 0');
+    }
+    this.maintenanceMinIntervalMs = minInterval;
+    // Первый авто-обслуживание не раньше, чем через maintenanceMinIntervalMs
+    // после создания — иначе бы сработало на самом первом append.
+    this._lastMaintain = this.nowProvider();
+
     // --- открываем журнал на каждый тир ---------------------------------
     const opts: OpenJournalOptions = {};
     if (config.rowsPerSegment !== undefined) opts.rowsPerSegment = config.rowsPerSegment;
+    if (config.autoCompact !== undefined) opts.autoCompact = config.autoCompact;
+    if (config.compactMinSegments !== undefined) opts.compactMinSegments = config.compactMinSegments;
     this.tierNames = tiers.map((t, i) => `${name}/r${t.resMs}`);
     this.tierJournals = tiers.map((t, i) =>
       store.openJournal(
@@ -230,10 +262,42 @@ export class Table {
     return this.tierNames[i];
   }
 
-  /** Запись строки в самый тонкий тир (0). */
+  /** Запись строки в самый тонкий тир (0). После записи — авто-обслуживание
+   *  (ролап + purge), если включено и не троттлинговано. */
   append(row: Row): void {
     this._assertOpen();
     this.tierJournals[0].append(row);
+    this._maybeMaintain();
+  }
+
+  /**
+   * Авто-обслуживание: перенос состарившихся строк между тирами (rollup) и
+   * удаление из грубейшего тира данных старше его TTL (purge). Идемпотентно
+   * (rollup чекпоинтит, purge фильтрует по ts) и троттлинговано
+   * maintenanceMinIntervalMs — в горячем цикле записей работа не чаще раза
+   * за интервал. Ошибки обслуживания не роняют запись: логируем и игнорируем.
+   */
+  private _maybeMaintain(): void {
+    if (!this.autoRollup && !this.autoPurge) return;
+    const now = this.nowProvider();
+    if (now - this._lastMaintain < this.maintenanceMinIntervalMs) return;
+    this._lastMaintain = now;
+
+    if (this.autoRollup) {
+      try {
+        this.rollup(now);
+      } catch (e) {
+        console.error(`Table ${this.name}: авто-ролап не сработал:`, e);
+      }
+    }
+    if (this.autoPurge) {
+      const i = this.tiers.length - 1;
+      try {
+        this.tierJournals[i].purge(now - this.tiers[i].ttlMs);
+      } catch (e) {
+        console.error(`Table ${this.name}: авто-purge тира ${i} не сработал:`, e);
+      }
+    }
   }
 
   /** Слить активные сегменты всех тиров на диск (WAL срезается). */

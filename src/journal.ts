@@ -77,6 +77,14 @@ const DEFAULT_WAL_BATCH_ROWS = 512;
 const WAL_FLUSH_BYTES = 1_000_000;
 
 /**
+ * Авто-компакт: сколько закрытых сегментов накопить, прежде чем после flush()
+ * автоматически сливать их в один. Мелкий порог держит число файлов под контролем
+ * (каждый сегмент — свои фиксированные байты + сайдкар), но не перекодирует
+ * на каждый flush. 4 — стандартный LSM-порог.
+ */
+export const DEFAULT_COMPACT_MIN_SEGMENTS = 4;
+
+/**
  * Число (мс) или строка «языка интервалов» (VRackDB-совместимо, см. Interval)
  * вида 'now-1d'/'now'/'1700000000000' → миллисекунды. Числа проходят как есть.
  */
@@ -266,6 +274,10 @@ export class Journal {
   private readonly journalsDir: string;
   readonly rowsPerSegment: number;
   readonly maxCachedSegments: number;
+  /** Авто-компакт после flush() (по умолчанию true). */
+  readonly autoCompact: boolean;
+  /** Порог закрытых сегментов перед авто-компактом (по умолчанию 4). */
+  readonly compactMinSegments: number;
 
   name: string | null = null;
   schema: Schema | null = null;
@@ -315,6 +327,12 @@ export class Journal {
     this.journalsDir = path.join(baseDir, 'journals');
     this.rowsPerSegment = opts.rowsPerSegment ?? DEFAULT_ROWS_PER_SEGMENT;
     this.maxCachedSegments = opts.maxCachedSegments ?? 32;
+    this.autoCompact = opts.autoCompact ?? true;
+    const minSeg = opts.compactMinSegments ?? DEFAULT_COMPACT_MIN_SEGMENTS;
+    if (!Number.isInteger(minSeg) || minSeg < 2) {
+      throw new RangeError('Journal: compactMinSegments должно быть целым числом >= 2');
+    }
+    this.compactMinSegments = minSeg;
     const batch = opts.walBatchSize ?? DEFAULT_WAL_BATCH_ROWS;
     if (!Number.isInteger(batch) || batch < 1) {
       throw new RangeError('Journal: walBatchSize должно быть целым числом >= 1');
@@ -468,6 +486,15 @@ export class Journal {
 
     if (seg.rowCount >= this.rowsPerSegment) {
       this.flush();
+
+      // Авто-компакт: только в цикле записи, когда append только что закрыл
+      // сегмент. Если закрытых сегментов накопилось порог — сливаем в один.
+      // compact() идемпотентен (требует >=2) и самоограничивается: после слияния
+      // счётчик падает ниже порога. Ручные операции (flush/purge/close) авто-
+      // компакт не вызывают — они явно управляются вызывающим кодом.
+      if (this.autoCompact && this._sortedClosedIds().length >= this.compactMinSegments) {
+        this.compact();
+      }
     }
   }
 
@@ -2055,12 +2082,22 @@ export class Journal {
    * это nonce, и при буквах в нём regex не срабатывает.)
    */
   private _sortedClosedIds(): string[] {
-    const key = (id: string): [number, number, string] => {
+    const idKey = (id: string): [number, number, string] => {
       const m = id.match(/^seg_(\d+)_(\d+)_(.+)$/);
       return m ? [Number(m[1]), Number(m[2]), m[3]] : [0, 0, id];
     };
+    // Сортируем по ХРОНОЛОГИИ данных (minTs из .meta), а не по порядку создания (ID).
+    // После компактизации слитый сегмент получает новый (более высокий) seq-номер,
+    // но содержит СТАЙШИЕ данные: порядок по ID дал бы неверную хронологию для
+    // ORDER BY / LIMIT. Для обычных журналов (создание в порядке ts) порядок тот же.
+    const minTsOf = (id: string): number => {
+      const m = this.segmentMeta.get(id);
+      return (m && typeof m.minTs === 'number') ? m.minTs : Number.MAX_SAFE_INTEGER;
+    };
     return [...this.segmentIndex.keys()].sort((a, b) => {
-      const ka = key(a), kb = key(b);
+      const ma = minTsOf(a), mb = minTsOf(b);
+      if (ma !== mb) return ma - mb;
+      const ka = idKey(a), kb = idKey(b);
       if (ka[0] !== kb[0]) return ka[0] - kb[0];
       if (ka[1] !== kb[1]) return ka[1] - kb[1];
       return ka[2] < kb[2] ? -1 : ka[2] > kb[2] ? 1 : 0;

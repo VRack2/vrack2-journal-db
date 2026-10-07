@@ -4,7 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Journal, DEFAULT_ROWS_PER_SEGMENT } from './journal.ts';
+import { Journal, DEFAULT_ROWS_PER_SEGMENT, DEFAULT_COMPACT_MIN_SEGMENTS } from './journal.ts';
 import type { Segment } from './segment.ts';
 import { LRUCache } from './cache.ts';
 import { readSegment, defaultCompression } from './v3.ts';
@@ -34,6 +34,8 @@ export class Store {
   readonly format: SegmentFormat;
   readonly compression: CompressionMode;
   readonly codecs: Record<string, string>;
+  readonly autoCompact: boolean;
+  readonly compactMinSegments: number;
 
   /** открытые журналы по имени */
   openJournals = new Map<string, Journal>();
@@ -58,6 +60,8 @@ export class Store {
     // zstd по умолчанию при Node >= 23.8 (Фаза 5); явный opts.compression — выше.
     this.compression = opts.compression ?? defaultCompression();
     this.codecs = opts.codecs && typeof opts.codecs === 'object' ? { ...opts.codecs } : {};
+    this.autoCompact = opts.autoCompact ?? true;
+    this.compactMinSegments = opts.compactMinSegments ?? DEFAULT_COMPACT_MIN_SEGMENTS;
     this.segmentCache = new LRUCache<string, Segment>(this.maxCacheSize);
   }
 
@@ -81,7 +85,9 @@ export class Store {
       lock: opts.lock ?? this.lockMode,
       format: opts.format ?? this.format,
       compression: opts.compression ?? this.compression,
-      codecs: opts.codecs ?? this.codecs
+      codecs: opts.codecs ?? this.codecs,
+      autoCompact: opts.autoCompact ?? this.autoCompact,
+      compactMinSegments: opts.compactMinSegments ?? this.compactMinSegments
     });
 
     journal.open(name, schema, metadata);
