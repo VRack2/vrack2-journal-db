@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/journal.ts';
-import { parseSql, SqlError } from '../src/sql.ts';
+import { parseSql, parseInsert, SqlError } from '../src/sql.ts';
 import type { Schema, Row } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -28,6 +28,13 @@ function assert(cond: boolean, msg: string): void {
     failed++;
     console.error(`FAIL: ${msg}`);
   }
+}
+
+// sql() возвращает Row[] для SELECT и число для INSERT.
+// Для SELECT-проверок сужаем тип к Row[].
+function rows(r: Row[] | number): Row[] {
+  if (typeof r === 'number') throw new Error(`ожидались строки, получено число ${r}`);
+  return r;
 }
 
 fs.rmSync(baseDir, { recursive: true, force: true });
@@ -162,7 +169,7 @@ function avg(arr: number[]): number {
   const sql = "SELECT avg(value), min(value), max(value), sum(value), count(value), host GROUP BY host ORDER BY value_avg DESC";
   const res = new Journal(baseDir, { lock: 'off' });
   res.open('m', schema, {});
-  const out = res.sql(sql);
+  const out = rows(res.sql(sql));
 
   // brute-force: сгруппируем по host
   const groups = new Map<string, number[]>();
@@ -189,7 +196,7 @@ function avg(arr: number[]): number {
   const X = 50;
   const res2 = new Journal(baseDir, { lock: 'off' });
   res2.open('m', schema, {});
-  const out2 = res2.sql(`SELECT avg(value), count(value), host WHERE value > ${X} GROUP BY host`);
+  const out2 = rows(res2.sql(`SELECT avg(value), count(value), host WHERE value > ${X} GROUP BY host`));
   const groups2 = new Map<string, number[]>();
   for (const r of ROWS) {
     if (typeof r.value === 'number' && (r.value as number) > X) {
@@ -214,7 +221,7 @@ function avg(arr: number[]): number {
   // SELECT * WHERE host = 'web-1' ORDER BY ts DESC LIMIT 5
   const r1 = new Journal(baseDir, { lock: 'off' });
   r1.open('m', schema, {});
-  const out1 = r1.sql("SELECT * WHERE host = 'web-1' ORDER BY ts DESC LIMIT 5");
+  const out1 = rows(r1.sql("SELECT * WHERE host = 'web-1' ORDER BY ts DESC LIMIT 5"));
   const bf1 = bruteFilter(ROWS,{ where: [{ field: 'host', op: 'eq', value: 'web-1' }] })
     .sort((a, b) => (b.ts as number) - (a.ts as number)).slice(0, 5);
   assert(out1.length === bf1.length, `raw: SELECT * host=web-1 length ${out1.length}===${bf1.length}`);
@@ -226,7 +233,7 @@ function avg(arr: number[]): number {
   // LIMIT offset, count
   const r2 = new Journal(baseDir, { lock: 'off' });
   r2.open('m', schema, {});
-  const out2 = r2.sql("SELECT host, value WHERE level = 'warn' ORDER BY ts ASC LIMIT 2, 3");
+  const out2 = rows(r2.sql("SELECT host, value WHERE level = 'warn' ORDER BY ts ASC LIMIT 2, 3"));
   const bf2 = bruteFilter(ROWS,{ where: [{ field: 'level', op: 'eq', value: 'warn' }] })
     .sort((a, b) => (a.ts as number) - (b.ts as number)).slice(2, 5);
   assert(out2.length === bf2.length, `raw: LIMIT 2,3 length ${out2.length}===${bf2.length}`);
@@ -237,7 +244,7 @@ function avg(arr: number[]): number {
   // OFFSET
   const r3 = new Journal(baseDir, { lock: 'off' });
   r3.open('m', schema, {});
-  const out3 = r3.sql("SELECT host WHERE level = 'error' ORDER BY ts ASC LIMIT 3 OFFSET 1");
+  const out3 = rows(r3.sql("SELECT host WHERE level = 'error' ORDER BY ts ASC LIMIT 3 OFFSET 1"));
   const bf3 = bruteFilter(ROWS,{ where: [{ field: 'level', op: 'eq', value: 'error' }] })
     .sort((a, b) => (a.ts as number) - (b.ts as number)).slice(1, 4);
   assert(out3.length === bf3.length, `raw: OFFSET length ${out3.length}===${bf3.length}`);
@@ -245,24 +252,24 @@ function avg(arr: number[]): number {
   // IN / NOT IN
   const r4 = new Journal(baseDir, { lock: 'off' });
   r4.open('m', schema, {});
-  const out4 = r4.sql("SELECT host WHERE level IN ('error','warn')");
+  const out4 = rows(r4.sql("SELECT host WHERE level IN ('error','warn')"));
   const bf4 = bruteFilter(ROWS,{ where: [{ field: 'level', op: 'in', value: ['error', 'warn'] }] });
   assert(out4.length === bf4.length, `raw: IN length ${out4.length}===${bf4.length}`);
-  const out4b = r4.sql("SELECT host WHERE level NOT IN ('error','warn')");
+  const out4b = rows(r4.sql("SELECT host WHERE level NOT IN ('error','warn')"));
   const bf4b = bruteFilter(ROWS,{ where: [{ field: 'level', op: 'nin', value: ['error', 'warn'] }] });
   assert(out4b.length === bf4b.length, `raw: NOT IN length ${out4b.length}===${bf4b.length}`);
 
   // IS NULL / IS NOT NULL (поле count не должно быть null, host — не null)
   const r5 = new Journal(baseDir, { lock: 'off' });
   r5.open('m', schema, {});
-  const out5 = r5.sql("SELECT host WHERE level IS NOT NULL");
+  const out5 = rows(r5.sql("SELECT host WHERE level IS NOT NULL"));
   const bf5 = bruteFilter(ROWS,{ where: [{ field: 'level', op: 'isNotNull' }] });
   assert(out5.length === bf5.length, `raw: IS NOT NULL length ${out5.length}===${bf5.length}`);
 
   // BETWEEN на не-ts поле (value)
   const r6 = new Journal(baseDir, { lock: 'off' });
   r6.open('m', schema, {});
-  const out6 = r6.sql('SELECT host WHERE value BETWEEN 40 AND 60');
+  const out6 = rows(r6.sql('SELECT host WHERE value BETWEEN 40 AND 60'));
   const bf6 = bruteFilter(ROWS,{ where: [
     { field: 'value', op: 'ge', value: 40 },
     { field: 'value', op: 'le', value: 60 },
@@ -281,13 +288,74 @@ function avg(arr: number[]): number {
   const start = T0;
   const end = T0 + 10 * H;
   // ts в select — scan() в raw-режиме сортирует по ts, только если он в проекции
-  const out = r.sql(`SELECT ts, host, value WHERE ts BETWEEN ${start} AND ${end} ORDER BY ts ASC`);
+  const out = rows(r.sql(`SELECT ts, host, value WHERE ts BETWEEN ${start} AND ${end} ORDER BY ts ASC`));
   const bf = bruteFilter(ROWS,{ start, end }).sort((a, b) => (a.ts as number) - (b.ts as number));
   assert(out.length === bf.length, `ts BETWEEN length ${out.length}===${bf.length}`);
   for (let i = 0; i < Math.min(out.length, 5); i++) {
     assert((out[i]['ts'] as number) === (bf[i]['ts'] as number), `ts BETWEEN ts[${i}]`);
   }
   r.close();
+}
+
+// --------------------------------------------------
+// 7. INSERT INTO: запись строк через SQL
+// --------------------------------------------------
+{
+  fs.rmSync(baseDir, { recursive: true, force: true });
+  const j = new Journal(baseDir, { rowsPerSegment: 100, lock: 'off' });
+  j.open('m', schema, {});
+
+  // Одна строка
+  const n1 = j.sql(`INSERT INTO m (ts, value) VALUES (${T0}, 1.5)`);
+  assert(n1 === 1, `insert: одна строка → 1 (получено ${String(n1)})`);
+
+  // Несколько строк, смешанные типы
+  const n2 = j.sql(
+    `INSERT INTO m (ts, host, value, level) VALUES ` +
+    `(${T0 + 1000}, 'web-9', 2.5, 'info'), ` +
+    `(${T0 + 2000}, 'web-9', 3.5, 'error')`
+  );
+  assert(n2 === 2, `insert: несколько строк → 2 (получено ${String(n2)})`);
+
+  // Чтение обратно
+  const backRaw = j.sql(`SELECT ts, host, value, level WHERE host = 'web-9' ORDER BY ts ASC`);
+  if (typeof backRaw !== 'number') {
+    assert(backRaw.length === 2, `insert: чтение обратно 2 строки (получено ${backRaw.length})`);
+    if (backRaw.length === 2) {
+      assert((backRaw[0]['value'] as number) === 2.5, `insert: чтение value[0]=2.5 (получено ${String(backRaw[0]['value'])})`);
+      assert((backRaw[1]['level'] as string) === 'error', `insert: чтение level[1]=error (получено ${String(backRaw[1]['level'])})`);
+    }
+  } else {
+    throw new Error(`insert: чтение вернуло число, а не строки (получено ${String(backRaw)})`);
+  }
+
+  // Ошибка: чужое имя журнала
+  let e1: unknown = null;
+  try { j.sql(`INSERT INTO other (ts, value) VALUES (${T0}, 1)`); } catch (e) { e1 = e; }
+  assert(e1 instanceof SqlError, `insert: чужое имя → SqlError (получено ${String(e1)})`);
+
+  // Ошибка: лишних значений больше, чем колонок
+  let e2: unknown = null;
+  try { j.sql(`INSERT INTO m (ts, value) VALUES (${T0}, 1, 2)`); } catch (e) { e2 = e; }
+  assert(e2 instanceof SqlError, `insert: лишнее значение → SqlError (получено ${String(e2)})`);
+
+  // Ошибка: значений меньше колонок
+  let e3: unknown = null;
+  try { j.sql(`INSERT INTO m (ts, value, level) VALUES (${T0}, 1)`); } catch (e) { e3 = e; }
+  assert(e3 instanceof SqlError, `insert: нехватка значения → SqlError (получено ${String(e3)})`);
+
+  // Ошибка: хвост после VALUES
+  let e4: unknown = null;
+  try { j.sql(`INSERT INTO m (ts) VALUES (${T0}) EXTRA`); } catch (e) { e4 = e; }
+  assert(e4 instanceof SqlError, `insert: хвост запроса → SqlError (получено ${String(e4)})`);
+
+  j.close();
+
+  // Парсер: true/false как значения
+  const ins = parseInsert('INSERT INTO m (ts, value, count) VALUES (1, 2, true)');
+  assert(ins.rows.length === 1 && ins.rows[0]['count'] === true, 'insert: парсер true');
+  const ins2 = parseInsert('INSERT INTO m (a, b) VALUES (1, false)');
+  assert(ins2.rows[0]['b'] === false, 'insert: парсер false');
 }
 
 console.log(`\nSQL-lite (Фаза 5): ${passed} passed, ${failed} failed`);

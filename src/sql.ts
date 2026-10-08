@@ -10,6 +10,8 @@
 //   [ORDER BY [<ключ>] [ASC|DESC]]
 //   [LIMIT n [OFFSET m]]
 //
+//   INSERT INTO <журнал> (<колонки>) VALUES (<значения>)[, (<значения>), ...]
+//
 // Элементы SELECT:
 //   *            — все поля схемы (режим без агрегатов);
 //   поле         — колонка (в режиме агрегатов — поле группировки);
@@ -29,7 +31,7 @@
 //   SELECT * WHERE level IN ('error', 'warn') LIMIT 50
 // ============================================================
 
-import type { AggFn, ScanOptions, ScanWhere } from './types.ts';
+import type { AggFn, JsonValue, Row, ScanOptions, ScanWhere } from './types.ts';
 
 const AGG_FNS: readonly AggFn[] = ['min', 'max', 'sum', 'avg', 'count'];
 
@@ -55,6 +57,7 @@ type Tok =
 const KEYWORDS = new Set([
   'SELECT', 'WHERE', 'AND', 'GROUP', 'BY', 'ORDER', 'ASC', 'DESC',
   'LIMIT', 'IN', 'NOT', 'IS', 'NULL', 'BETWEEN', 'AS', 'OFFSET',
+  'INSERT', 'INTO', 'VALUES',
 ]);
 
 /** Разбирает SQL на токены (без учёта ключевых слов — они распознаются по значению). */
@@ -65,14 +68,6 @@ function tokenize(sql: string): Tok[] {
   while (i < n) {
     const c = sql[i];
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r') { i++; continue; }
-
-    // Число
-    const numMatch = /^-?\d+(?:\.\d+)?/.exec(sql.slice(i));
-    if (numMatch && (i === 0 || /\s/.test(sql[i - 1]) || sql[i - 1] === '(' || sql[i - 1] === ',')) {
-      toks.push({ t: 'num', v: parseFloat(numMatch[0]) });
-      i += numMatch[0].length;
-      continue;
-    }
 
     // Строка
     if (c === "'" || c === '"') {
@@ -86,15 +81,23 @@ function tokenize(sql: string): Tok[] {
       continue;
     }
 
-    // Идентификатор / ключевое слово
+    // Идентификатор / ключевое слово.
+    // ВАЖНО: пробуем ДО числа — именованная колонка с цифрой (host9, c3) не
+    // должна съедаться числовым правилом как «9».
     const idMatch = /^[A-Za-z_][A-Za-z0-9_]*/.exec(sql.slice(i));
     if (idMatch) {
-      const word = idMatch[0];
-      toks.push({ t: 'id', v: word });
-      i += word.length;
+      toks.push({ t: 'id', v: idMatch[0] });
+      i += idMatch[0].length;
       continue;
     }
 
+    // Число (только если не начало идентификатора)
+    const numMatch = /^-?\d+(?:\.\d+)?/.exec(sql.slice(i));
+    if (numMatch && (i === 0 || /\s/.test(sql[i - 1]) || sql[i - 1] === '(' || sql[i - 1] === ',')) {
+      toks.push({ t: 'num', v: parseFloat(numMatch[0]) });
+      i += numMatch[0].length;
+      continue;
+    }
     // Операторы (двухсимвольные в первую очередь)
     const two = sql.slice(i, i + 2);
     if (two === '!=' || two === '<>' || two === '<=' || two === '>=') {
@@ -160,12 +163,17 @@ function nextId(c: Cursor): string {
   return t.v;
 }
 
-/** Значение: число или строка. */
-function parseValue(c: Cursor): number | string {
+/** Значение: число, строка, true/false или «голый» идентификатор. */
+function parseValue(c: Cursor): number | string | boolean {
   const t = next(c);
   if (t.t === 'num' || t.t === 'str') return t.v;
-  if (t.t === 'id' && !KEYWORDS.has(t.v.toUpperCase())) return t.v;
-  throw new SqlError(`SQL: ожидалось значение (число или строка), получено ${t.v}`);
+  if (t.t === 'id') {
+    const u = t.v.toUpperCase();
+    if (u === 'TRUE') return true;
+    if (u === 'FALSE') return false;
+    if (!KEYWORDS.has(u)) return t.v;
+  }
+  throw new SqlError(`SQL: ожидалось значение (число, строка или true/false), получено ${t.v}`);
 }
 
 interface Item {
@@ -226,6 +234,9 @@ function parseCond(c: Cursor, opts: ScanOptions): void {
     expectKw(c, 'AND');
     const b = parseValue(c);
     if (field.toLowerCase() === 'ts') {
+      if (typeof a === 'boolean' || typeof b === 'boolean') {
+        throw new SqlError('SQL: ts BETWEEN — значение должно быть числом (мс) или строкой вида \'now-1h\'');
+      }
       opts.start = a;
       opts.end = b;
     } else {
@@ -257,7 +268,7 @@ function parseCond(c: Cursor, opts: ScanOptions): void {
     const t2 = next(c);
     if (!isKw(t2, 'IN')) throw new SqlError(`SQL: ожидалось IN после NOT, получено ${t2.v}`);
     expectPunct(c, '(');
-    const vals: (number | string)[] = [parseValue(c)];
+    const vals: JsonValue[] = [parseValue(c)];
     while (isPunct(peek(c), ',')) {
       next(c);
       vals.push(parseValue(c));
@@ -271,7 +282,7 @@ function parseCond(c: Cursor, opts: ScanOptions): void {
   if (isKw(t, 'IN')) {
     next(c);
     expectPunct(c, '(');
-    const vals: (number | string)[] = [parseValue(c)];
+    const vals: JsonValue[] = [parseValue(c)];
     while (isPunct(peek(c), ',')) {
       next(c);
       vals.push(parseValue(c));
@@ -405,4 +416,73 @@ export function parseSql(query: string): ScanOptions {
   if (order) opts.order = order;
 
   return opts;
+}
+
+// --------------------------------------------------
+// INSERT INTO
+// --------------------------------------------------
+
+/** Результат парсинга INSERT INTO. */
+export interface InsertQuery {
+  /** Имя журнала-цели (должно совпадать с именем журнала, на котором выполняется). */
+  name: string;
+  /** Строки для записи: колонки из запроса в порядке списка. */
+  rows: Row[];
+}
+
+/**
+ * Парсит `INSERT INTO name (col, ...) VALUES (v, ...)[, (v, ...), ...]`.
+ * Значения: число, строка, `true`/`false` или «голый» идентификатор
+ * (не ключевое слово). Бросает SqlError при синтаксической ошибке.
+ */
+export function parseInsert(sql: string): InsertQuery {
+  if (typeof sql !== 'string' || sql.trim().length === 0) {
+    throw new SqlError('SQL: пустой запрос');
+  }
+  const toks = tokenize(sql);
+  if (toks.length === 0) throw new SqlError('SQL: пустой запрос');
+  const c: Cursor = { toks, i: 0 };
+
+  expectKw(c, 'INSERT');
+  expectKw(c, 'INTO');
+  const name = nextId(c);
+
+  expectPunct(c, '(');
+  const cols: string[] = [nextId(c)];
+  while (isPunct(peek(c), ',')) {
+    next(c);
+    cols.push(nextId(c));
+  }
+  expectPunct(c, ')');
+
+  expectKw(c, 'VALUES');
+  const parseRow = (): Row => {
+    expectPunct(c, '(');
+    const row: Row = {};
+    let k = 0;
+    row[cols[0]] = parseValue(c);
+    while (isPunct(peek(c), ',')) {
+      next(c);
+      k++;
+      if (k >= cols.length) {
+        throw new SqlError(`SQL: INSERT INTO — значений больше, чем колонок (${cols.length})`);
+      }
+      row[cols[k]] = parseValue(c);
+    }
+    if (k + 1 !== cols.length) {
+      throw new SqlError(`SQL: INSERT INTO — ожидается ${cols.length} значени(я), получено ${k + 1}`);
+    }
+    expectPunct(c, ')');
+    return row;
+  };
+  const rows: Row[] = [parseRow()];
+  while (isPunct(peek(c), ',')) {
+    next(c);
+    rows.push(parseRow());
+  }
+
+  if (c.i < toks.length) {
+    throw new SqlError(`SQL: неожиданные токены в конце запроса (${toks[c.i].v} ...)`);
+  }
+  return { name, rows };
 }

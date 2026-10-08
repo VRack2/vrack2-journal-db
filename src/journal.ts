@@ -23,7 +23,7 @@ import { encodeSegment } from './codec.ts';
 import { encodeV3, readSegment, defaultCompression } from './v3.ts';
 import { Interval } from './interval.ts';
 import { RetentionEngine } from './retention.ts';
-import { parseSql } from './sql.ts';
+import { parseSql, parseInsert, SqlError } from './sql.ts';
 import type {
   AggregateExpr,
   AggFn,
@@ -1526,12 +1526,27 @@ export class Journal {
    *   SELECT avg(value), host WHERE value > 90 GROUP BY host ORDER BY value_avg DESC LIMIT 20
    *   SELECT host, value WHERE ts BETWEEN 'now-1h' AND 'now' AND host = 'web-1' LIMIT 10
    *   SELECT * WHERE level IN ('error','warn') ORDER BY ts DESC LIMIT 50
+   *   INSERT INTO m (ts, value, host) VALUES (1700000000000, 4.5, 'web-1')
+   *
+   * SELECT возвращает Row[] (результат scan()). INSERT INTO пишет строки в
+   * этот журнал и возвращает число записанных строк; имя журнала в запросе
+   * должно совпадать с именем открытого журнала.
    *
    * Детали и синтаксис — см. sql.ts. Бросает SqlError при ошибке синтаксиса.
    */
-  sql(query: string): Row[] {
+  sql(query: string): Row[] | number {
     if (!this.isOpen) {
       throw new Error('Journal not open. Call open() first.');
+    }
+    const head = query.trimStart();
+    const firstWord = head.split(/\s+/, 1)[0].toUpperCase();
+    if (firstWord === 'INSERT') {
+      const ins = parseInsert(query);
+      if (ins.name !== this.name) {
+        throw new SqlError(`SQL: INSERT INTO ${ins.name} — журнал открыт как '${this.name}'`);
+      }
+      for (const row of ins.rows) this.append(row);
+      return ins.rows.length;
     }
     return this.scan(parseSql(query));
   }

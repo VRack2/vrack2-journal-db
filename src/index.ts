@@ -30,7 +30,7 @@ export {
   defaultTiers,
   type SegmentEncoding
 } from './retention.ts';
-export { parseSql, SqlError } from './sql.ts';
+export { parseSql, parseInsert, SqlError, type InsertQuery } from './sql.ts';
 export {
   AutoColumn,
   CatchAllColumn,
