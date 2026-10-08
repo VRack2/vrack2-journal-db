@@ -28,7 +28,6 @@ import { Journal, percentileKey, percentileOf } from './journal.ts';
 import { Interval } from './interval.ts';
 import type {
   AggFn,
-  JsonValue,
   Metadata,
   OpenJournalOptions,
   ResolutionTier,
@@ -38,6 +37,7 @@ import type {
   TableConfig,
   TableTierStat,
 } from './types.ts';
+import { applyAgg, promote } from './engines/rollup.ts';
 
 // Минимальный структурный интерфейс хранилища (Store из store.ts подходит
 // без импорта — исключает циклическую зависимость store.ts ↔ table.ts).
@@ -497,40 +497,11 @@ export class Table {
         return typeof ts === 'number' && Number.isFinite(ts) && ts > cp && ts <= maxRollable;
       });
 
-      // Группируем по (бакет грубого разрешения, размеры dims).
-      const aggFields = Object.keys(this.agg);
-      const groups = new Map<
-        string,
-        { bucket: number; dims: Record<string, JsonValue>; values: Record<string, number[]> }
-      >();
-      for (const row of rows) {
-        const bucket = Interval.roundTime(row['ts'] as number, coarseRes);
-        const dimVals: Record<string, JsonValue> = {};
-        for (const d of this.dims) dimVals[d] = row[d] ?? null;
-        const dimKey = this.dims.map(d => JSON.stringify(dimVals[d])).join('\u001f');
-        const key = `${bucket}\u001e${dimKey}`;
-        let g = groups.get(key);
-        if (!g) {
-          g = { bucket, dims: dimVals, values: {} };
-          for (const f of aggFields) g.values[f] = [];
-          groups.set(key, g);
-        }
-        for (const f of aggFields) {
-          const v = row[f];
-          if (typeof v === 'number' && Number.isFinite(v)) g.values[f].push(v);
-        }
-      }
-
-      // Записываем агрегаты в грубый тир.
-      for (const g of groups.values()) {
-        const outRow: Row = { ts: g.bucket, ...g.dims };
-        for (const f of aggFields) {
-          const vals = g.values[f];
-          outRow[f] = vals.length > 0 ? Table.applyAgg(this.agg[f], vals) : null;
-        }
-        coarse.append(outRow);
-      }
-      if (rows.length > 0) coarse.flush();
+      // Группируем по (бакет грубого разрешения, размеры dims) + agg — в
+      // чистой функции promote() (engines/rollup.ts).
+      const promoted = promote(rows, this.agg, this.dims, coarseRes);
+      for (const outRow of promoted) coarse.append(outRow);
+      if (promoted.length > 0) coarse.flush();
 
       // Чекпоинт — атомарно ДО purge (по плану). Повторный rollup того же
       // окна идемпотентен: окно (cp, maxRollable] больше не попадает в работу.
@@ -547,15 +518,9 @@ export class Table {
     return { pairs, rolledRows, purgedRows };
   }
 
-  /** Примени fn к списку чисел. */
+  /** Примени fn к списку чисел (делегация в engines/rollup.applyAgg). */
   static applyAgg(fn: AggFn, vals: number[]): number {
-    switch (fn) {
-      case 'count': return vals.length;
-      case 'sum': return vals.reduce((a, b) => a + b, 0);
-      case 'min': return Math.min(...vals);
-      case 'max': return Math.max(...vals);
-      case 'avg': return vals.reduce((a, b) => a + b, 0) / vals.length;
-    }
+    return applyAgg(fn, vals);
   }
 
   // --------------------------------------------------

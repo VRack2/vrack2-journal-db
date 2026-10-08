@@ -104,7 +104,14 @@ export {
   defineSummingTable,
   defineCollapsingTable,
   engineDescriptorOf,
-  ENGINE_META_KEY
+  ENGINE_META_KEY,
+  // Фаза 2 — мультитирная таблица + rollup + retention
+  MergeTree,
+  Tier,
+  promote,
+  applyAgg,
+  tiersForRetention,
+  validateTiers
 } from './engines/index.ts';
 export type {
   Engine,
@@ -116,5 +123,9 @@ export type {
   SummingTableDef,
   CollapsingTableDef,
   TableRuntime,
-  TableDescription
+  TableDescription,
+  // Фаза 2
+  MergeTreeConfig,
+  MergeTreeRollupReport,
+  MergeTreeTierStat
 } from './engines/index.ts';

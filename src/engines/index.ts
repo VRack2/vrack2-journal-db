@@ -66,3 +66,14 @@ export type {
   TableRuntime,
   TableDescription
 } from './define.ts';
+
+// Фаза 2 — мультитирная таблица (MergeTree), rollup и retention.
+export { MergeTree } from './mergeTree.ts';
+export type {
+  MergeTreeConfig,
+  MergeTreeRollupReport,
+  MergeTreeTierStat
+} from './mergeTree.ts';
+export { Tier } from './tier.ts';
+export { promote, applyAgg } from './rollup.ts';
+export { tiersForRetention, validateTiers } from './retention.ts';
