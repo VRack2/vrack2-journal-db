@@ -2,6 +2,9 @@
 // Tier, MergeTree (мультитирная таблица + rollup + retention).
 // Запуск: node test-merge-tree.ts
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Store } from '../src/store.ts';
 import {
   applyAgg,
@@ -35,10 +38,11 @@ function assertThrows(fn: () => void, msg: string): void {
   }
 }
 
-const tmpDir = () => {
-  const d = `${process.cwd()}/.test-data-merge-${Date.now()}-${Math.floor(Math.random() * 1e9)}`;
-  return d;
-};
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const baseDir = path.join(__dirname, '..', '.test-data-merge');
+fs.rmSync(baseDir, { recursive: true, force: true });
+let _tmpN = 0;
+const tmpDir = () => path.join(baseDir, `t${_tmpN++}`);
 
 const SCHEMA = { ts: 'delta', host: 'dictionary', value: 'auto' } as const;
 
