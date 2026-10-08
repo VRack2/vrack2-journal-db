@@ -18,6 +18,7 @@ import type {
 import type { TableStore } from '../table.ts';
 import { Tier } from './tier.ts';
 import { promote } from './rollup.ts';
+import type { RollupConfig } from './rollup.ts';
 import { tiersForRetention, validateTiers } from './retention.ts';
 
 export interface MergeTreeConfig {
@@ -135,54 +136,87 @@ export class MergeTree {
   }
 
   /**
-   * Перенос состарившегося (ts ≤ now − ttl_тонкого) с каждого тонкого тира
-   * на следующий грубый: агрегация promote() → запись в грубый тир → purge
-   * тонкого. Идемпотентно по чекпоинту на пару тиров.
+   * Rollup (Фаза 3). Две формы:
+   *   mt.rollup()            — все тиры по их дефолтным конфигам (agg/dims таблицы)
+   *   mt.rollup(now)         — то же, но с явным «текущим временем»
+   *   mt.rollup(cfg, now?)   — ОДИН тир с явным cfg: { agg, dims, res } (res — целевой тир)
+   *
+   * Перенос состарившегося (ts ≤ now − ttl_тонкого): promote() → грубый тир → purge тонкого.
+   * Идемпотентно по чекпоинту на пару тиров.
    */
-  rollup(now?: number): MergeTreeRollupReport {
-    if (!this.isOpen) throw new Error('MergeTree: не открыта (вызван close())');
+  rollup(cfgOrNow?: RollupConfig | number, now?: number): MergeTreeRollupReport {
+    if (typeof cfgOrNow === 'number' || cfgOrNow === undefined) {
+      // Все тиры — дефолтные конфиги. now — 1-й аргумент (число) либо 2-й.
+      const nowTs = typeof cfgOrNow === 'number' ? cfgOrNow : (typeof now === 'number' ? now : this.now());
+      return this._rollupAll(nowTs);
+    }
+    // Один тир — явный cfg (res определяет целевой тир).
     const nowTs = typeof now === 'number' ? now : this.now();
+    return this._rollupOne(cfgOrNow, nowTs);
+  }
+
+  /** Rollup всех пар тиров (i → i+1) с дефолтными agg/dims таблицы. */
+  private _rollupAll(nowTs: number): MergeTreeRollupReport {
+    if (!this.isOpen) throw new Error('MergeTree: не открыта (вызван close())');
     if (!Number.isFinite(nowTs)) throw new RangeError('MergeTree: rollup(now) — now: конечное число (мс)');
 
     let pairs = 0;
     let rolledRows = 0;
     let purgedRows = 0;
-
     for (let i = 0; i + 1 < this.tiers.length; i++) {
-      const fine = this.tierObjs[i];
-      const coarse = this.tierObjs[i + 1];
-      const fineTtl = this.tiers[i].ttlMs;
-      const coarseRes = this.tiers[i + 1].resMs;
-      const maxRollable = nowTs - fineTtl; // всё, что «возрастом» старше fineTtl
-      const cpKey = `${i}->${i + 1}`;
-      const cp = this.checkpoints[cpKey] ?? 0;
-      if (maxRollable <= cp) continue; // уже перенесено — идемпотентно
-
-      let rows: Row[];
-      try {
-        rows = fine.scan({ start: cp + 1, end: maxRollable });
-      } catch {
-        rows = [];
-      }
-      rows = rows.filter(r => {
-        const ts = r['ts'];
-        return typeof ts === 'number' && Number.isFinite(ts) && ts > cp && ts <= maxRollable;
-      });
-
-      const promoted = promote(rows, this.agg, this.dims, coarseRes);
-      for (const outRow of promoted) coarse.append(outRow);
-      if (promoted.length > 0) coarse.flush();
-
-      // Чекпоинт — атомарно ДО purge.
-      this.checkpoints[cpKey] = maxRollable;
-
-      const purged = fine.purge(maxRollable + 1);
-      purgedRows += purged.removedRows ?? 0;
-      pairs++;
-      rolledRows += rows.length;
+      const rep = this._rollupPair(i, this.agg, this.dims, this.tiers[i + 1].resMs, nowTs);
+      pairs += rep.pairs;
+      rolledRows += rep.rolledRows;
+      purgedRows += rep.purgedRows;
     }
-
     return { pairs, rolledRows, purgedRows };
+  }
+
+  /** Rollup одного тира с явным cfg (Фаза 3): целевой тир — tiers[i+1].resMs === cfg.res. */
+  private _rollupOne(cfg: RollupConfig, nowTs: number): MergeTreeRollupReport {
+    if (!this.isOpen) throw new Error('MergeTree: не открыта (вызван close())');
+    const ci = this.tierObjs.findIndex(t => t.resMs === cfg.res);
+    if (ci < 0) throw new RangeError(`MergeTree: rollup(cfg) — нет тира с res=${cfg.res}`);
+    if (ci === 0) throw new RangeError('MergeTree: rollup(cfg) — целевой тир не может быть самым тонким');
+    return this._rollupPair(ci - 1, cfg.agg, cfg.dims, cfg.res, nowTs);
+  }
+
+  /** Rollup пары тиров (fine=index → coarse=index+1) с данными agg/dims/цель. */
+  private _rollupPair(
+    i: number,
+    agg: Record<string, AggFn>,
+    dims: string[],
+    coarseRes: number,
+    nowTs: number
+  ): MergeTreeRollupReport {
+    const fine = this.tierObjs[i];
+    const coarse = this.tierObjs[i + 1];
+    const fineTtl = this.tiers[i].ttlMs;
+    const maxRollable = nowTs - fineTtl; // всё, что «возрастом» старше fineTtl
+    const cpKey = `${i}->${i + 1}`;
+    const cp = this.checkpoints[cpKey] ?? 0;
+    if (maxRollable <= cp) return { pairs: 0, rolledRows: 0, purgedRows: 0 }; // идемпотентно
+
+    let rows: Row[];
+    try {
+      rows = fine.scan({ start: cp + 1, end: maxRollable });
+    } catch {
+      rows = [];
+    }
+    rows = rows.filter(r => {
+      const ts = r['ts'];
+      return typeof ts === 'number' && Number.isFinite(ts) && ts > cp && ts <= maxRollable;
+    });
+
+    const promoted = promote(rows, agg, dims, coarseRes);
+    for (const outRow of promoted) coarse.append(outRow);
+    if (promoted.length > 0) coarse.flush();
+
+    // Чекпоинт — атомарно ДО purge.
+    this.checkpoints[cpKey] = maxRollable;
+
+    const purged = fine.purge(maxRollable + 1);
+    return { pairs: 1, rolledRows: rows.length, purgedRows: purged.removedRows ?? 0 };
   }
 
   /** Purge каждого тира: удалить строки с ts < now − ttl_тира. */

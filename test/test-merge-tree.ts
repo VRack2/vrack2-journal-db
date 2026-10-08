@@ -202,5 +202,76 @@ console.log('\nMergeTree: грубые тиры — upsert-движок (dedup �
   store.closeAll();
 }
 
-console.log(`\nТесты merge-tree (Phase 2): ${passed} passed, ${failed} failed`);
+// ============================================================================
+console.log('\nPhase 3: promote(rows, cfg) и MergeTree.rollup(cfg) — явный конфиг:');
+// ============================================================================
+{
+  // cfg-форма promote
+  const rows = [
+    { ts: 1000, host: 'h1', value: 10 },
+    { ts: 2000, host: 'h1', value: 30 },
+  ];
+  const byCfg = promote(rows, { agg: { value: 'max' }, dims: ['host'], res: 60000 });
+  assert(byCfg.length === 1 && byCfg[0].value === 30, 'promote(rows, cfg): max(10,30)=30');
+  const byCfg2 = promote(rows, { agg: { value: 'sum' }, dims: ['host'], res: 60000 });
+  assert(byCfg2[0].value === 40, 'promote(rows, cfg): sum(10,30)=40');
+  // эквивалентность двух форм
+  assert(
+    JSON.stringify(byCfg) === JSON.stringify(promote(rows, { value: 'max' }, ['host'], 60000)),
+    'cfg-форма == явная форма'
+  );
+
+  // rollup(cfg) — один тир с явным agg, отличным от дефолта таблицы
+  const dir = tmpDir();
+  const store = new Store(dir, { autoCompact: false });
+  const T = new MergeTree({
+    name: 'cfg',
+    store,
+    tiers: [
+      { resMs: 1000, ttlMs: 5000 },
+      { resMs: 60000, ttlMs: 600000 },
+    ],
+    schema: SCHEMA,
+    agg: { value: 'avg' }, // дефолт — avg
+    dims: ['host'],
+  });
+  T.append({ ts: 1000, host: 'h1', value: 10 });
+  T.append({ ts: 2000, host: 'h1', value: 30 });
+
+  // rollup с явным cfg: max вместо avg, цель — тир res=60000
+  const rep = T.rollup({ agg: { value: 'max' }, dims: ['host'], res: 60000 }, 100000);
+  assert(rep.pairs === 1, 'rollup(cfg): 1 пара');
+  const coarse = T.tierObjs[1].allRows();
+  assert(coarse.length === 1 && coarse[0].value === 30, `rollup(cfg): max(10,30)=30 (не avg=20), got ${coarse[0]?.value}`);
+
+  // rollup() — дефолтный agg (avg) для ещё одной таблицы
+  const dir2 = tmpDir();
+  const store2 = new Store(dir2, { autoCompact: false });
+  const T2 = new MergeTree({
+    name: 'def',
+    store: store2,
+    tiers: [
+      { resMs: 1000, ttlMs: 5000 },
+      { resMs: 60000, ttlMs: 600000 },
+    ],
+    schema: SCHEMA,
+    agg: { value: 'avg' },
+    dims: ['host'],
+  });
+  T2.append({ ts: 1000, host: 'h1', value: 10 });
+  T2.append({ ts: 2000, host: 'h1', value: 30 });
+  T2.rollup(100000); // все тиры, дефолтный avg
+  const coarse2 = T2.tierObjs[1].allRows();
+  assert(coarse2.length === 1 && coarse2[0].value === 20, `rollup(): avg(10,30)=20, got ${coarse2[0]?.value}`);
+
+  // rollup(cfg) с неизвестным целевым тиром — ошибка
+  assertThrows(() => T.rollup({ agg: { value: 'max' }, dims: ['host'], res: 999999 }), 'rollup(cfg): нет тира res=999999 → ошибка');
+
+  T.close();
+  store.closeAll();
+  T2.close();
+  store2.closeAll();
+}
+
+console.log(`\nТесты merge-tree (Phase 2-3): ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

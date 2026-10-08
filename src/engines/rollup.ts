@@ -8,6 +8,18 @@
 import { Interval } from '../interval.ts';
 import type { AggFn, JsonValue, Row } from '../types.ts';
 
+/**
+ * Явная конфигурация rollup (Фаза 3): как агрегировать тонкий тир в целевой
+ * (res). `agg` — поля-агрегаты, `dims` — размеры (group-by), `res` — целевое
+ * разрешение (мс) — определяет бакеты.
+ */
+export interface RollupConfig {
+  agg: Record<string, AggFn>;
+  dims: string[];
+  /** Целевое разрешение тира, в который идёт rollup (мс). */
+  res: number;
+}
+
 /** Примени агрегационную функцию к списку чисел. */
 export function applyAgg(fn: AggFn, vals: number[]): number {
   switch (fn) {
@@ -31,13 +43,35 @@ export function applyAgg(fn: AggFn, vals: number[]): number {
  *
  * Порядок вывода — порядок первой встречи группы (стабильно для теста).
  * Чистая функция: журнал не трогает.
+ *
+ * Две формы вызова:
+ *   promote(rows, agg, dims, toResMs)   — явные параметры
+ *   promote(rows, cfg)                  — cfg: { agg, dims, res } (Фаза 3)
  */
+export function promote(rows: Row[], cfg: RollupConfig): Row[];
 export function promote(
   rows: Row[],
   agg: Record<string, AggFn>,
   dims: string[],
   toResMs: number
+): Row[];
+export function promote(
+  rows: Row[],
+  arg1: Record<string, AggFn> | RollupConfig,
+  arg2?: string[],
+  arg3?: number
 ): Row[] {
+  // Нормализуем в RollupConfig.
+  const isCfg =
+    typeof arg1 === 'object' &&
+    arg1 !== null &&
+    'agg' in arg1 &&
+    'res' in arg1;
+  const cfg: RollupConfig = isCfg
+    ? (arg1 as RollupConfig)
+    : { agg: arg1 as Record<string, AggFn>, dims: arg2 ?? [], res: arg3 as number };
+  const { agg, dims, res: toResMs } = cfg;
+
   const aggFields = Object.keys(agg);
   const groups = new Map<
     string,

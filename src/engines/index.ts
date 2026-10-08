@@ -76,4 +76,5 @@ export type {
 } from './mergeTree.ts';
 export { Tier } from './tier.ts';
 export { promote, applyAgg } from './rollup.ts';
+export type { RollupConfig } from './rollup.ts';
 export { tiersForRetention, validateTiers } from './retention.ts';

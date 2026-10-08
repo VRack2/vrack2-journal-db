@@ -127,5 +127,6 @@ export type {
   // Фаза 2
   MergeTreeConfig,
   MergeTreeRollupReport,
-  MergeTreeTierStat
+  MergeTreeTierStat,
+  RollupConfig
 } from './engines/index.ts';
