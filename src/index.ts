@@ -87,3 +87,34 @@ export type {
 // ============================================================
 export { Table, openTable, parseRetention } from './table.ts';
 export type { TableStore } from './table.ts';
+
+// ============================================================
+// Фаза 1 — Движки (стратегии слияния при compact) + описания таблиц
+// ============================================================
+export {
+  engines,
+  ENGINE_KINDS,
+  mergeWithEngine,
+  logEngine,
+  upsertEngine,
+  summingEngine,
+  collapsingEngine,
+  defineLogTable,
+  defineUpsertTable,
+  defineSummingTable,
+  defineCollapsingTable,
+  engineDescriptorOf,
+  ENGINE_META_KEY
+} from './engines/index.ts';
+export type {
+  Engine,
+  EngineDescriptor,
+  EngineKind,
+  AnyTableDef,
+  LogTableDef,
+  UpsertTableDef,
+  SummingTableDef,
+  CollapsingTableDef,
+  TableRuntime,
+  TableDescription
+} from './engines/index.ts';

@@ -24,6 +24,7 @@ import { encodeV3, readSegment, defaultCompression } from './v3.ts';
 import { Interval } from './interval.ts';
 import { RetentionEngine } from './retention.ts';
 import { parseSql, parseInsert, SqlError } from './sql.ts';
+import { mergeWithEngine, ENGINE_META_KEY, metaToDescriptor } from './engines/index.ts';
 import type {
   AggregateExpr,
   AggFn,
@@ -568,6 +569,11 @@ export class Journal {
    * Сливает все закрытые сегменты в один. Дедупликация применяется
    * повторно уже на границах бывших сегментов, а auto-колонки
    * перекодируются на объединённых данных (сэмпл может пересечь порог).
+   *
+   * Движок (engine): перед записью в слитый сегмент строки проходят
+   * `mergeWithEngine()` по движку из `metadata._engine` (log/upsert/summing/
+   * collapsing). Без движка — лог (строки не меняются, как раньше), поэтому
+   * старые журналы ведут себя как log и остаются совместимыми.
    */
   compact(): CompactResult {
     if (!this.isOpen) {
@@ -581,7 +587,7 @@ export class Journal {
 
     const ids = this._sortedClosedIds();
     if (ids.length < 2) {
-      return { mergedSegments: 0, logicalRows: 0, physicalBefore: 0, physicalAfter: 0 };
+      return { mergedSegments: 0, logicalRows: 0, physicalBefore: 0, physicalAfter: 0, collapsedRows: 0 };
     }
 
     let logicalRows = 0;
@@ -596,12 +602,20 @@ export class Journal {
       physicalBefore += seg.physicalRowCount;
     }
 
+    // Движок: применяем стратегию слияния (log — идентично, upsert/summing/
+    // collapsing — сводят строки по identity-ключу). Дескриптор — из metadata.
+    const engineDesc = metaToDescriptor(
+      this.metadata ? (this.metadata as Record<string, unknown>)[ENGINE_META_KEY] : undefined
+    );
+    const kept = engineDesc ? mergeWithEngine(rows, engineDesc) : rows;
+    const collapsedRows = rows.length - kept.length;
+
     const merged = new Segment(
       `seg_${Date.now()}_${this.segmentCounter++}_${this._idNonce}`,
       this.schema!,
       { ...(this.metadata ?? {}) }
     );
-    for (const row of rows) {
+    for (const row of kept) {
       merged.append(row);
     }
 
@@ -631,7 +645,8 @@ export class Journal {
       mergedSegments: ids.length,
       logicalRows,
       physicalBefore,
-      physicalAfter: merged.physicalRowCount
+      physicalAfter: merged.physicalRowCount,
+      collapsedRows
     };
   }
 

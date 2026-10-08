@@ -20,7 +20,10 @@ import type {
   StoreStats,
   TableConfig,
 } from './types.ts';
+import { ENGINE_META_KEY, descriptorToMeta, engineDescriptorOf } from './engines/index.ts';
+import type { AnyTableDef, EngineKind, TableDescription, TableRuntime } from './engines/index.ts';
 
+const MANIFEST_FILE = '_store.json';
 const isSegmentFile = (f: string): boolean => f.endsWith('.seg') || f.endsWith('.json');
 const idFromFile = (f: string): string =>
   f.endsWith('.seg') ? f.slice(0, -4) : f.endsWith('.json') ? f.slice(0, -5) : f;
@@ -149,6 +152,110 @@ export class Store {
     }
     t.close();
     this.openTables.delete(name);
+  }
+
+  // --------------------------------------------------
+  // Таблицы с движком (Phase 1): create/describe/tables/engineOf
+  // --------------------------------------------------
+
+  /**
+   * Создать таблицу по описанию (define*Table) с нужным движком:
+   * открывает журнал, записывает движок в его metadata и добавляет таблицу в
+   * манифест `_store.json` (единственный самодостаточный артефакт — его можно
+   * отдать коллеге/AI-агенту). Идемпотентно: повторный вызов для открытого
+   * журнала возвращает его.
+   */
+  create(def: AnyTableDef): Journal {
+    const desc = engineDescriptorOf(def);
+    const metadata: Metadata = { [ENGINE_META_KEY]: descriptorToMeta(desc) };
+    if (def.desc) {
+      (metadata as Record<string, unknown>).desc = def.desc;
+    }
+    const journal = this.openJournal(def.name, def.columns, metadata, {
+      rowsPerSegment: def.rowsPerSegment,
+    });
+    this._upsertManifest(def);
+    return journal;
+  }
+
+  /**
+   * Читаемое описание всех таблиц-движков: определение (из манифеста) +
+   * рантайм-статистика (строки/сегменты/размер с диска). Для AI-агентов и
+   * людей — «кто что делает» одним вызовом.
+   */
+  describe(): TableDescription[] {
+    const manifest = this._readManifest();
+    const out: TableDescription[] = [];
+    for (const def of Object.values(manifest.tables)) {
+      out.push({ ...def, ...this._tableRuntimeStats(def.name) } as TableDescription);
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  /** Имена таблиц-движков (из манифеста `_store.json`). */
+  tables(): string[] {
+    return Object.keys(this._readManifest().tables).sort();
+  }
+
+  /** Движок таблицы (из манифеста); undefined, если таблица не описана там. */
+  engineOf(name: string): EngineKind | undefined {
+    const def = this._readManifest().tables[name];
+    return def ? def.kind : undefined;
+  }
+
+  // --------------------------------------------------
+  // Манифест `_store.json` — самодостаточный артефакт хранилища
+  // --------------------------------------------------
+
+  private _manifestPath(): string {
+    return path.join(this.baseDir, MANIFEST_FILE);
+  }
+
+  private _readManifest(): { version: number; tables: Record<string, AnyTableDef> } {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(this._manifestPath(), 'utf8')) as {
+        version?: number;
+        tables?: Record<string, AnyTableDef>;
+      };
+      return { version: parsed.version ?? 1, tables: parsed.tables ?? {} };
+    } catch {
+      return { version: 1, tables: {} };
+    }
+  }
+
+  private _upsertManifest(def: AnyTableDef): void {
+    const manifest = this._readManifest();
+    manifest.version = 1;
+    manifest.tables[def.name] = def;
+    const p = this._manifestPath();
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    const tmp = `${p}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify(manifest, null, 2));
+    fs.renameSync(tmp, p);
+  }
+
+  /** Рантайм-статистика каталога журнала: строки, сегменты, размер (байт). */
+  private _tableRuntimeStats(name: string): TableRuntime {
+    const dir = path.join(this.journalsDir, name);
+    let rows = 0;
+    let bytes = 0;
+    let segments = 0;
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (!isSegmentFile(f)) continue;
+        const full = path.join(dir, f);
+        bytes += fs.statSync(full).size;
+        segments++;
+        try {
+          rows += readSegment(fs.readFileSync(full)).rowCount; // v1/v2/v3
+        } catch {
+          // повреждённый/нечитаемый сегмент — не ломаем статистику
+        }
+      }
+    } catch {
+      // каталог отсутствует — статистика нулевая
+    }
+    return { rows, segments, sizeBytes: bytes };
   }
 
   listJournals(): string[] {

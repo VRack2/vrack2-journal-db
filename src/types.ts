@@ -181,6 +181,8 @@ export interface CompactResult {
   logicalRows: number;
   physicalBefore: number;
   physicalAfter: number;
+  /** Сколько строк свело движок (upsert/summing/collapsing); 0 для log. */
+  collapsedRows: number;
 }
 
 export interface PurgeResult {
