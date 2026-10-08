@@ -146,6 +146,8 @@ export interface ScanOptions {
   limit?: number;
   /** Пропустить первые N строк (после сортировки, перед limit). */
   offset?: number;
+  /** Имя таблицы/журнала (из FROM). Для SELECT — проверка, что запрос идёт по этому журналу. */
+  table?: string;
 }
 
 /** Саммари числовой колонки на сегмент: min/max/sum/count по непустым

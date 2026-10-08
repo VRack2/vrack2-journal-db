@@ -1563,7 +1563,12 @@ export class Journal {
       for (const row of ins.rows) this.append(row);
       return ins.rows.length;
     }
-    return this.scan(parseSql(query));
+    const opts = parseSql(query);
+    const journalName = this.name ?? '';
+    if (opts.table !== undefined && journalName !== opts.table && !journalName.startsWith(opts.table + '.')) {
+      throw new SqlError(`SQL: SELECT FROM ${opts.table} — журнал открыт как '${journalName}'`);
+    }
+    return this.scan(opts);
   }
 
   /** Компиляция опций скана в план (валидация + предвычисление). */

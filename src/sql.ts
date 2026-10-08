@@ -55,7 +55,7 @@ type Tok =
   | { t: 'punct'; v: string };
 
 const KEYWORDS = new Set([
-  'SELECT', 'WHERE', 'AND', 'GROUP', 'BY', 'ORDER', 'ASC', 'DESC',
+  'SELECT', 'FROM', 'WHERE', 'AND', 'GROUP', 'BY', 'ORDER', 'ASC', 'DESC',
   'LIMIT', 'IN', 'NOT', 'IS', 'NULL', 'BETWEEN', 'AS', 'OFFSET',
   'INSERT', 'INTO', 'VALUES',
 ]);
@@ -319,6 +319,12 @@ export function parseSql(query: string): ScanOptions {
 
   expectKw(c, 'SELECT');
   const items = parseItems(c);
+
+  // FROM <таблица> (Фаза 4) — имя целевого журнала; Journal.sql() сверит с this.name.
+  if (isKw(peek(c), 'FROM')) {
+    next(c);
+    opts.table = nextId(c);
+  }
 
   // WHERE
   if (isKw(peek(c), 'WHERE')) {

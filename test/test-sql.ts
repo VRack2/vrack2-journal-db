@@ -358,5 +358,54 @@ function avg(arr: number[]): number {
   assert(ins2.rows[0]['b'] === false, 'insert: парсер false');
 }
 
-console.log(`\nSQL-lite (Фаза 5): ${passed} passed, ${failed} failed`);
+// --------------------------------------------------
+// 9. Фаза 4 — SELECT из метрик с FROM <таблица>
+// --------------------------------------------------
+{
+  const dir = path.join(baseDir, 'phase4');
+  const j = new Journal(dir, { rowsPerSegment: 100, lock: 'off' });
+  j.open('m', schema, {});
+  for (const r of ROWS) j.append(r);
+  j.compact();
+
+  // Пример из плана (Фаза 4): FROM + WHERE + GROUP BY + ORDER BY + LIMIT
+  const q = `SELECT host, avg(value) FROM m WHERE ts >= ${T0} GROUP BY host ORDER BY value_avg DESC LIMIT 10`;
+  const o = parseSql(q);
+  assert(o.table === 'm', `phase4: FROM → table='m' (получено ${String(o.table)})`);
+  const out = rows(j.sql(q));
+  // 3 хоста (web-1, web-2, db-1)
+  assert(out.length === 3, `phase4: 3 хоста (получено ${out.length})`);
+  const hosts = out.map(r => r['host'] as string).sort();
+  assert(
+    JSON.stringify(hosts) === JSON.stringify(['db-1', 'web-1', 'web-2']),
+    `phase4: хосты db-1/web-1/web-2 (получено ${hosts.join(',')})`
+  );
+  // отсортировано по value_avg DESC: db-1 (value +5) — максимум
+  assert(out[0]['host'] === 'db-1', `phase4: ORDER BY value_avg DESC → первый db-1 (получено ${String(out[0]['host'])})`);
+
+  // Временная строка в WHERE тоже парсится (ts >= 'now-5m')
+  const oTime = parseSql("SELECT host, avg(value) FROM m WHERE ts >= 'now-5m' GROUP BY host");
+  assert(!!oTime.where && oTime.where[0].field === 'ts' && oTime.where[0].op === 'ge', 'phase4: WHERE ts >= <время> парсится');
+
+  // Без FROM — работает (совместимость с ранними запросами)
+  const outNoFrom = rows(j.sql(`SELECT host, avg(value) WHERE ts >= ${T0} GROUP BY host ORDER BY value_avg DESC LIMIT 10`));
+  assert(outNoFrom.length === 3, `phase4: без FROM — тоже 3 хоста (получено ${outNoFrom.length})`);
+
+  // FROM с чужим именем — ошибка
+  let e1: unknown = null;
+  try { j.sql(`SELECT host, avg(value) FROM other WHERE ts >= ${T0} GROUP BY host`); } catch (e) { e1 = e; }
+  assert(e1 instanceof SqlError, `phase4: FROM other → SqlError (получено ${String(e1)})`);
+
+  // FROM префикс — совместимо с тирными именами (mt.tier0 начинается с 'mt')
+  const j2 = new Journal(dir, { lock: 'off' });
+  j2.open('mt.tier0', schema, {});
+  for (const r of ROWS) j2.append(r);
+  const okPrefix = rows(j2.sql(`SELECT host, avg(value) FROM mt WHERE ts >= ${T0} GROUP BY host`));
+  assert(okPrefix.length === 3, `phase4: FROM mt — префикс для mt.tier0 (получено ${okPrefix.length})`);
+
+  j.close();
+  j2.close();
+}
+
+console.log(`\nSQL-lite (Фаза 4-5): ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
