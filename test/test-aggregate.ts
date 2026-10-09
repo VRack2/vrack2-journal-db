@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/journal.ts';
+import { Journal } from '../src/Journal.ts';
 import type { AggregateExpr, AggFn, Row, Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

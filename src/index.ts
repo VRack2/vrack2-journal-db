@@ -2,46 +2,35 @@
 // index.ts — Публичный API пакета vrack2-journal-db
 // ============================================================
 
-export { Journal } from './journal.ts';
-export { Store } from './store.ts';
-export { Segment } from './segment.ts';
-export { Interval } from './interval.ts';
-export { LRUCache } from './cache.ts';
-export { encodeSegment, decodeSegment, isCompressedFormat } from './codec.ts';
-export {
-  encodeV3,
-  decodeV3,
-  readSegment,
-  isV3,
-  type V3EncodeOptions
-} from './v3.ts';
-export {
-  F64Codec,
-  DoubleDeltaCodec,
-  GorillaCodec,
-  RleCodec,
-  NUM_CODECS,
-  getNumCodec,
-  autoPickNumCodec,
-  type NumCodec
-} from './numcodecs.ts';
-export {
-  RetentionEngine,
-  defaultTiers,
-  type SegmentEncoding
-} from './retention.ts';
-export { parseSql, parseInsert, SqlError, type InsertQuery } from './sql.ts';
-export {
-  AutoColumn,
-  CatchAllColumn,
-  COLUMN_TYPES,
-  Column,
-  createColumn,
-  DeltaColumn,
-  DictionaryColumn,
-  RawColumn,
-  RLEColumn
-} from './columns.ts';
+export { Journal } from './Journal.ts';
+export { Store } from './Store.ts';
+export { Segment } from './Segment.ts';
+export { Interval } from './Interval.ts';
+export { LRUCache } from './LRUCache.ts';
+export { SegmentFile } from './SegmentFile.ts';
+export { SegmentFileV2 } from './SegmentFileV2.ts';
+export { SegmentFileV3 } from './SegmentFileV3.ts';
+export type { V3EncodeOptions } from './SegmentFileV3.ts';
+export { Compression } from './Compression.ts';
+export { F64Codec } from './numcodecs/F64Codec.ts';
+export { DoubleDeltaCodec } from './numcodecs/DoubleDeltaCodec.ts';
+export { GorillaCodec } from './numcodecs/GorillaCodec.ts';
+export { RleCodec } from './numcodecs/RleCodec.ts';
+export { NumCodecs } from './numcodecs/NumCodecs.ts';
+export type { NumCodec } from './numcodecs/types.ts';
+export { RetentionEngine } from './RetentionEngine.ts';
+export type { RetentionHost } from './RetentionEngine.ts';
+export { Sql } from './Sql.ts';
+export { SqlError } from './SqlError.ts';
+export type { InsertQuery } from './Sql.ts';
+export { Column } from './columns/Column.ts';
+export { RawColumn } from './columns/RawColumn.ts';
+export { CatchAllColumn } from './columns/CatchAllColumn.ts';
+export { DictionaryColumn } from './columns/DictionaryColumn.ts';
+export { DeltaColumn } from './columns/DeltaColumn.ts';
+export { RLEColumn } from './columns/RLEColumn.ts';
+export { AutoColumn } from './columns/AutoColumn.ts';
+export { ColumnFactory } from './columns/ColumnFactory.ts';
 
 export type {
   AggregateExpr,
@@ -69,6 +58,7 @@ export type {
   ScanOp,
   ScanOptions,
   Schema,
+  SegmentEncoding,
   SegmentFormat,
   SerializedColumn,
   SerializedSegment,
@@ -85,8 +75,8 @@ export type {
 // ============================================================
 // Фаза 4 — Table (мультитирная таблица-метрик, GraphiteMergeTree)
 // ============================================================
-export { Table, openTable, parseRetention } from './table.ts';
-export type { TableStore } from './table.ts';
+export { Table, openTable, parseRetention } from './Table.ts';
+export type { TableStore } from './Table.ts';
 
 // ============================================================
 // Фаза 1 — Движки компактизации (compaction/) + описания таблиц (define*Table)

@@ -9,8 +9,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/journal.ts';
-import { isV3 } from '../src/v3.ts';
+import { Journal } from '../src/Journal.ts';
+import { SegmentFileV3 } from '../src/SegmentFileV3.ts';
 import type { Row, Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -57,7 +57,7 @@ function journalDir(name: string): string {
   assert(!before.some(f => f.endsWith('.seg')), 'v2: нет .seg сегментов');
   // v2 файл: magic JSDB, но НЕ v3
   const v2file = before.find(f => f.endsWith('.json'))!;
-  assert(!isV3(fs.readFileSync(path.join(dir, v2file))), 'v2-файл не является v3');
+  assert(!SegmentFileV3.isV3(fs.readFileSync(path.join(dir, v2file))), 'v2-файл не является v3');
 
   // 1b. Reopen в v3 + migrateToV3()
   const j = new Journal(baseDir, { format: 'v3', compression: 'gzip' });
@@ -71,7 +71,7 @@ function journalDir(name: string): string {
   const segs = after.filter(f => !f.endsWith('.meta') && f !== '.lock');
   assert(segs.every(f => f.endsWith('.seg')), `все сегменты теперь .seg (факт ${after.join(',')})`);
   const segFile = after.find(f => f.endsWith('.seg'))!;
-  assert(isV3(fs.readFileSync(path.join(dir, segFile))), 'сегмент после миграции — v3');
+  assert(SegmentFileV3.isV3(fs.readFileSync(path.join(dir, segFile))), 'сегмент после миграции — v3');
 
   const rows = j.allRows();
   assert(rows.length === N, `данные после миграции: ${N} строк (факт ${rows.length})`);
@@ -108,7 +108,7 @@ function journalDir(name: string): string {
   const segFile = after.find(f => f.endsWith('.seg'));
   assert(!!segFile, `compact: появился .seg (факт ${after.join(',')})`);
   if (segFile) {
-    assert(isV3(fs.readFileSync(path.join(dir, segFile))), 'compact: сегмент — v3');
+    assert(SegmentFileV3.isV3(fs.readFileSync(path.join(dir, segFile))), 'compact: сегмент — v3');
   }
   assert(!after.some(f => f.endsWith('.json') && !f.endsWith('.meta')), 'compact: v2 .json сегмент ушёл');
   assert(j.allRows().length === 50, 'compact: данные сохранены (50)');

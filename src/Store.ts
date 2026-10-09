@@ -1,14 +1,15 @@
 // ============================================================
-// store.ts — Хранилище журналов с кэшем и ленивой загрузкой
+// Store.ts — Хранилище журналов с кэшем и ленивой загрузкой
 // ============================================================
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Journal, DEFAULT_ROWS_PER_SEGMENT, DEFAULT_COMPACT_MIN_SEGMENTS } from './journal.ts';
-import type { Segment } from './segment.ts';
-import { LRUCache } from './cache.ts';
-import { readSegment, defaultCompression } from './v3.ts';
-import { Table, openTable as createTable } from './table.ts';
+import { Journal, DEFAULT_ROWS_PER_SEGMENT, DEFAULT_COMPACT_MIN_SEGMENTS } from './Journal.ts';
+import type { Segment } from './Segment.ts';
+import { LRUCache } from './LRUCache.ts';
+import { SegmentFile } from './SegmentFile.ts';
+import { Compression } from './Compression.ts';
+import { Table, openTable as createTable } from './Table.ts';
 import type {
   CompressionMode,
   LockMode,
@@ -63,7 +64,7 @@ export class Store {
     this.lockMode = lock;
     this.format = opts.format ?? 'v2';
     // zstd по умолчанию при Node >= 23.8 (Фаза 5); явный opts.compression — выше.
-    this.compression = opts.compression ?? defaultCompression();
+    this.compression = opts.compression ?? Compression.default();
     this.codecs = opts.codecs && typeof opts.codecs === 'object' ? { ...opts.codecs } : {};
     this.autoCompact = opts.autoCompact ?? true;
     this.compactMinSegments = opts.compactMinSegments ?? DEFAULT_COMPACT_MIN_SEGMENTS;
@@ -249,7 +250,7 @@ export class Store {
         bytes += fs.statSync(full).size;
         segments++;
         try {
-          rows += readSegment(fs.readFileSync(full)).rowCount; // v1/v2/v3
+          rows += SegmentFile.read(fs.readFileSync(full)).rowCount; // v1/v2/v3
         } catch {
           // повреждённый/нечитаемый сегмент — не ломаем статистику
         }
@@ -281,7 +282,7 @@ export class Store {
       if (files.length === 0) return null;
 
       const firstFile = path.join(journalPath, files[0]);
-      const seg = readSegment(fs.readFileSync(firstFile)); // v1/v2/v3
+      const seg = SegmentFile.read(fs.readFileSync(firstFile)); // v1/v2/v3
 
       return {
         name,
@@ -310,7 +311,7 @@ export class Store {
       const segPath = path.join(dir, `${segmentId}${ext}`);
       if (!fs.existsSync(segPath)) continue;
       try {
-        const seg = readSegment(fs.readFileSync(segPath)); // v1/v2/v3
+        const seg = SegmentFile.read(fs.readFileSync(segPath)); // v1/v2/v3
         this.segmentCache.set(cacheKey, seg);
         return seg;
       } catch {

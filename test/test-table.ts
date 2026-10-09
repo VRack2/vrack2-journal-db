@@ -8,8 +8,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Store } from '../src/store.ts';
-import { Table, openTable, parseRetention } from '../src/table.ts';
+import { Store } from '../src/Store.ts';
+import { Table, openTable, parseRetention } from '../src/Table.ts';
 import type { TableConfig } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

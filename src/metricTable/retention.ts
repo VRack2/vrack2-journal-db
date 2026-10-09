@@ -5,7 +5,7 @@
 // вызовы не заглядывали внутрь table.ts.
 
 import type { ResolutionTier } from '../types.ts';
-import { parseRetention } from '../table.ts';
+import { parseRetention } from '../Table.ts';
 
 export type { ResolutionTier };
 

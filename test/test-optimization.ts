@@ -6,8 +6,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/journal.ts';
-import { DictionaryColumn, DeltaColumn, RLEColumn } from '../src/columns.ts';
+import { Journal } from '../src/Journal.ts';
+import { DictionaryColumn } from '../src/columns/DictionaryColumn.ts';
+import { DeltaColumn } from '../src/columns/DeltaColumn.ts';
+import { RLEColumn } from '../src/columns/RLEColumn.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

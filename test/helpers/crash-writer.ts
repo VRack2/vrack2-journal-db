@@ -5,7 +5,7 @@
 // Запуск: node --experimental-strip-types test/helpers/crash-writer.ts <baseDir> <journalName> [rows]
 // ============================================================
 
-import { Journal } from '../../src/journal.ts';
+import { Journal } from '../../src/Journal.ts';
 
 const baseDir = process.argv[2];
 const name = process.argv[3];

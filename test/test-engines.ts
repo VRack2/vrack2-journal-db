@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Store } from '../src/store.ts';
+import { Store } from '../src/Store.ts';
 import {
   defineLogTable,
   defineUpsertTable,

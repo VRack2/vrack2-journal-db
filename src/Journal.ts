@@ -1,5 +1,5 @@
 // ============================================================
-// journal.ts — Журнал событий
+// Journal.ts — Журнал событий
 // Закрытые сегменты грузятся с диска лениво (по требованию),
 // кэшируются в LRU. Активный сегмент живёт в памяти до flush.
 //
@@ -9,21 +9,25 @@
 //    при открытии после краха восстанавливается;
 //  - lockfile (.lock): один владелец журнала, устаревшие блокировки
 //    (мёртвый PID) забираются автоматически;
-//  - файлы сегментов v2: gzip + CRC32 (см. codec.ts); рядом лежит маленький
+//  - файлы сегментов v2: gzip + CRC32 (см. SegmentFileV2.ts); рядом лежит маленький
 //    сайдкар <файл>.meta с minTs/maxTs/счётчиками — позволяет пропускать
 //    чужие по времени файлы при query/stats без их разжатия.
 // ============================================================
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Segment } from './segment.ts';
-import type { Column } from './columns.ts';
-import { LRUCache } from './cache.ts';
-import { encodeSegment } from './codec.ts';
-import { encodeV3, readSegment, defaultCompression } from './v3.ts';
-import { Interval } from './interval.ts';
-import { RetentionEngine } from './retention.ts';
-import { parseSql, parseInsert, SqlError } from './sql.ts';
+import { Segment } from './Segment.ts';
+import type { Column } from './columns/Column.ts';
+import { LRUCache } from './LRUCache.ts';
+import { Percentile } from './Percentile.ts';
+import { SegmentFileV2 } from './SegmentFileV2.ts';
+import { SegmentFileV3 } from './SegmentFileV3.ts';
+import { SegmentFile } from './SegmentFile.ts';
+import { Compression } from './Compression.ts';
+import { Interval } from './Interval.ts';
+import { RetentionEngine } from './RetentionEngine.ts';
+import { Sql } from './Sql.ts';
+import { SqlError } from './SqlError.ts';
 import { ENGINE_META_KEY, Descriptor } from './compaction/Descriptor.ts';
 import { Log } from './compaction/Log.ts';
 import { Upsert } from './compaction/Upsert.ts';
@@ -211,26 +215,6 @@ function aggValue(acc: AggAcc, fn: AggFn): number | null {
 }
 
 // --------------------------------------------------
-// Квантили (Фаза 5) — точный расчёт по отсортированным значениям
-// --------------------------------------------------
-
-/** Ключ результата квантили: 0.95 → 'p95', 0.875 → 'p87.5'. */
-export function percentileKey(q: number): string {
-  return 'p' + Math.round(q * 1000) / 10;
-}
-
-/** Квантиль (linear interpolation, метод numpy 'linear') по отсортированному массиву. */
-export function percentileOf(sortedVals: number[], q: number): number {
-  const n = sortedVals.length;
-  if (n === 1) return sortedVals[0];
-  const pos = (n - 1) * q;
-  const lo = Math.floor(pos);
-  const hi = Math.ceil(pos);
-  if (lo === hi) return sortedVals[lo];
-  return sortedVals[lo] + (sortedVals[hi] - sortedVals[lo]) * (pos - lo);
-}
-
-// --------------------------------------------------
 // Скан (Фаза 3) — операторы where + скомпилированный план
 // --------------------------------------------------
 
@@ -330,7 +314,7 @@ export class Journal {
   /** Явные числовые кодек'и v3: поле → имя кодека. Пустое — авто-выбор. */
   readonly codecs: Record<string, string>;
 
-  /** Тир'ы retention (Фаза 4); null — дефолтные (см. retention.defaultTiers()). */
+  /** Тир'ы retention (Фаза 4); null — дефолтные (см. RetentionEngine.defaultTiers()). */
   private retentionTiers: RetentionTier[] | null = null;
   /** Ленивый движок retention (см. getter `retention`). */
   private retentionEngine: RetentionEngine | null = null;
@@ -373,7 +357,7 @@ export class Journal {
 
     // zstd — по умолчанию при Node >= 23.8 (Фаза 5); явный opts.compression
     // переопределяет. На старых Node — gzip.
-    const compression = opts.compression ?? defaultCompression();
+    const compression = opts.compression ?? Compression.default();
     if (compression !== 'gzip' && compression !== 'zstd') {
       throw new RangeError("Journal: compression должно быть 'gzip' или 'zstd'");
     }
@@ -386,7 +370,7 @@ export class Journal {
     this._segmentCache = new LRUCache<string, Segment>(this.maxCachedSegments);
   }
 
-  /** Движок retention (Фаза 4): тир'ы из opts.retention или defaultTiers(). */
+  /** Движок retention (Фаза 4): тир'ы из opts.retention или RetentionEngine.defaultTiers(). */
   get retention(): RetentionEngine {
     if (!this.retentionEngine) {
       this.retentionEngine = new RetentionEngine(this, this.retentionTiers ?? undefined);
@@ -402,8 +386,8 @@ export class Journal {
   /** Кодирует сегмент в буфер файла (v2: gzip+JSON, v3: бинарные блобы). */
   private _encodeSegment(segment: Segment): Buffer {
     return this.format === 'v3'
-      ? encodeV3(segment, { compression: this.compression, codecs: this.codecs })
-      : encodeSegment(segment.serialize());
+      ? SegmentFileV3.encode(segment, { compression: this.compression, codecs: this.codecs })
+      : SegmentFileV2.encode(segment.serialize());
   }
 
   // --------------------------------------------------
@@ -533,7 +517,7 @@ export class Journal {
     const tmpPath = `${filePath}.tmp`;
 
     // Атомарная запись: сначала во временный файл, затем rename.
-    // v2: gzip + CRC32 (см. codec.ts); v3: бинарные блобы (см. v3.ts).
+    // v2: gzip + CRC32 (см. SegmentFileV2.ts); v3: бинарные блобы (см. SegmentFileV3.ts).
     fs.writeFileSync(tmpPath, this._encodeSegment(segment));
     fs.renameSync(tmpPath, filePath);
 
@@ -704,7 +688,7 @@ export class Journal {
     if (!this.isOpen) throw new Error('Journal not open. Call open() first.');
     if (this.format !== 'v3') return { migrated: 0, logicalRows: 0 };
 
-    const encode = (s: Segment) => encodeV3(s, { compression: this.compression, codecs: this.codecs });
+    const encode = (s: Segment) => SegmentFileV3.encode(s, { compression: this.compression, codecs: this.codecs });
     let migrated = 0;
     let logicalRows = 0;
     for (const id of this._sortedClosedIds()) {
@@ -1165,7 +1149,7 @@ export class Journal {
 
     const out: Record<string, number | null> = {};
     for (const q of lv) {
-      out[percentileKey(q)] = vals.length === 0 ? null : percentileOf(vals, q);
+      out[Percentile.key(q)] = vals.length === 0 ? null : Percentile.of(vals, q);
     }
     return out;
   }
@@ -1566,7 +1550,7 @@ export class Journal {
    * этот журнал и возвращает число записанных строк; имя журнала в запросе
    * должно совпадать с именем открытого журнала.
    *
-   * Детали и синтаксис — см. sql.ts. Бросает SqlError при ошибке синтаксиса.
+   * Детали и синтаксис — см. Sql.ts. Бросает SqlError при ошибке синтаксиса.
    */
   sql(query: string): Row[] | number {
     if (!this.isOpen) {
@@ -1575,14 +1559,14 @@ export class Journal {
     const head = query.trimStart();
     const firstWord = head.split(/\s+/, 1)[0].toUpperCase();
     if (firstWord === 'INSERT') {
-      const ins = parseInsert(query);
+      const ins = Sql.parseInsert(query);
       if (ins.name !== this.name) {
         throw new SqlError(`SQL: INSERT INTO ${ins.name} — журнал открыт как '${this.name}'`);
       }
       for (const row of ins.rows) this.append(row);
       return ins.rows.length;
     }
-    const opts = parseSql(query);
+    const opts = Sql.parse(query);
     const journalName = this.name ?? '';
     if (opts.table !== undefined && journalName !== opts.table && !journalName.startsWith(opts.table + '.')) {
       throw new SqlError(`SQL: SELECT FROM ${opts.table} — журнал открыт как '${journalName}'`);
@@ -1996,7 +1980,7 @@ export class Journal {
     try {
       const buf = fs.readFileSync(path.join(this.journalPath(), fileName));
       // Прозрачное чтение: v1 (JSON) / v2 (gzip+JSON) / v3 (бинарные блобы)
-      seg = readSegment(buf);
+      seg = SegmentFile.read(buf);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       throw new Error(`Не удалось прочитать сегмент ${fileName}: ${message}`);

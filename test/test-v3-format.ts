@@ -7,11 +7,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/journal.ts';
-import { Segment } from '../src/segment.ts';
-import { encodeV3, decodeV3, readSegment, isV3, zstdAvailable, defaultCompression } from '../src/v3.ts';
-import { encodeSegment } from '../src/codec.ts';
-import { autoPickNumCodec, getNumCodec } from '../src/numcodecs.ts';
+import { Journal } from '../src/Journal.ts';
+import { Segment } from '../src/Segment.ts';
+import { SegmentFileV2 } from '../src/SegmentFileV2.ts';
+import { SegmentFileV3 } from '../src/SegmentFileV3.ts';
+import { Compression } from '../src/Compression.ts';
+import { NumCodecs } from '../src/numcodecs/NumCodecs.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -48,7 +49,7 @@ fs.rmSync(baseDir, { recursive: true, force: true });
     ['rle', [5, 5, 5, 7, 7, 0, 0, 0, 0, 42, 1]]
   ];
   for (const [name, values] of cases) {
-    const codec = getNumCodec(name);
+    const codec = NumCodecs.get(name);
     const enc = codec.encode(values);
     const dec = codec.decode(enc, values.length); // Float64Array | Int32Array
     const ok = dec.length === values.length && values.every((v, i) => dec[i] === v);
@@ -59,10 +60,10 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   // autoPick: регулярные целые → doubleDelta; низкая кардинальность с пробегами → rle;
   // осциллирующие float → gorilla (не rle — не целые).
   const reg = Array.from({ length: 200 }, (_, i) => i * 10); // ровный шаг
-  assert(autoPickNumCodec(reg) === 'doubleDelta', 'авто-выбор: ровный ряд → doubleDelta');
-  assert(autoPickNumCodec([5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]) === 'rle', 'авто-выбор: длинные пробеги → rle');
+  assert(NumCodecs.autoPick(reg) === 'doubleDelta', 'авто-выбор: ровный ряд → doubleDelta');
+  assert(NumCodecs.autoPick([5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5]) === 'rle', 'авто-выбор: длинные пробеги → rle');
   const osc = Array.from({ length: 200 }, (_, i) => 0.5 + (i % 2 ? 1e-9 : -1e-9));
-  assert(autoPickNumCodec(osc) === 'gorilla', 'авто-выбор: осциллирующие float → gorilla');
+  assert(NumCodecs.autoPick(osc) === 'gorilla', 'авто-выбор: осциллирующие float → gorilla');
 }
 
 // --------------------------------------------------
@@ -83,7 +84,7 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   assert(files.length === 1, `один v3-сегмент на диске (факт ${files.length})`);
 
   const buf = fs.readFileSync(path.join(dir, files[0]));
-  assert(isV3(buf), 'файл — сегмент v3 (магические байты + версия 3)');
+  assert(SegmentFileV3.isV3(buf), 'файл — сегмент v3 (магические байты + версия 3)');
 
   // codec value зафиксирован в схеме как gorilla (явный выбор)
   const h = v3Header(buf);
@@ -126,8 +127,8 @@ fs.rmSync(baseDir, { recursive: true, force: true });
     });
   }
   const rawJson = Buffer.byteLength(JSON.stringify(seg.serialize()), 'utf-8');
-  const v3Size = encodeV3(seg).length;
-  const v2Size = encodeSegment(seg.serialize()).length;
+  const v3Size = SegmentFileV3.encode(seg).length;
+  const v2Size = SegmentFileV2.encode(seg.serialize()).length;
   assert(v3Size < rawJson, `v3 (${v3Size} Б) < JSON (${rawJson} Б)`);
   assert(v3Size < v2Size, `v3 (${v3Size} Б) < v2 JSON+gzip (${v2Size} Б)`);
   console.log(`   v3=${v3Size} Б, v2=${v2Size} Б, JSON=${rawJson} Б (v3 в ${(rawJson / v3Size).toFixed(1)}x меньше JSON)`);
@@ -164,8 +165,8 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   for (let i = 0; i < 64; i++) {
     seg.append({ ts: i, metric: i % 5 === 0 ? null : i * 1.5, tag: i % 2 === 0 ? 'x' : 'y' });
   }
-  const buf = encodeV3(seg);
-  const seg2 = decodeV3(buf);
+  const buf = SegmentFileV3.encode(seg);
+  const seg2 = SegmentFileV3.decode(buf);
   let ok = true;
   for (let i = 0; i < 64; i++) {
     const expect = i % 5 === 0 ? null : i * 1.5;
@@ -184,10 +185,10 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   const seg = new Segment('t', schema);
   for (let i = 0; i < 50; i++) seg.append({ ts: i, f: Math.random() * 100 });
   // Явный rle на дробных → должен уйти в f64 (RleCodec бросает на не-целых)
-  const buf = encodeV3(seg, { codecs: { f: 'rle' } });
+  const buf = SegmentFileV3.encode(seg, { codecs: { f: 'rle' } });
   const h = v3Header(buf);
   assert(h.columns.f.codec === 'f64', 'rle на дробных → schema фиксирует фактический кодек f64');
-  const seg2 = decodeV3(buf);
+  const seg2 = SegmentFileV3.decode(buf);
   assert(seg2.rowCount === 50, 'fallback f64: rowCount сохранён');
   const colF = (seg2 as any).columns.f;
   let allFinite = true;
@@ -262,11 +263,11 @@ fs.rmSync(baseDir, { recursive: true, force: true });
 // --------------------------------------------------
 {
   // Дефолт согласован с наличием zstd в runtime.
-  const def = defaultCompression();
-  if (zstdAvailable()) {
-    assert(def === 'zstd', 'defaultCompression() = zstd при Node ≥ 23.8');
+  const def = Compression.default();
+  if (Compression.zstdAvailable()) {
+    assert(def === 'zstd', 'Compression.default() = zstd при Node ≥ 23.8');
   } else {
-    assert(def === 'gzip', 'defaultCompression() = gzip без zstd');
+    assert(def === 'gzip', 'Compression.default() = gzip без zstd');
   }
 
   // Журнал без явного compression → сегмент v3 сжимается по умолчанию (zstd/gzip),

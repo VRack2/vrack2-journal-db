@@ -1,5 +1,5 @@
 // ============================================================
-// interval.ts — «язык интервалов», совместимый с VRackDB Interval
+// Interval.ts — «язык интервалов», совместимый с VRackDB Interval
 // (https://github.com/ponikrf/VRackDB), но базовая единица — миллисекунды.
 //
 //   VRackDB Interval:   MTU = секунда,  nowFactor = 0.001 (мс → сек)

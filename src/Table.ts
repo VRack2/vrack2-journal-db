@@ -1,5 +1,5 @@
 // ============================================================
-// table.ts — Table: мультитирная таблица метрик (GraphiteMergeTree)
+// Table.ts — Table: мультитирная таблица метрик (GraphiteMergeTree)
 //
 // Фаза 4. Одна таблица = несколько тиров разрешения, каждый — отдельный
 // журнал. Свежие данные живут на тонком разрешении; по мере «возраста»
@@ -24,8 +24,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Journal, percentileKey, percentileOf } from './journal.ts';
-import { Interval } from './interval.ts';
+import { Journal } from './Journal.ts';
+import { Percentile } from './Percentile.ts';
+import { Interval } from './Interval.ts';
 import type {
   AggFn,
   Metadata,
@@ -449,7 +450,7 @@ export class Table {
     vals.sort((a, b) => a - b);
     const out: Record<string, number | null> = {};
     for (const q of lv) {
-      out[percentileKey(q)] = vals.length === 0 ? null : percentileOf(vals, q);
+      out[Percentile.key(q)] = vals.length === 0 ? null : Percentile.of(vals, q);
     }
     return out;
   }

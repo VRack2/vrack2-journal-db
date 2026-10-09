@@ -6,7 +6,7 @@
 // (key=[ts, …dims], version=ts), чтобы повторный rollup того же бакета
 // схлопывался при compact. Rollup-агрегация — чистая функция promote().
 
-import type { Journal } from '../journal.ts';
+import type { Journal } from '../Journal.ts';
 import type {
   AggFn,
   Metadata,
@@ -15,7 +15,7 @@ import type {
   Row,
   Schema,
 } from '../types.ts';
-import type { TableStore } from '../table.ts';
+import type { TableStore } from '../Table.ts';
 import { Tier } from './Tier.ts';
 import { promote } from './rollup.ts';
 import type { RollupConfig } from './rollup.ts';

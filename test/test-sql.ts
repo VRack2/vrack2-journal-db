@@ -11,8 +11,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/journal.ts';
-import { parseSql, parseInsert, SqlError } from '../src/sql.ts';
+import { Journal } from '../src/Journal.ts';
+import { Sql } from '../src/Sql.ts';
+import { SqlError } from '../src/SqlError.ts';
 import type { Schema, Row } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -115,20 +116,20 @@ function avg(arr: number[]): number {
 // 1. parseSql — базовый синтаксис
 // --------------------------------------------------
 {
-  const o = parseSql('SELECT avg(value), host WHERE value > 90 GROUP BY host ORDER BY value_avg DESC LIMIT 20');
+  const o = Sql.parse('SELECT avg(value), host WHERE value > 90 GROUP BY host ORDER BY value_avg DESC LIMIT 20');
   assert(!!o.agg && Array.isArray(o.agg['value']) && o.agg['value'].includes('avg'), 'parseSql: avg(value) в agg');
   assert(JSON.stringify(o.groupBy) === JSON.stringify(['host']), 'parseSql: groupBy host');
   assert(!!o.where && o.where.length === 1 && o.where[0].op === 'gt' && o.where[0].value === 90, 'parseSql: where value>90');
   assert(o.order === 'desc', 'parseSql: order desc');
   assert(o.limit === 20, 'parseSql: limit 20');
 
-  const o2 = parseSql('SELECT host, value WHERE ts BETWEEN \'now-1h\' AND \'now\' AND host = \'web-1\' LIMIT 10');
+  const o2 = Sql.parse('SELECT host, value WHERE ts BETWEEN \'now-1h\' AND \'now\' AND host = \'web-1\' LIMIT 10');
   assert(o2.start === 'now-1h' && o2.end === 'now', 'parseSql: ts BETWEEN → start/end');
   assert(JSON.stringify(o2.select) === JSON.stringify(['host', 'value']), 'parseSql: select host,value');
   assert(!!o2.where && o2.where.length === 1 && o2.where[0].op === 'eq' && o2.where[0].value === 'web-1', 'parseSql: where host=web-1');
   assert(o2.limit === 10, 'parseSql: limit 10');
 
-  const o3 = parseSql('SELECT * WHERE level IN (\'error\', \'warn\') LIMIT 5');
+  const o3 = Sql.parse('SELECT * WHERE level IN (\'error\', \'warn\') LIMIT 5');
   assert(o3.select === undefined, 'parseSql: SELECT * → select по умолчанию');
   assert(!!o3.where && o3.where.length === 1 && o3.where[0].op === 'in', 'parseSql: IN → in');
   assert(JSON.stringify(o3.where![0].value) === JSON.stringify(['error', 'warn']), 'parseSql: IN значения');
@@ -150,7 +151,7 @@ function avg(arr: number[]): number {
   ];
   for (const q of bad) {
     let threw = false;
-    try { parseSql(q); } catch (e) { threw = e instanceof SqlError || e instanceof Error; }
+    try { Sql.parse(q); } catch (e) { threw = e instanceof SqlError || e instanceof Error; }
     assert(threw, `parseSql бросает ошибку: ${q}`);
   }
 }
@@ -352,9 +353,9 @@ function avg(arr: number[]): number {
   j.close();
 
   // Парсер: true/false как значения
-  const ins = parseInsert('INSERT INTO m (ts, value, count) VALUES (1, 2, true)');
+  const ins = Sql.parseInsert('INSERT INTO m (ts, value, count) VALUES (1, 2, true)');
   assert(ins.rows.length === 1 && ins.rows[0]['count'] === true, 'insert: парсер true');
-  const ins2 = parseInsert('INSERT INTO m (a, b) VALUES (1, false)');
+  const ins2 = Sql.parseInsert('INSERT INTO m (a, b) VALUES (1, false)');
   assert(ins2.rows[0]['b'] === false, 'insert: парсер false');
 }
 
@@ -370,7 +371,7 @@ function avg(arr: number[]): number {
 
   // Пример из плана (Фаза 4): FROM + WHERE + GROUP BY + ORDER BY + LIMIT
   const q = `SELECT host, avg(value) FROM m WHERE ts >= ${T0} GROUP BY host ORDER BY value_avg DESC LIMIT 10`;
-  const o = parseSql(q);
+  const o = Sql.parse(q);
   assert(o.table === 'm', `phase4: FROM → table='m' (получено ${String(o.table)})`);
   const out = rows(j.sql(q));
   // 3 хоста (web-1, web-2, db-1)
@@ -384,7 +385,7 @@ function avg(arr: number[]): number {
   assert(out[0]['host'] === 'db-1', `phase4: ORDER BY value_avg DESC → первый db-1 (получено ${String(out[0]['host'])})`);
 
   // Временная строка в WHERE тоже парсится (ts >= 'now-5m')
-  const oTime = parseSql("SELECT host, avg(value) FROM m WHERE ts >= 'now-5m' GROUP BY host");
+  const oTime = Sql.parse("SELECT host, avg(value) FROM m WHERE ts >= 'now-5m' GROUP BY host");
   assert(!!oTime.where && oTime.where[0].field === 'ts' && oTime.where[0].op === 'ge', 'phase4: WHERE ts >= <время> парсится');
 
   // Без FROM — работает (совместимость с ранними запросами)

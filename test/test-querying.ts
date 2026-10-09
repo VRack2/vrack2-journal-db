@@ -6,8 +6,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/journal.ts';
-import { decodeSegment } from '../src/codec.ts';
+import { Journal } from '../src/Journal.ts';
+import { SegmentFileV2 } from '../src/SegmentFileV2.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -113,7 +113,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
 
     // Каждый сегмент имеет minTs/maxTs для пропуска вне диапазона
     for (const f of files) {
-      const data = decodeSegment(fs.readFileSync(path.join(dir, f)));
+      const data = SegmentFileV2.decode(fs.readFileSync(path.join(dir, f)));
       assert(data.minTs !== null && data.maxTs !== null, `${f}: minTs/maxTs записаны`);
     }
   }

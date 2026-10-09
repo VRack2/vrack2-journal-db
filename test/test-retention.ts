@@ -8,8 +8,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/journal.ts';
-import { RetentionEngine, defaultTiers } from '../src/retention.ts';
+import { Journal } from '../src/Journal.ts';
+import { RetentionEngine } from '../src/RetentionEngine.ts';
 import type { Schema, RetentionTier, Row } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -62,7 +62,7 @@ function canonical(rows: Row[]): string {
 // 0. Тир'ы по умолчанию
 // --------------------------------------------------
 {
-  const tiers = defaultTiers();
+  const tiers = RetentionEngine.defaultTiers();
   assert(tiers.length === 4, `defaultTiers: 4 тир'а (факт ${tiers.length})`);
   assert(tiers[0].id === 'hot' && tiers[3].id === 'archive', 'порядок: hot → archive');
   assert(tiers[0].from === 0 && tiers[3].to === Infinity, 'диапазоны: 0 → Infinity');

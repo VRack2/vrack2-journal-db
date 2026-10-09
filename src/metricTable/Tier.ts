@@ -4,7 +4,7 @@
 // к грубому. append идёт в самый тонкий; rollup переносит состарившееся на
 // более грубые; retention чистит каждый тир старше его ttl.
 
-import type { Journal } from '../journal.ts';
+import type { Journal } from '../Journal.ts';
 import type { ResolutionTier, Row, ScanOptions } from '../types.ts';
 
 export class Tier {

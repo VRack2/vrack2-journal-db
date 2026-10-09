@@ -163,19 +163,25 @@ vrack2-journal compact --data ./data --name cpu
 
 | Файл | Назначение |
 |---|---|
+| `src/index.ts` | Фасад — единственный публичный API пакета |
 | `src/types.ts` | Общие типы; сериализованные колонки — дискриминированные union'ы |
-| `src/columns.ts` | Шесть типов колонок: Raw, Dictionary, Delta, RLE, Auto, Catchall |
-| `src/segment.ts` | Сегмент: набор колонок + дедупликация строк (dedupMap) |
-| `src/journal.ts` | Журнал: WAL, блокировки, flush, clear(), purge(), timeline(), page()/tail(), compact(), `aggregate`/`downsample`, `scan()`, `sql()`, `percentile()`, `migrateToV3()` |
-| `src/interval.ts` | «Язык интервалов» (VRackDB-совместимо, в мс): parseInterval, partOfPeriod, period, roundTime, getIntervals |
-| `src/store.ts` | Хранилище нескольких журналов с общим кэшем сегментов; `openTable()` |
-| `src/cache.ts` | LRU-кэш (используется Journal и Store) |
-| `src/codec.ts` | Формат файла v2: gzip + CRC32; чтение старых v1-файлов |
-| `src/v3.ts` | Формат v3: бинарные блобы колонок (кодек + словарь + zstd/gzip + CRC32), мульти-версионный ридер v1/v2/v3 |
-| `src/numcodecs.ts` | Числовые кодексы v3: f64, doubleDelta, gorilla, rle8, simple8b, dictionary + `autoPickNumCodec` |
-| `src/retention.ts` | Retention-тиры: парсинг `'5s:1d,…'`, выбор тира по возрасту, rollup (fine→coarse) |
-| `src/table.ts` | `Table`: N журналов-тиров + retention + rollup + `query`/`percentile`/`stats` |
-| `src/sql.ts` | SQL-lite: парсер подмножества SQL → опции `scan()` |
+| `src/Segment.ts` | Сегмент: набор колонок + дедупликация строк (dedupMap) |
+| `src/Journal.ts` | Журнал: WAL, блокировки, flush, clear(), purge(), timeline(), page()/tail(), compact(), `aggregate`/`downsample`, `scan()`, `sql()`, `percentile()`, `migrateToV3()` |
+| `src/Interval.ts` | «Язык интервалов» (VRackDB-совместимо, в мс): parseInterval, partOfPeriod, period, roundTime, getIntervals |
+| `src/Store.ts` | Хранилище нескольких журналов с общим кэшем сегментов; `openTable()` |
+| `src/LRUCache.ts` | LRU-кэш (используется Journal и Store) |
+| `src/SegmentFile.ts` | Мульти-версионный фасад файлов сегментов: `encode`/`decode`/`readSegment`/`isV2` |
+| `src/SegmentFileV2.ts` | Формат файла v2: gzip + CRC32; чтение старых v1-файлов |
+| `src/SegmentFileV3.ts` | Формат v3: бинарные блобы колонок (кодек + словарь + zstd/gzip + CRC32) |
+| `src/Compression.ts` | Сжатие блобов: gzip, zstd |
+| `src/Percentile.ts` | Квантили (p50/p90/p95/p99) |
+| `src/RetentionEngine.ts` | Retention-тиры: выбор тира по возрасту, перекодирование, слияние блоков (1h → 1d) |
+| `src/Table.ts` | `Table`: N журналов-тиров + retention + rollup + `query`/`percentile`/`stats`; парсинг `'5s:1d,…'` |
+| `src/Sql.ts` / `src/SqlError.ts` | SQL-lite: парсер подмножества SQL → опции `scan()` / `insert()` |
+| `src/columns/` | Шесть типов колонок: Raw, Dictionary, Delta, RLE, Auto, Catchall + `ColumnFactory` |
+| `src/numcodecs/` | Числовые кодексы v3: f64, doubleDelta, gorilla, rle + `NumCodecs` (`all`/`get`/`autoPick`) |
+| `src/compaction/` | Движки компактизации: Log, Upsert, Summing, Collapsing + `Descriptor` |
+| `src/metricTable/` | Мультитирная метрика-таблица (Фаза 2): `Tier`, rollup (fine→coarse), `MergeTree` |
 
 ## Тесты
 

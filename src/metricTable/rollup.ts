@@ -5,7 +5,7 @@
 // (Tier/MergeTree). Эти же функции использует Table (src/table.ts), чтобы
 // логика агрегации была в одном месте.
 
-import { Interval } from '../interval.ts';
+import { Interval } from '../Interval.ts';
 import type { AggFn, JsonValue, Row } from '../types.ts';
 
 /**

@@ -222,6 +222,9 @@ export type SegmentFormat = 'v2' | 'v3';
  *  'gzip' (старые Node / явный выбор; zstd при отсутствии — откат на gzip). */
 export type CompressionMode = 'gzip' | 'zstd';
 
+/** Способ сжатия блоба: 'none' (без сжатия), 'gzip', 'zstd'. */
+export type CompressionKind = 'none' | 'gzip' | 'zstd';
+
 // --------------------------------------------------
 // Retention (Фаза 4) — тир'ы и отчётность движка
 // --------------------------------------------------
@@ -244,6 +247,14 @@ export interface RetentionTier {
   minInterval: number;
   /** Дельта-кодировать колонку ts (doubleDelta). */
   tsDelta: boolean;
+}
+
+/** Текущее кодирование файла сегмента (из v3-заголовка). */
+export interface SegmentEncoding {
+  v3: boolean;
+  compression: string;
+  /** Числовые кодек'и: поле → имя кодека. */
+  codecs: Record<string, string>;
 }
 
 /** Статус тира: сколько сегментов/байт/строк и диапазон ts. */

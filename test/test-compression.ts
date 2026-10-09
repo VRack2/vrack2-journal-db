@@ -5,9 +5,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/journal.ts';
-import { Segment } from '../src/segment.ts';
-import { decodeSegment, encodeSegment, isCompressedFormat } from '../src/codec.ts';
+import { Journal } from '../src/Journal.ts';
+import { Segment } from '../src/Segment.ts';
+import { SegmentFile } from '../src/SegmentFile.ts';
+import { SegmentFileV2 } from '../src/SegmentFileV2.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -45,7 +46,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   assert(files.length === 1, `один сегмент на диске (факт ${files.length})`);
 
   const buf = fs.readFileSync(path.join(dir, files[0]));
-  assert(isCompressedFormat(buf), 'файл начинается с магических байтов JSDB');
+  assert(SegmentFile.isWrapped(buf), 'файл начинается с магических байтов JSDB');
   assert(buf.length >= 12, 'в файле есть заголовок и CRC32');
 
   // Сжатие реально уменьшает повторяющиеся данные
@@ -54,7 +55,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
     seg.append({ ts: i, val: i % 2 === 0 ? 'even' : 'odd' });
   }
   const rawSize = Buffer.byteLength(JSON.stringify(seg.serialize()), 'utf-8');
-  const encSize = encodeSegment(seg.serialize()).length;
+  const encSize = SegmentFileV2.encode(seg.serialize()).length;
   assert(encSize < rawSize, `сжатый (${encSize} Б) меньше JSON (${rawSize} Б)`);
 
   // Повторное чтение: данные целы
@@ -68,7 +69,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   );
 
   // formatVersion в payload'е
-  const data = decodeSegment(buf);
+  const data = SegmentFileV2.decode(buf);
   assert(data.formatVersion === 2, `formatVersion=2 (факт ${data.formatVersion})`);
   j2.close();
 }
@@ -89,10 +90,10 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   fs.writeFileSync(filePath, JSON.stringify(seg.serialize())); // без магических байтов
 
   const rawBuf = fs.readFileSync(filePath);
-  assert(!isCompressedFormat(rawBuf), 'v1-файл не имеет магических байтов');
+  assert(!SegmentFile.isWrapped(rawBuf), 'v1-файл не имеет магических байтов');
 
-  const data = decodeSegment(rawBuf);
-  assert(data.rowCount === 3, 'decodeSegment читает v1 напрямую');
+  const data = SegmentFileV2.decode(rawBuf);
+  assert(data.rowCount === 3, 'SegmentFileV2.decode читает v1 напрямую');
 
   const j = new Journal(baseDir);
   j.open('legacy', s1);
@@ -106,7 +107,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
   assert(files.length === 2, `v1 + новый v2 (факт ${files.length})`);
   const newFile = files.find(f => f !== 'seg_0_0.json')!;
-  assert(isCompressedFormat(fs.readFileSync(path.join(dir, newFile))), 'новый сегмент записан в v2');
+  assert(SegmentFile.isWrapped(fs.readFileSync(path.join(dir, newFile))), 'новый сегмент записан в v2');
 
   const j2 = new Journal(baseDir);
   j2.open('legacy', s1);

@@ -2,7 +2,8 @@
 // segment.ts — Сегмент данных с дедупликацией строк
 // ============================================================
 
-import { createColumn, type Column } from './columns.ts';
+import { Column } from './columns/Column.ts';
+import { ColumnFactory } from './columns/ColumnFactory.ts';
 import type { ColumnSummary, JsonValue, Metadata, Row, Schema, SerializedColumn, SerializedSegment } from './types.ts';
 
 export class Segment {
@@ -38,7 +39,7 @@ export class Segment {
     this._fields = Object.keys(schema);
 
     for (const [fieldName, type] of Object.entries(schema)) {
-      this.columns[fieldName] = createColumn(type);
+      this.columns[fieldName] = ColumnFactory.create(type);
     }
 
     const catchAll = Object.entries(schema).find(([, t]) => t === 'catchall');
