@@ -24,7 +24,26 @@ import { encodeV3, readSegment, defaultCompression } from './v3.ts';
 import { Interval } from './interval.ts';
 import { RetentionEngine } from './retention.ts';
 import { parseSql, parseInsert, SqlError } from './sql.ts';
-import { mergeWithEngine, ENGINE_META_KEY, metaToDescriptor } from './engines/index.ts';
+import { ENGINE_META_KEY, Descriptor } from './compaction/Descriptor.ts';
+import { Log } from './compaction/Log.ts';
+import { Upsert } from './compaction/Upsert.ts';
+import { Summing } from './compaction/Summing.ts';
+import { Collapsing } from './compaction/Collapsing.ts';
+import type { Engine } from './compaction/Engine.ts';
+
+/** kind → класс движка: единственное место, где маршрутизируют по виду. */
+function makeEngine(desc: Descriptor): Engine {
+  switch (desc.kind) {
+    case 'log':
+      return new Log(desc);
+    case 'upsert':
+      return new Upsert(desc);
+    case 'summing':
+      return new Summing(desc);
+    case 'collapsing':
+      return new Collapsing(desc);
+  }
+}
 import type {
   AggregateExpr,
   AggFn,
@@ -571,9 +590,9 @@ export class Journal {
    * перекодируются на объединённых данных (сэмпл может пересечь порог).
    *
    * Движок (engine): перед записью в слитый сегмент строки проходят
-   * `mergeWithEngine()` по движку из `metadata._engine` (log/upsert/summing/
-   * collapsing). Без движка — лог (строки не меняются, как раньше), поэтому
-   * старые журналы ведут себя как log и остаются совместимыми.
+   * `engine.merge(rows)` — движок восстанавливается из `metadata._engine`
+   * (log/upsert/summing/collapsing). Без движка — лог (строки не меняются,
+   * как раньше), поэтому старые журналы ведут себя как log и совместимы.
    */
   compact(): CompactResult {
     if (!this.isOpen) {
@@ -604,10 +623,10 @@ export class Journal {
 
     // Движок: применяем стратегию слияния (log — идентично, upsert/summing/
     // collapsing — сводят строки по identity-ключу). Дескриптор — из metadata.
-    const engineDesc = metaToDescriptor(
-      this.metadata ? (this.metadata as Record<string, unknown>)[ENGINE_META_KEY] : undefined
+    const engineDesc = Descriptor.fromMeta(
+      (this.metadata as Record<string, unknown>)[ENGINE_META_KEY]
     );
-    const kept = engineDesc ? mergeWithEngine(rows, engineDesc) : rows;
+    const kept = engineDesc ? makeEngine(engineDesc).merge(rows) : rows;
     const collapsedRows = rows.length - kept.length;
 
     const merged = new Segment(

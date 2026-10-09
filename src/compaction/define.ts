@@ -1,11 +1,10 @@
 // ============================================================
-// engines/define.ts — Описания таблиц (define*Table)
+// compaction/define.ts — Описания таблиц (define*Table)
 //
 // Единый «язык» для декларирования таблиц: одна функция на движок, у каждой
-// свои параметры (как движки ClickHouse). Возвращают типизированное
-// описание (AnyTableDef) — его можно передать в store.create(def), записать
-// в манифест _store.json или отдать коллеге/AI-агенту как самодостаточный
-// артефакт.
+// свои параметры (как движки ClickHouse). Возвращают типизированное описание
+// (AnyTableDef) — его можно передать в store.create(def), записать в манифест
+// _store.json или отдать коллеге/AI-агенту как самодостаточный артефакт.
 //
 //   const cpu = defineUpsertTable({
 //     name: 'cpu',
@@ -21,7 +20,7 @@
 // ============================================================
 
 import type { Schema } from '../types.ts';
-import type { EngineDescriptor } from './types.ts';
+import { Descriptor } from './Descriptor.ts';
 
 // --------------------------------------------------
 // Базовое + специфичные описания (дискриминированный union по kind)
@@ -95,8 +94,7 @@ function validateBase(cfg: BaseTableDef, kind: string): void {
   if (!cfg.columns || typeof cfg.columns !== 'object') {
     throw new RangeError(`${kind}: columns — объект «поле → тип колонки»`);
   }
-  const fields = Object.keys(cfg.columns);
-  if (fields.length === 0) {
+  if (Object.keys(cfg.columns).length === 0) {
     throw new RangeError(`${kind}: columns — непустая схема`);
   }
 }
@@ -162,19 +160,19 @@ export function defineCollapsingTable(cfg: Omit<CollapsingTableDef, 'kind'>): Co
 }
 
 // --------------------------------------------------
-// Описание → нормализованный дескриптор движка (для metadata/compact)
+// Описание → дескриптор движка (для metadata/compact)
 // --------------------------------------------------
 
 /** Достаёт из описания таблицы дескриптор движка (то, что нужно compact()). */
-export function engineDescriptorOf(def: AnyTableDef): EngineDescriptor {
+export function engineDescriptorOf(def: AnyTableDef): Descriptor {
   switch (def.kind) {
     case 'log':
-      return { kind: 'log' };
+      return new Descriptor({ kind: 'log' });
     case 'upsert':
-      return { kind: 'upsert', key: def.key, version: def.version };
+      return new Descriptor({ kind: 'upsert', key: def.key, version: def.version });
     case 'summing':
-      return { kind: 'summing', key: def.key, sum: def.sum, version: def.version };
+      return new Descriptor({ kind: 'summing', key: def.key, sum: def.sum, version: def.version });
     case 'collapsing':
-      return { kind: 'collapsing', key: def.key, sign: def.sign, version: def.version };
+      return new Descriptor({ kind: 'collapsing', key: def.key, sign: def.sign, version: def.version });
   }
 }

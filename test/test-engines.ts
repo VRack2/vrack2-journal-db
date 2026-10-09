@@ -19,7 +19,7 @@ import {
   defineUpsertTable,
   defineSummingTable,
   defineCollapsingTable
-} from '../src/engines/index.ts';
+} from '../src/compaction/define.ts';
 import type { Row } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));

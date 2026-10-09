@@ -16,7 +16,7 @@ import type {
   Schema,
 } from '../types.ts';
 import type { TableStore } from '../table.ts';
-import { Tier } from './tier.ts';
+import { Tier } from './Tier.ts';
 import { promote } from './rollup.ts';
 import type { RollupConfig } from './rollup.ts';
 import { tiersForRetention, validateTiers } from './retention.ts';

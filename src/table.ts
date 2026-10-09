@@ -37,7 +37,7 @@ import type {
   TableConfig,
   TableTierStat,
 } from './types.ts';
-import { applyAgg, promote } from './engines/rollup.ts';
+import { applyAgg, promote } from './metricTable/rollup.ts';
 
 // Минимальный структурный интерфейс хранилища (Store из store.ts подходит
 // без импорта — исключает циклическую зависимость store.ts ↔ table.ts).

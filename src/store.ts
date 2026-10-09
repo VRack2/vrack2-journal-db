@@ -20,8 +20,10 @@ import type {
   StoreStats,
   TableConfig,
 } from './types.ts';
-import { ENGINE_META_KEY, descriptorToMeta, engineDescriptorOf } from './engines/index.ts';
-import type { AnyTableDef, EngineKind, TableDescription, TableRuntime } from './engines/index.ts';
+import { ENGINE_META_KEY } from './compaction/Descriptor.ts';
+import { engineDescriptorOf } from './compaction/define.ts';
+import type { AnyTableDef, TableDescription, TableRuntime } from './compaction/define.ts';
+import type { EngineKind } from './compaction/types.ts';
 
 const MANIFEST_FILE = '_store.json';
 const isSegmentFile = (f: string): boolean => f.endsWith('.seg') || f.endsWith('.json');
@@ -167,7 +169,7 @@ export class Store {
    */
   create(def: AnyTableDef): Journal {
     const desc = engineDescriptorOf(def);
-    const metadata: Metadata = { [ENGINE_META_KEY]: descriptorToMeta(desc) };
+    const metadata: Metadata = { [ENGINE_META_KEY]: desc.toMeta() };
     if (def.desc) {
       (metadata as Record<string, unknown>).desc = def.desc;
     }
