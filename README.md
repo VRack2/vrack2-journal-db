@@ -170,7 +170,7 @@ vrack2-journal compact --data ./data --name cpu
 | `src/Interval.ts` | «Язык интервалов» (VRackDB-совместимо, в мс): parseInterval, partOfPeriod, period, roundTime, getIntervals |
 | `src/Store.ts` | Хранилище нескольких журналов с общим кэшем сегментов; `openTable()` |
 | `src/LRUCache.ts` | LRU-кэш (используется Journal и Store) |
-| `src/SegmentFile.ts` | Мульти-версионный фасад файлов сегментов: `encode`/`decode`/`readSegment`/`isV2` |
+| `src/SegmentFile.ts` | Мульти-версионный фасад: `read(buf)` (v1/v2/v3 → сегмент), `isWrapped(buf)` |
 | `src/SegmentFileV2.ts` | Формат файла v2: gzip + CRC32; чтение старых v1-файлов |
 | `src/SegmentFileV3.ts` | Формат v3: бинарные блобы колонок (кодек + словарь + zstd/gzip + CRC32) |
 | `src/Compression.ts` | Сжатие блобов: gzip, zstd |
@@ -179,7 +179,7 @@ vrack2-journal compact --data ./data --name cpu
 | `src/Table.ts` | `Table`: N журналов-тиров + retention + rollup + `query`/`percentile`/`stats`; парсинг `'5s:1d,…'` |
 | `src/Sql.ts` / `src/SqlError.ts` | SQL-lite: парсер подмножества SQL → опции `scan()` / `insert()` |
 | `src/columns/` | Шесть типов колонок: Raw, Dictionary, Delta, RLE, Auto, Catchall + `ColumnFactory` |
-| `src/numcodecs/` | Числовые кодексы v3: f64, doubleDelta, gorilla, rle + `NumCodecs` (`all`/`get`/`autoPick`) |
+| `src/numcodecs/` | Числовые кодексы v3: f64, doubleDelta, gorilla, rle + `NumCodecs` (`registry`/`get`/`autoPick`) |
 | `src/compaction/` | Движки компактизации: Log, Upsert, Summing, Collapsing + `Descriptor` |
 | `src/metricTable/` | Мультитирная метрика-таблица (Фаза 2): `Tier`, rollup (fine→coarse), `MergeTree` |
 
