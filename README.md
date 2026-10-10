@@ -53,7 +53,7 @@ retention-тирами (Фаза 4) → `sql`/`percentile` (Фаза 5). Пла�
 Четыре уровня:
 
 ```
-Store   — каталог с N журналами + общий кэш сегментов + openTable()
+Store   — каталог таблиц (create(def)/open(name)/describe()) + общий кэш сегментов
  └─ Journal — каталог: N сегментов + WAL + блокировка + активный сегмент
      └─ Segment — набор колонок + дедупликация строк (dedupMap)
          └─ Column — одна колонка со своей стратегией хранения
@@ -67,44 +67,69 @@ Store   — каталог с N журналами + общий кэш сегм�
 
 ## Как использовать
 
+Публичный API — одно лицо (ClickHouse-модель): **Store** (каталог таблиц) +
+**Table** (таблица) + **define\*Table** (описание: движок + тиры). Внутренняя
+механика (журналы, сегменты, кодексы, SQL-парсер) не экспортируется.
+
 ```ts
-import { Journal, Store } from 'vrack2-journal-db';
+import { Store, defineLogTable } from 'vrack2-journal-db';
 
-const j = new Journal('./data');
-j.open('events', { ts: 'delta', level: 'dictionary', val: 'auto' });
+const store = new Store('./data');
 
-j.append({ ts: Date.now(), level: 'info', val: 42 });
-j.append({ ts: Date.now(), level: 'warn', val: 99 });
+// Описание валидируется сразу при define*() — ошибки видны на месте объявления
+const cpu = store.create(defineLogTable({
+  name: 'cpu',
+  desc: 'Метрики CPU: строка на (host) в момент ts',
+  columns: { ts: 'delta', host: 'dictionary', value: 'auto' },
+  retention: '5s:1d,15s:1w,1m:1mon', // 5с/1день, 15с/1неделя, 1м/1месяц
+  agg: { value: 'avg' },
+}));
 
-j.allRows();                    // все строки, старые → новые
-j.query(1700000000, 1700000090); // только в диапазоне ts
-j.tail(3);                      // три последних
+cpu.append({ ts: Date.now(), host: 'web-1', value: 42.3 });
 
-j.stats();                      // { totalRows, totalPhysicalRows, totalSize, … }
-j.getTimeRange();               // { minTs, maxTs }
+cpu.query('now-30d', 'now');   // сам собирает ответ из нужных тиров по возрасту
+cpu.allRows();                 // все строки, старые → новые
+cpu.tail(10);                  // десять последних
+cpu.stats();                   // строки/байты/диапазон ts на тир
+cpu.compact();                 // слить закрытые сегменты (поведение — по движку)
+cpu.purge('now-30d');          // удалить строки старше 30 дней
+cpu.close();
 
-j.append({ ts: Date.now(), level: 'error', val: 200 });
-j.append({ ts: Date.now(), level: 'error', val: 200 }); // дубль — не занимает место
-
-j.compact();                    // слить закрытые сегменты в один
-j.purge('now-30d');             // удалить строки старше 30 дней
-j.close();
+// Store — каталог таблиц, общий кэш сегментов
+store.tables();                // ['cpu']
+store.describe();              // [{ name, columns, kind, rows, segments, sizeBytes }]
+store.engineOf('cpu');         // 'log' | 'upsert' | 'summing' | 'collapsing'
+store.closeAll();
 ```
 
-Несколько журналов в одном каталоге, общий кэш сегментов и метрическая таблица:
+### Движки
+
+Одна `define*`-функция на движок, у каждой свои параметры (как движки
+ClickHouse); поведение при `compact()` — своё:
+
+| Движок | Параметры | Слияние при compact() |
+|---|---|---|
+| `defineLogTable` | — | строки не меняются; дубли схлопываются |
+| `defineUpsertTable` | `key`, `version` | по key остаётся строка с max(`version`) |
+| `defineSummingTable` | `key`, `sum`, [`version`] | по key суммируются колонки из `sum` |
+| `defineCollapsingTable` | `key`, `sign`, [`version`] | по key гаснут пары +1/−1 в колонке `sign` |
 
 ```ts
-const store = new Store('./data');
-store.openJournal('events', { ts: 'delta', val: 'auto' });
-store.query('events', 1700000000, 1700000100);
-store.query('events', { from: 'now-1d', to: 'now' });   // границы — число или строка
+import { Store, defineUpsertTable } from 'vrack2-journal-db';
 
-const cpu = store.openTable('cpu', {
-  retention: '5s:1d,15s:1w,1m:1mon',  // 5с/1день, 15с/1неделя, 1м/1месяц
-  agg: { value: 'avg' },
-});
-cpu.append({ ts: Date.now(), value: 42.3 });
-cpu.query('now-30d', 'now');    // сам собирает ответ из нужных тиров по возрасту
+const store = new Store('./data');
+const state = store.create(defineUpsertTable({
+  name: 'state',
+  desc: 'Состояние: последняя версия по (host, metric)',
+  columns: { ts: 'delta', host: 'dictionary', metric: 'dictionary', value: 'auto' },
+  key: ['host', 'metric'],
+  version: 'ts',
+}));
+
+state.append({ ts: 1, host: 'web-1', metric: 'cpu', value: 42 });
+state.append({ ts: 2, host: 'web-1', metric: 'cpu', value: 43 });
+state.compact();   // одна строка: value=43 (максимальная версия)
+state.query('now-7d', 'now');
 ```
 
 ### Метрический движок
@@ -115,11 +140,11 @@ cpu.query('now-30d', 'now');    // сам собирает ответ из ну�
 | Метод | Назначение |
 |---|---|
 | `timeline(interval, period)` | бакеты по времени: сколько строк в каждом (`Querying.md`) |
-| `aggregate(start, end, aggs)` / `downsample(…)` | точные min/max/sum/avg/count, по саммари, без скана строк (`Querying.md`) |
+| `aggregate(start, end, aggs)` | точные min/max/sum/avg/count, по саммари, без скана строк (`Querying.md`) |
 | `scan({select, where, groupBy, agg, order, limit})` | «мини-ClickHouse»: только запрошенные колонки, плотные массивы (`Querying.md`) |
 | `sql('SELECT … WHERE … GROUP BY …')` | SQL-lite, компилируется в `scan()` (`Querying.md`) |
 | `percentile(start, end, field, [0.5, 0.95, 0.99])` | точные k-вантили (`Querying.md`) |
-| `store.openTable(…, { retention, agg })` | retention-тиры + rollup, предсказуемый размер (`Retention.md`) |
+| `store.create(defineLogTable({ retention, agg }))` | retention-тиры + rollup, предсказуемый размер (`Retention.md`) |
 
 ### Утилита
 
@@ -127,10 +152,19 @@ CLI `vrack2-journal` — записывать/смотреть метрики и
 
 ```bash
 npm i -g vrack2-journal-db
-vrack2-journal append --data ./data --name cpu --ts 1700000000 --field value=42
-vrack2-journal stats   --data ./data --name cpu
+
+vrack2-journal create  --data ./data --name cpu \
+                       --columns ts=delta,host=dictionary,value=auto
+vrack2-journal append  --data ./data --name cpu --ts 1700000000 --field host=web-1,value=42
+vrack2-journal query   --data ./data --name cpu --from now-1d --limit 50
+vrack2-journal stats   --data ./data [--name cpu]
 vrack2-journal compact --data ./data --name cpu
+vrack2-journal tables  --data ./data
 ```
+
+`--ts` — миллисекунды (значения < 1e12 трактуются как секунды);
+`--from/--to` — число или строка вида `'now-1d'`. Движки кроме log — через
+`create --engine upsert --key host --version ts` (аналогично summing/collapsing).
 
 ## Цифры (нагрузочный тест, 2M строк, `test-load.ts`)
 
@@ -168,7 +202,7 @@ vrack2-journal compact --data ./data --name cpu
 | `src/Segment.ts` | Сегмент: набор колонок + дедупликация строк (dedupMap) |
 | `src/Journal.ts` | Журнал: WAL, блокировки, flush, clear(), purge(), timeline(), page()/tail(), compact(), `aggregate`/`downsample`, `scan()`, `sql()`, `percentile()`, `migrateToV3()` |
 | `src/Interval.ts` | «Язык интервалов» (VRackDB-совместимо, в мс): parseInterval, partOfPeriod, period, roundTime, getIntervals |
-| `src/Store.ts` | Хранилище нескольких журналов с общим кэшем сегментов; `openTable()` |
+| `src/Store.ts` | Каталог таблиц: `create(def)`, `open(name)`, `describe()`, `tables()`, `engineOf(name)`; общий кэш сегментов; манифест `_store.json` |
 | `src/LRUCache.ts` | LRU-кэш (используется Journal и Store) |
 | `src/SegmentFile.ts` | Мульти-версионный фасад: `read(buf)` (v1/v2/v3 → сегмент), `isWrapped(buf)` |
 | `src/SegmentFileV2.ts` | Формат файла v2: gzip + CRC32; чтение старых v1-файлов |
@@ -186,31 +220,18 @@ vrack2-journal compact --data ./data --name cpu
 ## Тесты
 
 ```bash
-npm test          # 18 сценариев, 980 проверок (test-load.ts — отдельный, долгий)
+npm test          # 19 сценариев, 1094 проверки (test-load.ts — отдельный, долгий)
 npm run typecheck # tsc --noEmit в strict-режиме
 ```
 
 Сценарии: базовый цикл записи/чтения; оптимизации хранения; запросы по времени и
 меткам; сжатие v2 + целостность + совместимость с v1; гибкая схема; компактизация;
-purge; timeline; aggregate; interval; надёжность (WAL, блокировки); **v3-формат**;
-**scan**; **retention**; **table**; **migration** (v2 → v3); **sql**.
+**движки** (log/upsert/summing/collapsing); purge; timeline; aggregate; interval;
+надёжность (WAL, блокировки); **v3-формат**; **scan**; **retention**; **table**;
+**migration** (v2 → v3); **sql**.
 
 Долгий нагрузочный тест (2M строк) не в `npm test`:
 
 ```sh
 node --max-old-space-size=8192 test/test-load.ts   # LOAD_ROWS=500000 — быстрее
 ```
-
-## Отличия от JS-версии (`../new`)
-
-JS-версия — базовый функционал: журналы, колонки, дедупликация, запросы по времени,
-файлы v1. TypeScript-версия содержит всё то же плюс: строгую типизацию (strict
-mode), сжатие файлов с контрольной суммой (v2, старые файлы читает), гибкую схему
-(null-падинг, catchall, эволюция схемы), компактизацию и надёжность (WAL,
-блокировки).
-
-Плюс весь метрический движок, которого в JS-версии нет: формат **v3** с
-числовыми кодеками (doubleDelta, Gorilla, RLE) и мульти-версионный ридер;
-векторный `scan()` (select/where/groupBy/agg/order/limit); **Table** с
-retention-тирами и rollup'ом (стиль GraphiteMergeTree); SQL-lite (`sql()`);
-точные квантили (`percentile()`).
