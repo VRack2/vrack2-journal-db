@@ -318,43 +318,6 @@ export interface ResolutionTier {
   ttlMs: number;
 }
 
-/** Конфигурация таблицы. */
-export interface TableConfig {
-  /** Retention-политика строкой: '5s:1d,15s:1w,1m:1mon' (res:ttl,…).
-   *  Если задан `tiers`, `retention` игнорируется. */
-  retention?: string;
-  /** Явный массив тиров (от тонких к грубым). Приоритет над `retention`. */
-  tiers?: ResolutionTier[];
-  /** Агрегация при rollup: поле → функция (что держать в бакете),
-   *  например { value: 'avg' }. Пропущенное поле считается размером (dimension),
-   *  и rollup группирует по нему (per-host и т.п.). По умолчанию — первая
-   *  не-ts колонка схемы с fn 'avg'. */
-  agg?: Record<string, AggFn>;
-  /** Схема колонок (одна на все тиры). По умолчанию { ts: 'delta', value: 'auto' }. */
-  schema?: Schema;
-  /** Строк в сегменте на тир (по умолчанию из Store). */
-  rowsPerSegment?: number;
-  /** Провайдер «текущего времени» (для тестов и детерминированного rollup).
-   *  По умолчанию Date.now. */
-  nowProvider?: () => number;
-
-  // --- авто-обслуживание (включено по умолчанию; см. JournalOptions.autoCompact) ---
-  /** Авто-ролап: при append() переносить состарившиеся строки на грубее и чистить
-   *  мелкие тиры (по умолчанию true). Ручной эквивалент — t.rollup(). */
-  autoRollup?: boolean;
-  /** Авто-purge: при append() удалять из грубейшего тира строки старше его TTL
-   *  (по умолчанию true). Ручной эквивалент — t.tierJournals[i].purge(...). */
-  autoPurge?: boolean;
-  /** Авто-компакт тиров (по умолчанию true): сливать закрытые сегменты тира,
-   *  когда их накопилось >= compactMinSegments. Срабатывает после flush(). */
-  autoCompact?: boolean;
-  /** Порог закрытых сегментов тира перед авто-компактом (по умолчанию 4). */
-  compactMinSegments?: number;
-  /** Троттлинг авто-ролапа/авто-purge: не чаще, чем раз в N мс (по умолчанию 30 000).
-   *  0 — без троттлинга (проверка на каждый append). */
-  maintenanceMinIntervalMs?: number;
-}
-
 /** Статус одного тира таблицы. */
 export interface TableTierStat {
   /** Индекс тира (0 — самый тонкий). */

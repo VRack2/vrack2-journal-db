@@ -151,16 +151,16 @@ const lockPathOf = (name: string): string => path.join(baseDir, 'journals', name
   // Store прокидывает режим в создаваемые журналы
   const store = new Store(baseDir, { lock: 'off' });
   store.init();
-  const j = store.openJournal('via-store', schema);
+  const j = store._openJournal('via-store', schema);
   assert(!fs.existsSync(lockPathOf('via-store')), "Store({lock:'off'}) → журнал без .lock");
   store.closeAll();
 
-  // Переопределение на уровне openJournal работает в обе стороны
+  // Переопределение на уровне _openJournal работает в обе стороны
   const store2 = new Store(baseDir, { lock: 'off' });
   store2.init();
-  const j2 = store2.openJournal('via-store-override', schema, {}, { lock: 'pid' });
-  assert(j2.lockMode === 'pid', "openJournal(..., {lock:'pid'}) переопределяет Store");
-  assert(fs.existsSync(lockPathOf('via-store-override')), '.lock создан при pid-режиме из openJournal');
+  const j2 = store2._openJournal('via-store-override', schema, {}, { lock: 'pid' });
+  assert(j2.lockMode === 'pid', "_openJournal(..., {lock:'pid'}) переопределяет Store");
+  assert(fs.existsSync(lockPathOf('via-store-override')), '.lock создан при pid-режиме из _openJournal');
   store2.closeAll();
 }
 

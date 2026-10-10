@@ -117,8 +117,8 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   assert(w2?.value === 30, `upsert: web-2 — 30 (факт ${JSON.stringify(w2)})`);
 
   // Переживает reopen: результат «запечён» в слитом сегменте
-  store.closeJournal(def.name);
-  const j2 = store.openJournal(def.name, def.columns); // настоящий reopen
+  store._closeJournal(def.name);
+  const j2 = store._openJournal(def.name, def.columns); // настоящий reopen
   const again = j2.allRows();
   assert(
     again.length === 2 && again.some(x => x.host === 'web-1' && x.value === 55),

@@ -1,5 +1,15 @@
 // ============================================================
-// Store.ts — Хранилище журналов с кэшем и ленивой загрузкой
+// Store.ts — Хранилище таблиц: каталог, кэш журналов, ленивая загрузка
+//
+// Единственные публичные входы в таблицы:
+//   store.create(def) → Table   // создать (или вернуть открытую) таблицу
+//   store.open(name)  → Table   // переоткрыть по манифесту _store.json
+//
+// Журналы — внутренняя механика: Table открывает N журналов
+// (по одному на тир) через store._openJournal(). Манифест
+// `_store.json` — самодостаточный артефакт хранилища: его можно
+// отдать коллеге/AI-агенту. Старые журналы (без записи в манифесте)
+// переоткрываются с fallback-схемой из сегмента (log-таблица).
 // ============================================================
 
 import fs from 'node:fs';
@@ -9,8 +19,10 @@ import type { Segment } from './Segment.ts';
 import { LRUCache } from './LRUCache.ts';
 import { SegmentFile } from './SegmentFile.ts';
 import { Compression } from './Compression.ts';
-import { Table, openTable as createTable } from './Table.ts';
+import { ColumnFactory } from './columns/ColumnFactory.ts';
+import { Table } from './Table.ts';
 import type {
+  ColumnType,
   CompressionMode,
   LockMode,
   Metadata,
@@ -19,11 +31,10 @@ import type {
   SegmentFormat,
   StoreOptions,
   StoreStats,
-  TableConfig,
 } from './types.ts';
 import { ENGINE_META_KEY } from './compaction/Descriptor.ts';
 import { engineDescriptorOf } from './compaction/define.ts';
-import type { AnyTableDef, TableDescription, TableRuntime } from './compaction/define.ts';
+import type { AnyTableDef, LogTableDef, TableDescription, TableRuntime } from './compaction/define.ts';
 import type { EngineKind } from './compaction/types.ts';
 
 const MANIFEST_FILE = '_store.json';
@@ -43,13 +54,13 @@ export class Store {
   readonly autoCompact: boolean;
   readonly compactMinSegments: number;
 
-  /** открытые журналы по имени */
+  /** Открытые журналы по имени (внутреннее; используется Table и тестами). */
   openJournals = new Map<string, Journal>();
 
-  /** открытые таблицы (мультитирные, Фаза 4) по имени */
+  /** Открытые таблицы по имени (внутренний реестр; closeAll() закрывает их). */
   openTables = new Map<string, Table>();
 
-  /** ключ «journal:segmentId» → Segment (LRU) */
+  /** Ключ «journal:segmentId» → Segment (LRU). */
   segmentCache: LRUCache<string, Segment>;
 
   constructor(baseDir: string, opts: StoreOptions = {}) {
@@ -63,7 +74,7 @@ export class Store {
     }
     this.lockMode = lock;
     this.format = opts.format ?? 'v2';
-    // zstd по умолчанию при Node >= 23.8 (Фаза 5); явный opts.compression — выше.
+    // zstd по умолчанию при Node >= 23.8; явный opts.compression — выше.
     this.compression = opts.compression ?? Compression.default();
     this.codecs = opts.codecs && typeof opts.codecs === 'object' ? { ...opts.codecs } : {};
     this.autoCompact = opts.autoCompact ?? true;
@@ -71,15 +82,27 @@ export class Store {
     this.segmentCache = new LRUCache<string, Segment>(this.maxCacheSize);
   }
 
+  /** Каталог хранилища (абсолютный). */
+  path(): string {
+    return this.baseDir;
+  }
+
+  /** Создать каталог журнала (no-op при повторном вызове). */
   init(): void {
     fs.mkdirSync(this.journalsDir, { recursive: true });
   }
 
   // --------------------------------------------------
-  // Управление журналами
+  // Журналы — внутренняя механика (Table, тесты)
   // --------------------------------------------------
 
-  openJournal(name: string, schema: Schema, metadata: Metadata = {}, opts: OpenJournalOptions = {}): Journal {
+  /** Открыть журнал (кэшировать по имени). Внутреннее — используйте create/open. */
+  _openJournal(
+    name: string,
+    schema: Schema,
+    metadata: Metadata = {},
+    opts: OpenJournalOptions = {},
+  ): Journal {
     const existing = this.openJournals.get(name);
     if (existing) {
       return existing;
@@ -102,89 +125,65 @@ export class Store {
     return journal;
   }
 
-  closeJournal(name: string): void {
+  /** Закрыть журнал. Внутреннее. */
+  _closeJournal(name: string): void {
     const journal = this.openJournals.get(name);
     if (!journal) {
       throw new Error(`Journal not found: ${name}`);
     }
-
     journal.close();
     this.openJournals.delete(name);
   }
 
+  /** Закрыть все таблицы (и их тиры-журналы), затем прочие журналы. */
   closeAll(): void {
-    // Сначала таблицы (закрывают свои тиры-журналы), потом прочие журналы.
-    for (const name of [...this.openTables.keys()]) {
-      this.closeTable(name);
+    for (const [name, t] of [...this.openTables]) {
+      t.close();
+      this.openTables.delete(name);
     }
     for (const name of [...this.openJournals.keys()]) {
-      this.closeJournal(name);
+      this._closeJournal(name);
     }
   }
 
   // --------------------------------------------------
-  // Таблицы (мультитирные, Фаза 4) — GraphiteMergeTree
+  // Таблицы — единственные публичные входы
   // --------------------------------------------------
 
   /**
-   * Открыть таблицу-метрик (несколько тиров разрешения, каждый — журнал
-   * `<name>/r<res>`). Повторный вызов с тем же именем вернёт открытую таблицу.
-   *
-   * @example
-   * const t = store.openTable('cpu', {
-   *   retention: '5s:1d,15s:1w,1m:1mon',
-   *   agg: { value: 'avg' },
-   *   schema: { ts: 'delta', value: 'auto', host: 'dictionary' },
-   * });
-   * t.append({ ts: Date.now(), value: 42.3, host: 'web-1' });
-   * t.query('now-30d', 'now');
+   * Создать таблицу по описанию (define*Table): движок (def.kind) +
+   * опциональные retention-тиры. Идемпотентно: открытая таблица с тем же
+   * именем возвращается. Описывается в манифест `_store.json`.
    */
-  openTable(name: string, config: TableConfig = {}): Table {
+  create(def: AnyTableDef): Table {
+    const existing = this.openTables.get(def.name);
+    if (existing) {
+      return existing;
+    }
+    const t = new Table(this, def.name, def);
+    this.openTables.set(def.name, t);
+    this._upsertManifest(def);
+    return t;
+  }
+
+  /**
+   * Переоткрыть таблицу по имени (из манифеста `_store.json`).
+   * Без записи в манифесте — fallback: log-таблица со схемой из сегмента.
+   */
+  open(name: string): Table {
     const existing = this.openTables.get(name);
-    if (existing) return existing;
-    const t = createTable(this, name, config);
+    if (existing) {
+      return existing;
+    }
+    const def = this._readManifest().tables[name] ?? this._defFromDisk(name);
+    const t = new Table(this, name, def);
     this.openTables.set(name, t);
     return t;
   }
 
-  /** Закрыть таблицу (и все её тиры-журналы). */
-  closeTable(name: string): void {
-    const t = this.openTables.get(name);
-    if (!t) {
-      throw new Error(`Table not found: ${name}`);
-    }
-    t.close();
-    this.openTables.delete(name);
-  }
-
-  // --------------------------------------------------
-  // Таблицы с движком (Phase 1): create/describe/tables/engineOf
-  // --------------------------------------------------
-
   /**
-   * Создать таблицу по описанию (define*Table) с нужным движком:
-   * открывает журнал, записывает движок в его metadata и добавляет таблицу в
-   * манифест `_store.json` (единственный самодостаточный артефакт — его можно
-   * отдать коллеге/AI-агенту). Идемпотентно: повторный вызов для открытого
-   * журнала возвращает его.
-   */
-  create(def: AnyTableDef): Journal {
-    const desc = engineDescriptorOf(def);
-    const metadata: Metadata = { [ENGINE_META_KEY]: desc.toMeta() };
-    if (def.desc) {
-      (metadata as Record<string, unknown>).desc = def.desc;
-    }
-    const journal = this.openJournal(def.name, def.columns, metadata, {
-      rowsPerSegment: def.rowsPerSegment,
-    });
-    this._upsertManifest(def);
-    return journal;
-  }
-
-  /**
-   * Читаемое описание всех таблиц-движков: определение (из манифеста) +
-   * рантайм-статистика (строки/сегменты/размер с диска). Для AI-агентов и
-   * людей — «кто что делает» одним вызовом.
+   * Читаемое описание всех таблиц: определение (из манифеста) +
+   * рантайм-статистика (строки/сегменты/размер с диска).
    */
   describe(): TableDescription[] {
     const manifest = this._readManifest();
@@ -195,7 +194,7 @@ export class Store {
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  /** Имена таблиц-движков (из манифеста `_store.json`). */
+  /** Имена таблиц (из манифеста `_store.json`). */
   tables(): string[] {
     return Object.keys(this._readManifest().tables).sort();
   }
@@ -237,36 +236,81 @@ export class Store {
     fs.renameSync(tmp, p);
   }
 
-  /** Рантайм-статистика каталога журнала: строки, сегменты, размер (байт). */
-  private _tableRuntimeStats(name: string): TableRuntime {
+  /**
+   * Fallback-описание для журнала без записи в манифесте (старые данные):
+   * log-таблица со схемой, восстановленной из первого сегмента.
+   */
+  private _defFromDisk(name: string): LogTableDef {
     const dir = path.join(this.journalsDir, name);
+    let files: string[];
+    try {
+      files = fs.readdirSync(dir).filter(isSegmentFile).sort();
+    } catch {
+      files = [];
+    }
+    if (files.length === 0) {
+      throw new RangeError(`Store: таблица "${name}" не найдена (нет манифеста и сегментов)`);
+    }
+    const seg = SegmentFile.read(fs.readFileSync(path.join(dir, files[0])));
+    const columns: Schema = {};
+    for (const [f, col] of Object.entries(seg.columns)) {
+      columns[f] = this._typeOfColumn(col);
+    }
+    return { kind: 'log', name, columns };
+  }
+
+  private _typeOfColumn(col: unknown): ColumnType {
+    for (const [t, C] of Object.entries(ColumnFactory.types)) {
+      if (col instanceof C) return t as ColumnType;
+    }
+    return 'auto';
+  }
+
+  /** Рантайм-статистика каталогов журнала (включая тиры `<name>/r*`). */
+  private _tableRuntimeStats(name: string): TableRuntime {
     let rows = 0;
     let bytes = 0;
     let segments = 0;
+    const dirs = new Set<string>([path.join(this.journalsDir, name)]);
+    // тиры таблицы: <name>/r* (каталог верхнего уровня с подкаталогами)
     try {
-      for (const f of fs.readdirSync(dir)) {
-        if (!isSegmentFile(f)) continue;
-        const full = path.join(dir, f);
-        bytes += fs.statSync(full).size;
-        segments++;
-        try {
-          rows += SegmentFile.read(fs.readFileSync(full)).rowCount; // v1/v2/v3
-        } catch {
-          // повреждённый/нечитаемый сегмент — не ломаем статистику
+      const tableDir = path.join(this.journalsDir, name);
+      for (const d of fs.readdirSync(tableDir, { withFileTypes: true })) {
+        if (d.isDirectory() && d.name.startsWith('r')) {
+          dirs.add(path.join(tableDir, d.name));
         }
       }
     } catch {
-      // каталог отсутствует — статистика нулевая
+      // верхнего каталога нет — смотрим только <name>
+    }
+    for (const dir of dirs) {
+      try {
+        for (const f of fs.readdirSync(dir)) {
+          if (!isSegmentFile(f)) continue;
+          const full = path.join(dir, f);
+          bytes += fs.statSync(full).size;
+          segments++;
+          try {
+            rows += SegmentFile.read(fs.readFileSync(full)).rowCount;
+          } catch {
+            // повреждённый/нечитаемый сегмент — не ломаем статистику
+          }
+        }
+      } catch {
+        // каталог отсутствует — статистика нулевая
+      }
     }
     return { rows, segments, sizeBytes: bytes };
   }
 
+  // --------------------------------------------------
+  // Интроспекция журналов
+  // --------------------------------------------------
+
   listJournals(): string[] {
     try {
       const items = fs.readdirSync(this.journalsDir, { withFileTypes: true });
-      return items
-        .filter(d => d.isDirectory())
-        .map(d => d.name);
+      return items.filter(d => d.isDirectory()).map(d => d.name);
     } catch {
       return [];
     }
@@ -275,20 +319,10 @@ export class Store {
   getJournalMetadata(name: string): (Metadata & { name: string; segmentCount: number }) | null {
     const journalPath = path.join(this.journalsDir, name);
     try {
-      const files = fs.readdirSync(journalPath)
-        .filter(isSegmentFile)
-        .sort();
-
+      const files = fs.readdirSync(journalPath).filter(isSegmentFile).sort();
       if (files.length === 0) return null;
-
-      const firstFile = path.join(journalPath, files[0]);
-      const seg = SegmentFile.read(fs.readFileSync(firstFile)); // v1/v2/v3
-
-      return {
-        name,
-        segmentCount: files.length,
-        ...seg.metadata
-      };
+      const seg = SegmentFile.read(fs.readFileSync(path.join(journalPath, files[0])));
+      return { name, segmentCount: files.length, ...seg.metadata };
     } catch {
       return null;
     }
@@ -300,18 +334,16 @@ export class Store {
 
   loadSegment(journalName: string, segmentId: string): Segment | null {
     const cacheKey = `${journalName}:${segmentId}`;
-
     if (this.segmentCache.has(cacheKey)) {
       return this.segmentCache.get(cacheKey)!;
     }
-
     // Файл может быть .seg (v3) или .json (v1/v2) — пробуем оба
     const dir = path.join(this.journalsDir, journalName);
     for (const ext of ['.seg', '.json']) {
       const segPath = path.join(dir, `${segmentId}${ext}`);
       if (!fs.existsSync(segPath)) continue;
       try {
-        const seg = SegmentFile.read(fs.readFileSync(segPath)); // v1/v2/v3
+        const seg = SegmentFile.read(fs.readFileSync(segPath));
         this.segmentCache.set(cacheKey, seg);
         return seg;
       } catch {
@@ -324,19 +356,11 @@ export class Store {
   listSegments(journalName: string): string[] {
     const journalPath = path.join(this.journalsDir, journalName);
     try {
-      const files = fs.readdirSync(journalPath)
-        .filter(isSegmentFile)
-        .sort()
-        .map(idFromFile);
-      return files;
+      return fs.readdirSync(journalPath).filter(isSegmentFile).sort().map(idFromFile);
     } catch {
       return [];
     }
   }
-
-  // --------------------------------------------------
-  // Кэш сегментов (LRUCache)
-  // --------------------------------------------------
 
   clearCache(): void {
     this.segmentCache.clear();
@@ -345,11 +369,9 @@ export class Store {
   stats(): StoreStats {
     const journalNames = this.listJournals();
     let totalSegments = 0;
-
     for (const name of journalNames) {
       totalSegments += this.listSegments(name).length;
     }
-
     return {
       baseDir: this.baseDir,
       journalCount: journalNames.length,
@@ -361,3 +383,6 @@ export class Store {
     };
   }
 }
+
+// Реэкспорт — чтобы Store мог быть использован в типах Table без циклического импорта.
+export { ENGINE_META_KEY };
