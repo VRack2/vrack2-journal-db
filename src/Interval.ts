@@ -88,16 +88,54 @@ export class Interval {
   }
 
   /**
+   * Одна граница: число (мс) или строка «языка интервалов»
+   * ('now-1d'/'now'/'1700000000000') → миллисекунды. Числа проходят как есть.
+   */
+  static resolve(value: number | string, now: number = Date.now()): number {
+    const v = typeof value === 'string' ? Interval.partOfPeriod(value, now) : value;
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      throw new RangeError('Interval: resolve — число (мс) или строка вида now-1d/1700000000000');
+    }
+    return v;
+  }
+
+  /**
    * Период вида 'start:end' → [start, end] в мс.
    *   'now-7d:now' → [now − 7д, now]
    */
-  static period(period: string, now: number = Date.now()): [number, number] {
-    const s = String(period).replace(/\s/g, '');
-    const parts = s.split(':');
-    if (parts.length !== 2 || parts[0] === '' || parts[1] === '') {
-      throw new RangeError('Interval: период в формате «start:end», например now-7d:now');
+  static period(period: string, now?: number): [number, number];
+  /**
+   * Период по двум границам — число (мс) или строка вида 'now-1d' на каждом
+   * конце → [start, end] в мс. Проверяет start <= end.
+   *   ('now-7d', 'now') → [now − 7д, now]
+   */
+  static period(start: number | string, end: number | string, now?: number): [number, number];
+  static period(a: string | number, b?: number | string, now?: number): [number, number] {
+    // Старая форма: (строка 'start:end', now?) — без явного третьего аргумента.
+    if (
+      typeof a === 'string' && now === undefined &&
+      (b === undefined || typeof b === 'number')
+    ) {
+      const parts = String(a).replace(/\s/g, '').split(':');
+      if (parts.length !== 2 || parts[0] === '' || parts[1] === '') {
+        throw new RangeError('Interval: период в формате «start:end», например now-7d:now');
+      }
+      return Interval._pair(parts[0], parts[1], typeof b === 'number' ? b : Date.now());
     }
-    return [Interval.partOfPeriod(parts[0], now), Interval.partOfPeriod(parts[1], now)];
+    if (b === undefined) {
+      throw new RangeError('Interval: period — две границы (start, end) или строка "start:end"');
+    }
+    return Interval._pair(a, b, now !== undefined ? now : Date.now());
+  }
+
+  /** Общая часть period(): резолвит границы и проверяет start <= end. */
+  private static _pair(start: number | string, end: number | string, now: number): [number, number] {
+    const s = Interval.resolve(start, now);
+    const e = Interval.resolve(end, now);
+    if (e < s) {
+      throw new RangeError('Interval: start должен быть <= end');
+    }
+    return [s, e];
   }
 
   /** Округляет время вниз до кратности `precision`. */

@@ -108,20 +108,6 @@ const WAL_FLUSH_BYTES = 1_000_000;
  */
 export const DEFAULT_COMPACT_MIN_SEGMENTS = 4;
 
-/**
- * Число (мс) или строка «языка интервалов» (VRackDB-совместимо, см. Interval)
- * вида 'now-1d'/'now'/'1700000000000' → миллисекунды. Числа проходят как есть.
- */
-function resolveTs(value: number | string, label: string): number {
-  if (typeof value === 'string') {
-    return Interval.partOfPeriod(value);
-  }
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    throw new RangeError(`Journal: ${label} — число (мс) или строка вида now-1d/now`);
-  }
-  return value;
-}
-
 // --------------------------------------------------
 // Сброс WAL-буферов всех открытых журналов при выходе процесса:
 // «крах» через process.exit(), uncaught exception, SIGINT/SIGTERM —
@@ -733,7 +719,7 @@ export class Journal {
       throw new Error('Journal not open. Call open() first.');
     }
     // Граница: число (мс) или строка вида 'now-1d' (удалить всё старше N дней назад)
-    const before = resolveTs(beforeTs, 'purge(beforeTs)');
+    const before = Interval.resolve(beforeTs);
 
     // Активный сегмент — на диск, WAL — срезан: дальше всё единообразно
     if (this.activeSegment) {
@@ -965,13 +951,7 @@ export class Journal {
     } else if (!Array.isArray(period) || period.length < 2) {
       throw new RangeError('Journal: timeline() — период: [start, end] (мс) или строка вида now-7d:now');
     } else {
-      [start, end] = period;
-    }
-    if (typeof start !== 'number' || !Number.isFinite(start) || typeof end !== 'number' || !Number.isFinite(end)) {
-      throw new RangeError('Journal: timeline() — период: [число, число] (мс)');
-    }
-    if (end < start) {
-      throw new RangeError('Journal: timeline() — период: start должен быть <= end');
+      [start, end] = Interval.period(period[0], period[1]);
     }
     if (end === start) return [];
 
@@ -1066,11 +1046,7 @@ export class Journal {
       }
     }
 
-    const start = resolveTs(startTs, 'aggregate(startTs)');
-    const end = resolveTs(endTs, 'aggregate(endTs)');
-    if (end < start) {
-      throw new RangeError('Journal: aggregate() — startTs должен быть <= endTs');
-    }
+    const [start, end] = Interval.period(startTs, endTs);
 
     const fields: string[] = [...new Set(exprs.map(e => e.field))];
     const accs: Record<string, AggAcc> = {};
@@ -1148,13 +1124,9 @@ export class Journal {
         throw new RangeError(`Journal: percentile() — level: число в (0, 1) (получено ${String(q)})`);
       }
     }
-    const start = resolveTs(startTs, 'percentile(startTs)');
-    const end = resolveTs(endTs, 'percentile(endTs)');
-    if (end < start) {
-      throw new RangeError('Journal: percentile() — startTs должен быть <= endTs');
-    }
+    const [start, end] = Interval.period(startTs, endTs);
 
-    const rows = this.scan({ start: startTs, end: endTs, select: [field] });
+    const rows = this.scan({ start, end, select: [field] });
     const vals: number[] = [];
     for (const r of rows) {
       const v = r[field];
@@ -1216,11 +1188,7 @@ export class Journal {
       throw new RangeError('Journal: downsample() — bucketMs должно быть > 0 (мс)');
     }
 
-    const start = resolveTs(startTs, 'downsample(startTs)');
-    const end = resolveTs(endTs, 'downsample(endTs)');
-    if (end < start) {
-      throw new RangeError('Journal: downsample() — startTs должен быть <= endTs');
-    }
+    const [start, end] = Interval.period(startTs, endTs);
     if (end === start) return [];
 
     // Бакеты выровнены по эпохе (roundTime) — границы детерминированы,
@@ -1591,8 +1559,8 @@ export class Journal {
 
   /** Компиляция опций скана в план (валидация + предвычисление). */
   private _compileScan(opts: ScanOptions): ScanPlan {
-    const start = opts.start !== undefined ? resolveTs(opts.start, 'scan(start)') : null;
-    const end = opts.end !== undefined ? resolveTs(opts.end, 'scan(end)') : null;
+    const start = opts.start !== undefined ? Interval.resolve(opts.start) : null;
+    const end = opts.end !== undefined ? Interval.resolve(opts.end) : null;
     if (start !== null && end !== null && end < start) {
       throw new RangeError('Journal: scan() — start должен быть <= end');
     }
@@ -1750,8 +1718,7 @@ export class Journal {
 
   query(startTime: number | string, endTime: number | string): Row[] {
     // Границы: число (мс) или строка «языка интервалов» (VRackDB): 'now-7d', 'now'
-    const start = resolveTs(startTime, 'query(startTime)');
-    const end = resolveTs(endTime, 'query(endTime)');
+    const [start, end] = Interval.period(startTime, endTime);
     const results: Row[] = [];
 
     for (const id of this._sortedClosedIds()) {

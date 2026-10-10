@@ -71,6 +71,40 @@ try { Interval.period('a:b:c', now); } catch { threw = true; }
 assert(threw, 'период с двумя «:» → RangeError');
 
 // --------------------------------------------------
+// period: (start, end) — две границы (число мс или строка)
+// --------------------------------------------------
+{
+  const [s1, e1] = Interval.period('now-7d', 'now', now);
+  assert(s1 === now - 7 * D && e1 === now, `period("now-7d","now") (факт ${s1}..${e1})`);
+  const [s2, e2] = Interval.period(now - D, now, now);
+  assert(s2 === now - D && e2 === now, 'period(число, число)');
+  const [s3, e3] = Interval.period('now-2h-15m', 1_700_000_000_000, now);
+  assert(s3 === now - 2 * H - 900_000 && e3 === now, 'period(строка, число)');
+  const [s4, e4] = Interval.period(0, now, now);
+  assert(s4 === 0 && e4 === now, 'period(0, "now"→число)');
+}
+threw = false;
+try { Interval.period('now', 'now-1d', now); } catch { threw = true; }
+assert(threw, 'перевёрнутый период (end < start) → RangeError');
+threw = false;
+try { Interval.period('now-7d'); } catch { threw = true; }
+assert(threw, 'одна граница без формы "start:end" → RangeError');
+
+// --------------------------------------------------
+// resolve: одна граница — число (мс) или строка → мс
+// --------------------------------------------------
+assert(Interval.resolve('now', now) === now, 'resolve "now"');
+assert(Interval.resolve('now-1d', now) === now - D, 'resolve "now-1d"');
+assert(Interval.resolve('1700000000000') === 1_700_000_000_000, 'resolve абсолютное время (строка)');
+assert(Interval.resolve(123456789) === 123456789, 'resolve число проходит как есть');
+threw = false;
+try { Interval.resolve(Infinity); } catch { threw = true; }
+assert(threw, 'resolve Infinity → RangeError');
+threw = false;
+try { Interval.resolve('abc'); } catch { threw = true; }
+assert(threw, 'resolve мусор → RangeError');
+
+// --------------------------------------------------
 // roundTime / getIntervals / getIntervalOfFixedCount / getFactor
 // --------------------------------------------------
 assert(Interval.roundTime(105, 10) === 100, 'roundTime 105→100');

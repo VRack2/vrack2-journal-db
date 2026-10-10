@@ -479,20 +479,6 @@ export class Table {
   // Чтение
   // --------------------------------------------------
 
-  private _resolveTs(v: number | string, argName: string): number {
-    if (typeof v === 'number') {
-      if (!Number.isFinite(v)) throw new RangeError(`Table: ${argName} — конечное число (мс)`);
-      return v;
-    }
-    const s = String(v).trim();
-    if (/^\d+$/.test(s)) return parseInt(s, 10);
-    try {
-      return Interval.partOfPeriod(s, this.now());
-    } catch (e) {
-      throw new RangeError(`Table: ${argName} — время (число мс или 'now-1d'): ${(e as Error).message}`);
-    }
-  }
-
   /**
    * Чтение [start, end] (обе границы включительно).
    *
@@ -504,9 +490,7 @@ export class Table {
    */
    query(start: number | string, end: number | string): Row[] {
     this._assertOpen();
-    const startTs = this._resolveTs(start, 'query(start)');
-    const endTs = this._resolveTs(end, 'query(end)');
-    if (endTs < startTs) throw new RangeError('Table: query — start должен быть <= end');
+    const [startTs, endTs] = Interval.period(start, end, this.now());
 
     if (!this.tiers) {
       return this.journals[0].scan({ start: startTs, end: endTs });
@@ -559,8 +543,8 @@ export class Table {
     this._assertOpen();
     if (!this.tiers) return this.journals[0].scan(opts);
 
-    const start = opts.start !== undefined ? this._resolveTs(opts.start, 'scan(start)') : 0;
-    const end = opts.end !== undefined ? this._resolveTs(opts.end, 'scan(end)') : this.now();
+    const now = this.now();
+    const [start, end] = Interval.period(opts.start ?? 0, opts.end ?? now, now);
     if (opts.agg || opts.groupBy) {
       throw new SqlError('Table: scan — agg/groupBy в тир-режиме: используйте aggregate()/sql()');
     }
@@ -596,8 +580,8 @@ export class Table {
     }
     if (!this.tiers) return this.journals[0].scan(opts);
 
-    const start = opts.start !== undefined ? this._resolveTs(opts.start, 'start') : 0;
-    const end = opts.end !== undefined ? this._resolveTs(opts.end, 'end') : this.now();
+    const now = this.now();
+    const [start, end] = Interval.period(opts.start ?? 0, opts.end ?? now, now);
 
     // Агрегации (без GROUP BY) — через aggregate().
     if (opts.agg) {
@@ -673,9 +657,7 @@ export class Table {
     if (!Number.isFinite(int) || int <= 0) {
       throw new RangeError('Table: timeline — интервал: число мс > 0 или строка вида "15m"');
     }
-    const startTs = this._resolveTs(start, 'timeline(start)');
-    const endTs = this._resolveTs(end, 'timeline(end)');
-    if (endTs < startTs) throw new RangeError('Table: timeline — start должен быть <= end');
+    const [startTs, endTs] = Interval.period(start, end, this.now());
 
     if (!this.tiers) {
       return this.journals[0].timeline(int, [startTs, endTs]);
