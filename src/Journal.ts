@@ -481,12 +481,27 @@ export class Journal {
     const line = JSON.stringify(row) + '\n';
     this._walBuf.push(line);
     this._walBufBytes += line.length;
+    let drained = false;
     if (this._walBuf.length >= this.walBatchSize || this._walBufBytes >= WAL_FLUSH_BYTES) {
       this._walDrain();
+      drained = true;
     }
 
     const seg = this.activeSegment;
-    seg.append(row);
+    try {
+      seg.append(row);
+    } catch (e) {
+      // Строка отклонена схемой — откатываем WAL-запись: иначе она переживёт
+      // отказ append (буфер уходит на диск при flush/close/выходе процесса) и
+      // следующая open() упадёт на реплее.
+      if (drained) {
+        this._walRollbackLine(line);
+      } else {
+        this._walBuf.pop();
+        this._walBufBytes -= line.length;
+      }
+      throw e;
+    }
 
     if (seg.rowCount >= this.rowsPerSegment) {
       this.flush();
@@ -2163,6 +2178,20 @@ export class Journal {
 
   private _truncateWAL(): void {
     fs.rmSync(this._walPath(), { force: true });
+  }
+
+  /** Убирает последнюю строку из WAL-файла (откат отклонённой записи). */
+  private _walRollbackLine(line: string): void {
+    try {
+      const p = this._walPath();
+      const size = fs.statSync(p).size;
+      const bytes = Buffer.byteLength(line, 'utf-8');
+      if (size >= bytes) {
+        fs.truncateSync(p, size - bytes);
+      }
+    } catch {
+      // WAL мог быть уже усечён (flush) — откат не критичен
+    }
   }
 
   /** Проигрывает строки из WAL в активный сегмент. */

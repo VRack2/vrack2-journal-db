@@ -187,5 +187,51 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   j2.close();
 }
 
+// --------------------------------------------------
+// 6. Отклонённый append (нарушение схемы) не должен портить WAL:
+//    после reopen журнал жив, и отклонённой строки в нём нет
+// --------------------------------------------------
+{
+  // Путь 1: строка ещё в буфере (дефолтный walBatchSize)
+  const j = new Journal(baseDir);
+  j.open('wal-rollback', schema);
+  let rejected = false;
+  try {
+    j.append({ val: 'no-ts' }); // ts отсутствует — DeltaColumn отклонит
+  } catch {
+    rejected = true;
+  }
+  assert(rejected, 'append без ts отклоняется');
+  j.append({ ts: 1, val: 'ok' });
+  j.close();
+
+  const j2 = new Journal(baseDir);
+  j2.open('wal-rollback', schema);
+  const rows = j2.allRows();
+  assert(rows.length === 1 && rows[0].val === 'ok',
+    `после reopen: только валидная строка, отклонённой нет (факт ${rows.length})`);
+  j2.close();
+
+  // Путь 2: строка уже на диске (walBatchSize=1 — каждый append дренирует буфер)
+  const k = new Journal(baseDir, { walBatchSize: 1 });
+  k.open('wal-rollback-disk', schema);
+  let rejected2 = false;
+  try {
+    k.append({ val: 'no-ts' });
+  } catch {
+    rejected2 = true;
+  }
+  assert(rejected2, 'append без ts отклоняется (буфер сразу на диске)');
+  k.append({ ts: 7, val: 'ok' });
+  k.close();
+
+  const k2 = new Journal(baseDir, { walBatchSize: 1 });
+  k2.open('wal-rollback-disk', schema);
+  const rows2 = k2.allRows();
+  assert(rows2.length === 1 && rows2[0].val === 'ok',
+    `после reopen (запись на диске): только валидная строка (факт ${rows2.length})`);
+  k2.close();
+}
+
 console.log(`\nТесты надёжности: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
