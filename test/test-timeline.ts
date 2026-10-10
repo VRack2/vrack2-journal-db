@@ -9,7 +9,7 @@ import { Journal } from '../src/Journal.ts';
 import type { Schema, TimelineBucket } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-timeline');
+const baseDir = path.join(__dirname, '..', 'test-data', 'timeline');
 
 let passed = 0;
 let failed = 0;

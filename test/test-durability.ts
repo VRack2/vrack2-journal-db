@@ -10,7 +10,7 @@ import { Journal } from '../src/Journal.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-durability');
+const baseDir = path.join(__dirname, '..', 'test-data', 'durability');
 const helperPath = path.join(__dirname, 'helpers', 'crash-writer.ts');
 
 let passed = 0;

@@ -13,7 +13,7 @@ import { Journal } from '../src/Journal.ts';
 import type { AggFn, Row, Schema, ScanOp, ScanWhere } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-scan');
+const baseDir = path.join(__dirname, '..', 'test-data', 'scan');
 
 let passed = 0;
 let failed = 0;

@@ -10,7 +10,7 @@ import { Store } from '../src/Store.ts';
 import type { Schema, SerializedColumn } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-compaction');
+const baseDir = path.join(__dirname, '..', 'test-data', 'compaction');
 
 let passed = 0;
 let failed = 0;

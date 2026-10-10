@@ -13,7 +13,7 @@ import { RLEColumn } from '../src/columns/RLEColumn.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-opt');
+const baseDir = path.join(__dirname, '..', 'test-data', 'opt');
 
 let passed = 0;
 let failed = 0;

@@ -16,7 +16,7 @@ import { NumCodecs } from '../src/numcodecs/NumCodecs.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-v3');
+const baseDir = path.join(__dirname, '..', 'test-data', 'v3');
 
 let passed = 0;
 let failed = 0;

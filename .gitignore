@@ -1,5 +1,5 @@
 node_modules/
-.test-data*/
+test-data/
 lib/
 *.tgz
 .DS_Store

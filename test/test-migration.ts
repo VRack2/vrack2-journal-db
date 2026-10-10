@@ -14,7 +14,7 @@ import { SegmentFileV3 } from '../src/SegmentFileV3.ts';
 import type { Row, Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-migration');
+const baseDir = path.join(__dirname, '..', 'test-data', 'migration');
 
 let passed = 0;
 let failed = 0;

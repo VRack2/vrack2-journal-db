@@ -11,7 +11,7 @@ import { SegmentFileV2 } from '../src/SegmentFileV2.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-query');
+const baseDir = path.join(__dirname, '..', 'test-data', 'query');
 
 let passed = 0;
 let failed = 0;

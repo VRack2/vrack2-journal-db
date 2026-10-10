@@ -23,7 +23,7 @@ import {
 import type { Row } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-engines');
+const baseDir = path.join(__dirname, '..', 'test-data', 'engines');
 
 /** Свежий изолированный каталог под секцию теста (без перекрёстных данных). */
 function freshDir(name: string): string {

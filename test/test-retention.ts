@@ -13,7 +13,7 @@ import { RetentionEngine } from '../src/RetentionEngine.ts';
 import type { Schema, RetentionTier, Row } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-retention');
+const baseDir = path.join(__dirname, '..', 'test-data', 'retention');
 
 let passed = 0;
 let failed = 0;

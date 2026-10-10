@@ -38,7 +38,7 @@ function assertThrows(fn: () => void, msg: string): void {
 }
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data');
+const baseDir = path.join(__dirname, '..', 'test-data', 'table');
 fs.rmSync(baseDir, { recursive: true, force: true });
 let _tmpN = 0;
 const tmpDir = () => path.join(baseDir, `t${_tmpN++}`);

@@ -17,7 +17,7 @@ import { SqlError } from '../src/SqlError.ts';
 import type { Schema, Row } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-sql');
+const baseDir = path.join(__dirname, '..', 'test-data', 'sql');
 
 let passed = 0;
 let failed = 0;

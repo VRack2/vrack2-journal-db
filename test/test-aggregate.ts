@@ -12,7 +12,7 @@ import { Journal } from '../src/Journal.ts';
 import type { AggregateExpr, AggFn, Row, Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-aggregate');
+const baseDir = path.join(__dirname, '..', 'test-data', 'aggregate');
 
 let passed = 0;
 let failed = 0;

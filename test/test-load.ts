@@ -21,7 +21,7 @@ import { SegmentFileV2 } from '../src/SegmentFileV2.ts';
 import type { Row, Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const baseDir = path.join(__dirname, '..', '.test-data-load');
+const baseDir = path.join(__dirname, '..', 'test-data', 'load');
 const JNAME = 'load';
 
 const N = Number(process.env.LOAD_ROWS ?? '2000000');
