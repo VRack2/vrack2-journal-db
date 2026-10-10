@@ -259,9 +259,9 @@ console.log('\naggregate(): агрегация по бакетам в диапа
     { field: 'value', fn: 'sum' },
     { field: 'value', fn: 'count' },
   ]);
-  assert(aggr['value__avg'] === 29.5, `aggregate: value__avg = 29.5, got ${aggr['value__avg']}`);
-  assert(aggr['value__sum'] === 1770, `aggregate: value__sum = 1770, got ${aggr['value__sum']}`);
-  assert(aggr['value__count'] === 60, `aggregate: value__count = 60, got ${aggr['value__count']}`);
+  assert(aggr['value_avg'] === 29.5, `aggregate: value_avg = 29.5, got ${aggr['value_avg']}`);
+  assert(aggr['value_sum'] === 1770, `aggregate: value_sum = 1770, got ${aggr['value_sum']}`);
+  assert(aggr['value_count'] === 60, `aggregate: value_count = 60, got ${aggr['value_count']}`);
 
   assertThrows(
     () => t.aggregate('now-1d', 'now', []),

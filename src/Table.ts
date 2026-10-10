@@ -717,7 +717,7 @@ export class Table {
     }
     const out: Record<string, number | null> = {};
     for (const e of exprs) {
-      out[`${e.field}__${e.fn}`] =
+      out[`${e.field}_${e.fn}`] =
         values[e.field].length === 0
           ? e.fn === 'count' ? 0 : null
           : Rollup.applyAgg(e.fn, values[e.field]);

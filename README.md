@@ -25,23 +25,27 @@ const store = new Store('./data');   // ./data — каталог на диск�
 const cpu = store.create(defineLogTable({
   name: 'cpu',
   columns: { ts: 'delta', host: 'dictionary', value: 'auto' },
-}));
+}));                                 // → Table
 
-cpu.append({ ts: Date.now(), host: 'web-1', value: 42.3 });
+cpu.append({ ts: Date.now(), host: 'web-1', value: 42.3 });   // → void
 
-cpu.query('now-30d', 'now');  // строки за последние 30 дней
-cpu.tail(10);                 // последние 10
-cpu.allRows();                // все строки, старые → новые
-cpu.stats();                  // сколько строк, байт, диапазон ts
-cpu.compact();                // слить закрытые сегменты в один
-cpu.purge('now-30d');         // удалить строки старше 30 дней
-cpu.close();
+cpu.query('now-30d', 'now');   // → [{ ts, host, value }, …] — строки за последние 30 дней
+// то же самое числом (миллисекунды) — строка и число взаимозаменяемы:
+cpu.query(Date.now() - 30 * 86_400_000, Date.now());
+cpu.tail(10);                  // → последние 10 строк
+cpu.allRows();                 // → все строки, старые → новые
+cpu.stats();                   // → [{ tier: 0, resMs: 0, ttlMs: 0, rows, bytes, minTs, maxTs }]
+cpu.compact();                 // → { mergedSegments, logicalRows, physicalBefore, physicalAfter, collapsedRows }
+cpu.purge('now-30d');          // → { removedRows, removedSegments, rewrittenSegments }
+cpu.close();                   // → void
 
 // Уже существующую таблицу открывают по имени
-const cpu2 = store.open('cpu');
+const cpu2 = store.open('cpu');  // → Table (та же таблица)
 ```
 
-Время задаётся числом (миллисекунды) или строкой вида `'now-1d'`, `'now'`.
+Время задаётся числом (миллисекунды) или строкой вида `'now-1d'`, `'now-1h-30m'`,
+`'now'` — единицы: `ms s m h d w mon y` (`mon` = 30 дней, `y` = 365 дней).
+Число без единиц — это уже миллисекунды (`900000` = 15 минут).
 
 ## Как хранит данные
 
@@ -91,15 +95,15 @@ const cpu2 = store.open('cpu');
 
 ## Как читать
 
-| Метод | Что делает |
-|---|---|
-| `query(from, to)` | строки в диапазоне времени |
-| `tail(n)` | последние n строк |
-| `aggregate(from, to, exprs)` | min / max / sum / avg / count за период |
-| `timeline(interval, from, to)` | сколько строк в каждом интервале |
-| `scan({ select, where, groupBy, order, limit })` | выбрать колонки, отфильтровать, сгруппировать |
-| `sql('SELECT … WHERE …')` | небольшой SQL, компилируется в `scan()` |
-| `percentile(from, to, [0.5, 0.95])` | квантили p50 / p95 / … |
+| Метод | Что делает | Возвращает |
+|---|---|---|
+| `query(from, to)` | строки в диапазоне времени | `[{ ts, host, value }, …]` |
+| `tail(n)` | последние n строк | `[{ … }, …]` — последние n |
+| `aggregate(from, to, exprs)` | min / max / sum / avg / count за период | `{ value_avg: 42.3, value_max: 99.9, ts_count: 7184 }` |
+| `timeline(interval, from, to)` | сколько строк в каждом интервале | `[{ start, end, count, hasData }, …]` |
+| `scan({ select, where, groupBy, order, limit })` | выбрать колонки, отфильтровать, сгруппировать | `[{ … }, …]`; со `groupBy` — по строке на группу |
+| `sql('SELECT … WHERE …')` | небольшой SQL, компилируется в `scan()` | `[{ … }, …]`; `INSERT` — число записанных строк |
+| `percentile(from, to, [0.5, 0.95])` | квантили p50 / p95 / … (колонка `value`) | `{ p50: 38.2, p95: 91.4 }` |
 
 Чтение по времени дешёвое: файлы, целиком вне диапазона, **не читаются** — их
 границы (min/max ts) лежат в маленьком файле `.meta` рядом с сегментом, поэтому
@@ -112,6 +116,24 @@ cpu.aggregate('now-1h', 'now', [
   { field: 'ts',    fn: 'count' },
 ]);
 // → { value_avg: 42.3, value_max: 99.9, ts_count: 7184 }
+
+// Границы можно давать числом (мс) — или смешивать число и строку:
+cpu.aggregate(Date.now() - 3_600_000, Date.now(), [
+  { field: 'value', fn: 'avg' },
+]);
+// → { value_avg: 42.3 }
+
+cpu.aggregate('now-1h', Date.now(), [
+  { field: 'value', fn: 'max' },
+]);
+// → { value_max: 99.9 }
+
+// timeline: ширина бакета — число (мс) или строка с единицей:
+cpu.timeline(3_600_000, 'now-1d', 'now');
+// → [{ start, end, count, hasData }, …] — 24 почасовых бакета за сутки
+
+cpu.timeline('15m', 'now-1h', 'now');
+// → [{ start, end, count, hasData }, …] — 4 15-минутных бакета за час
 ```
 
 ## Движки
@@ -134,9 +156,10 @@ const state = store.create(defineUpsertTable({
   version: 'ts',
 }));
 
-state.append({ ts: 1, host: 'web-1', metric: 'cpu', value: 42 });
-state.append({ ts: 2, host: 'web-1', metric: 'cpu', value: 43 });
-state.compact();   // по (host, metric) — одна строка: value = 43 (макс. версия)
+state.append({ ts: 1, host: 'web-1', metric: 'cpu', value: 42 });   // → void
+state.append({ ts: 2, host: 'web-1', metric: 'cpu', value: 43 });   // → void
+state.compact();   // → { mergedSegments, logicalRows, physicalBefore, physicalAfter, collapsedRows }
+state.allRows();   // → [{ ts: 2, host: 'web-1', metric: 'cpu', value: 43 }] — по (host, metric) одна строка: макс. версия
 ```
 
 ## Retention — чтобы размер не рос вечно
@@ -172,6 +195,9 @@ vrack2-journal tables  --data ./data
 
 `--ts` — миллисекунды (числа меньше 1e12 трактуются как секунды); `--from/--to` —
 число или `'now-1d'`.
+
+Все команды печатают JSON: `query` — сами строки (до `--limit`), `stats` —
+`{ store, tables }`, `compact` — `{ table, compact: … }`, `tables` — `{ count, tables }`.
 
 ## Нагрузочный тест (2 млн строк)
 

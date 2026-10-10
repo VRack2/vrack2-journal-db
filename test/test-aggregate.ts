@@ -99,12 +99,6 @@ function expectedAggregate(rows: Row[], start: number, end: number, exprs: Aggre
       }
     }
   }
-  const fnFields = new Map<AggFn, Set<string>>();
-  for (const e of exprs) {
-    let s = fnFields.get(e.fn);
-    if (!s) { s = new Set(); fnFields.set(e.fn, s); }
-    s.add(e.field);
-  }
   const result: Record<string, number | null> = {};
   for (const e of exprs) {
     const a = accs[e.field];
@@ -116,7 +110,7 @@ function expectedAggregate(rows: Row[], start: number, end: number, exprs: Aggre
       case 'max': value = a.count > 0 ? a.max : null; break;
       case 'avg': value = a.count > 0 ? a.sum / a.count : null; break;
     }
-    result[fnFields.get(e.fn)!.size > 1 ? `${e.field}__${e.fn}` : e.fn] = value;
+    result[`${e.field}_${e.fn}`] = value;
   }
   return result;
 }
@@ -164,18 +158,18 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
   ];
   const got = j.aggregate(start, end, exprs);
   const want = expectedAggregate(rows, start, end, exprs);
-  assertClose(got.avg, want.avg, 'a1 avg');
-  assertClose(got.min, want.min, 'a1 min');
-  assertClose(got.max, want.max, 'a1 max');
-  assertClose(got.sum, want.sum, 'a1 sum');
-  assertClose(got.count, want.count, 'a1 count');
+  assertClose(got.value_avg, want.value_avg, 'a1 avg');
+  assertClose(got.value_min, want.value_min, 'a1 min');
+  assertClose(got.value_max, want.value_max, 'a1 max');
+  assertClose(got.value_sum, want.value_sum, 'a1 sum');
+  assertClose(got.value_count, want.value_count, 'a1 count');
 
   // Поддиапазон (срез)
   const mid = start + Math.floor((end - start) / 2);
   const got2 = j.aggregate(mid, end, [{ field: 'value', fn: 'count' }, { field: 'value', fn: 'avg' }]);
   const want2 = expectedAggregate(rows, mid, end, [{ field: 'value', fn: 'count' }, { field: 'value', fn: 'avg' }]);
-  assertClose(got2.count, want2.count, 'a1 поддиапазон count');
-  assertClose(got2.avg, want2.avg, 'a1 поддиапазон avg');
+  assertClose(got2.value_count, want2.value_count, 'a1 поддиапазон count');
+  assertClose(got2.value_avg, want2.value_avg, 'a1 поддиапазон avg');
   j.close();
 }
 
@@ -199,18 +193,18 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
   ];
   const got = j.aggregate(start, end, exprs);
   const want = expectedAggregate(rows, start, end, exprs);
-  assertClose(got.min, want.min, 'a2 min');
-  assertClose(got.max, want.max, 'a2 max');
-  assertClose(got.sum, want.sum, 'a2 sum');
-  assertClose(got.avg, want.avg, 'a2 avg');
-  assertClose(got.count, want.count, 'a2 count');
+  assertClose(got.value_min, want.value_min, 'a2 min');
+  assertClose(got.value_max, want.value_max, 'a2 max');
+  assertClose(got.value_sum, want.value_sum, 'a2 sum');
+  assertClose(got.value_avg, want.value_avg, 'a2 avg');
+  assertClose(got.value_count, want.value_count, 'a2 count');
 
   // Диапазон, пересекающий границу сегмента (граничный скан)
   const cut = rows[210].ts as number; // внутри 2-го сегмента
   const got2 = j.aggregate(rows[150].ts as number, cut, [{ field: 'value', fn: 'count' }, { field: 'value', fn: 'sum' }]);
   const want2 = expectedAggregate(rows, rows[150].ts as number, cut, [{ field: 'value', fn: 'count' }, { field: 'value', fn: 'sum' }]);
-  assertClose(got2.count, want2.count, 'a2 граничный count');
-  assertClose(got2.sum, want2.sum, 'a2 граничный sum');
+  assertClose(got2.value_count, want2.value_count, 'a2 граничный count');
+  assertClose(got2.value_sum, want2.value_sum, 'a2 граничный sum');
   j.close();
 }
 
@@ -236,11 +230,11 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
     { field: 'value', fn: 'sum' },
     { field: 'value', fn: 'avg' },
   ]);
-  assertClose(got.count, 3, 'a3 count=3 (2 null пропущено)');
-  assertClose(got.min, 10, 'a3 min=10');
-  assertClose(got.max, 30, 'a3 max=30');
-  assertClose(got.sum, 60, 'a3 sum=60');
-  assertClose(got.avg, 20, 'a3 avg=20');
+  assertClose(got.value_count, 3, 'a3 count=3 (2 null пропущено)');
+  assertClose(got.value_min, 10, 'a3 min=10');
+  assertClose(got.value_max, 30, 'a3 max=30');
+  assertClose(got.value_sum, 60, 'a3 sum=60');
+  assertClose(got.value_avg, 20, 'a3 avg=20');
   j.close();
 }
 
@@ -257,8 +251,8 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
     { field: 'value', fn: 'count' },
     { field: 'value', fn: 'sum' },
   ]);
-  assertClose(got.count, 2, 'a4 count=2 (строка без ts не считается)');
-  assertClose(got.sum, 300, 'a4 sum=300 (999 без ts не входит)');
+  assertClose(got.value_count, 2, 'a4 count=2 (строка без ts не считается)');
+  assertClose(got.value_sum, 300, 'a4 sum=300 (999 без ts не входит)');
   j.close();
 }
 
@@ -291,15 +285,15 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
   const j2 = new Journal(baseDir, { rowsPerSegment: 100 });
   j2.open('a5', SCHEMA);
   const got1 = j2.aggregate(start, end, exprs); // первый раз — скан (нет .meta)
-  assertClose(got1.count, want.count, 'a5 без .meta: count');
-  assertClose(got1.sum, want.sum, 'a5 без .meta: sum');
-  assertClose(got1.min, want.min, 'a5 без .meta: min');
-  assertClose(got1.max, want.max, 'a5 без .meta: max');
+  assertClose(got1.value_count, want.value_count, 'a5 без .meta: count');
+  assertClose(got1.value_sum, want.value_sum, 'a5 без .meta: sum');
+  assertClose(got1.value_min, want.value_min, 'a5 без .meta: min');
+  assertClose(got1.value_max, want.value_max, 'a5 без .meta: max');
 
   // Повторный вызов — саммари уже кэшированы, результат тот же
   const got2 = j2.aggregate(start, end, exprs);
-  assertClose(got2.count, want.count, 'a5 повторный: count');
-  assertClose(got2.sum, want.sum, 'a5 повторный: sum');
+  assertClose(got2.value_count, want.value_count, 'a5 повторный: count');
+  assertClose(got2.value_sum, want.value_sum, 'a5 повторный: sum');
   j2.close();
 }
 
@@ -336,7 +330,7 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
 }
 
 // --------------------------------------------------
-// 7. Различение ключей: одна функция по двум полям → поле__fn
+// 7. Различение ключей: одна функция по двум полям → поле_fn
 // --------------------------------------------------
 {
   const j = new Journal(baseDir, { rowsPerSegment: 100 });
@@ -348,8 +342,8 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
     { field: 'value', fn: 'sum' },
     { field: 'load', fn: 'sum' },
   ]);
-  assertClose(got.value__sum, 60, 'a7 value__sum=60');
-  assertClose(got.load__sum, 18, 'a7 load__sum=18');
+  assertClose(got.value_sum, 60, 'a7 value_sum=60');
+  assertClose(got.load_sum, 18, 'a7 load_sum=18');
   assert(!('sum' in got), 'a7 без неоднозначного ключа «sum»');
   j.close();
 }
@@ -367,9 +361,9 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
     { field: 'value', fn: 'sum' },
     { field: 'value', fn: 'avg' },
   ]);
-  assertClose(got.count, 0, 'a8 count=0');
-  assert(got.sum === null, 'a8 sum=null');
-  assert(got.avg === null, 'a8 avg=null');
+  assertClose(got.value_count, 0, 'a8 count=0');
+  assert(got.value_sum === null, 'a8 sum=null');
+  assert(got.value_avg === null, 'a8 avg=null');
   j.close();
 }
 
@@ -420,16 +414,16 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
   const exprs: AggregateExpr[] = [{ field: 'value', fn: 'count' }, { field: 'value', fn: 'sum' }];
   const num = j.aggregate(start, end, exprs);
   const str = j.aggregate(String(start), String(end), exprs);
-  assertClose(num.count, str.count, 'a10 числовые vs строковые границы: count');
-  assertClose(num.sum, str.sum, 'a10 числовые vs строковые границы: sum');
+  assertClose(num.value_count, str.value_count, 'a10 числовые vs строковые границы: count');
+  assertClose(num.value_sum, str.value_sum, 'a10 числовые vs строковые границы: sum');
   j.close();
 
   // Reopen: результат стабилен
   const j2 = new Journal(baseDir, { rowsPerSegment: 100 });
   j2.open('a10', SCHEMA);
   const reopen = j2.aggregate(start, end, exprs);
-  assertClose(num.count, reopen.count, 'a10 reopen: count стабилен');
-  assertClose(num.sum, reopen.sum, 'a10 reopen: sum стабилен');
+  assertClose(num.value_count, reopen.value_count, 'a10 reopen: count стабилен');
+  assertClose(num.value_sum, reopen.value_sum, 'a10 reopen: sum стабилен');
   j2.close();
 }
 
@@ -467,8 +461,8 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
   }
   const allrowsMs = Number(process.hrtime.bigint() - t0) / 1e6;
 
-  assert(aggResult.count === count, 'a11 count совпадает с brute-force');
-  assertClose(aggResult.sum, sum, 'a11 sum совпадает с brute-force');
+  assert(aggResult.value_count === count, 'a11 count совпадает с brute-force');
+  assertClose(aggResult.value_sum, sum, 'a11 sum совпадает с brute-force');
   assert(tAgg < allrowsMs, `a11 aggregate ${tAgg.toFixed(1)}ms < allRows+reduce ${allrowsMs.toFixed(1)}ms`);
   console.log(`  [perf] aggregate=${tAgg.toFixed(1)}ms  allRows+reduce=${allrowsMs.toFixed(1)}ms  (N=${N})`);
   j.close();

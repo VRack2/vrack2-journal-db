@@ -1016,15 +1016,14 @@ export class Journal {
    *   { field: 'value', fn: 'max' },
    *   { field: 'value', fn: 'count' },
    * ]);
-   * // → { avg: 42.3, min: 1.0, max: 99.9, count: 7184 }
+    * // → { value_avg: 42.3, value_min: 1.0, value_max: 99.9, value_count: 7184 }
    * ```
    *
    * Семантика: все функции работают по числовым (конечным) значениям поля;
    * null/не-числа пропускаются. `count` — количество числовых значений
    * (0, если их нет); `min/max/sum/avg` — null, если числовых значений нет.
    * Строки без числового ts не участвуют.
-   * Ключ результата — имя функции; если одна функция запрошена по нескольким
-   * полям, ключи различаются: `поле__fn`.
+    * Ключ результата — `поле_функция` (value_avg, ts_count, …).
    */
   aggregate(
     startTs: number | string,
@@ -2045,21 +2044,11 @@ export class Journal {
     this._scanAggregate(seg, start, end, fields, accs);
   }
 
-  /** Накопители → результат: ключ = fn (или поле__fn при конфликте), пустые → null. */
+  /** Накопители → результат: ключ = поле_функция (value_avg, ts_count), пустые → null. */
   private _buildResult(
     exprs: AggregateExpr[],
     accs: Record<string, AggAcc>,
   ): Record<string, number | null> {
-    // fn → множество полей, использующих его (для различения ключей)
-    const fnFields = new Map<AggFn, Set<string>>();
-    for (const e of exprs) {
-      let s = fnFields.get(e.fn);
-      if (!s) { s = new Set(); fnFields.set(e.fn, s); }
-      s.add(e.field);
-    }
-    const keyFor = (field: string, fn: AggFn): string =>
-      fnFields.get(fn)!.size > 1 ? `${field}__${fn}` : fn;
-
     const result: Record<string, number | null> = {};
     for (const e of exprs) {
       const acc = accs[e.field];
@@ -2071,7 +2060,7 @@ export class Journal {
         case 'max':   value = acc.count > 0 ? acc.max : null; break;
         case 'avg':   value = acc.count > 0 ? acc.sum / acc.count : null; break;
       }
-      result[keyFor(e.field, e.fn)] = value;
+      result[`${e.field}_${e.fn}`] = value;
     }
     return result;
   }
