@@ -11,6 +11,7 @@
 
 export { Store } from './Store.ts';
 export { Table } from './Table.ts';
+export { Interval } from './Interval.ts';
 export {
   defineLogTable,
   defineUpsertTable,
