@@ -55,6 +55,7 @@ import type {
   ScanOptions,
   TableTierStat,
   TimelineBucket,
+  TruncateResult,
 } from './types.ts';
 import type { AnyTableDef, TableRuntime } from './compaction/define.ts';
 import { Descriptor, ENGINE_META_KEY } from './compaction/Descriptor.ts';
@@ -910,6 +911,37 @@ export class Table {
       rewrittenSegments += r.rewrittenSegments;
     }
     return { removedRows, removedSegments, rewrittenSegments };
+  }
+
+  /**
+   * Полностью очищает таблицу: все строки удаляются из памяти и с диска —
+   * сегменты, их сайдкар'ы .meta, WAL и остатки .tmp во всех тирах.
+   * В отличие от purge(until), исключений нет: удаляются и строки без ts,
+   * и свежие. Rollup-чекпоинты сбрасываются, чтобы новые данные (вплоть до
+   * ts ниже прежнего максимума) снова попадали в rollup. Таблица остаётся
+   * открытой: сразу можно продолжать append() — это чистая таблица
+   * с прежней схемой.
+   *
+   * ```ts
+   * t.truncate(); // → { removedRows: 123 }
+   * ```
+   */
+  truncate(): TruncateResult {
+    this._assertOpen();
+    let removedRows = 0;
+    for (const j of this.journals) removedRows += j.stats().totalRows;
+
+    for (const j of this.journals) j.clear();
+
+    // Чекпоинты rollup сбрасываем: иначе условие maxRollable <= cp в rollup
+    // навсегда блокировало бы перенос новых строк с ts ниже прежнего максимума
+    // (чекпоинт монотонен по времени записи, а не по ts данных).
+    this.checkpoints = {};
+    if (this.cpPath) {
+      fs.rmSync(this.cpPath, { force: true });
+    }
+
+    return { removedRows };
   }
 
   /**

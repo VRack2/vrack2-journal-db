@@ -662,5 +662,80 @@ console.log('\nretention/purge: явное удаление по границе:
   store.closeAll();
 }
 
+// ============================================================================
+console.log('\ntruncate: полная очистка таблицы:');
+// ============================================================================
+{
+  const dir = tmpDir();
+  const store = new Store(dir, { autoCompact: false });
+  const t = store.create(defineLogTable({
+    name: 'trunc',
+    columns: { ts: 'auto', host: 'dictionary', value: 'auto' },
+  }));
+
+  t.append({ ts: 1000, host: 'h1', value: 1 });
+  t.append({ ts: 2000, host: 'h2', value: 2 });
+  t.append({ host: 'h3', value: 3 }); // без ts — purge её не трогает, truncate должен
+  t.flush();
+  assert(t.stats()[0].rows === 3, `одиночный: 3 строки до truncate, got ${t.stats()[0].rows}`);
+
+  const r = t.truncate();
+  assert(r.removedRows === 3, `truncate → removedRows=3, got ${r.removedRows}`);
+  assert(t.stats()[0].rows === 0, 'одиночный: 0 строк после truncate');
+  assert(t.allRows().length === 0, 'одиночный: allRows пусто');
+
+  t.append({ ts: 5000, host: 'h1', value: 5 });
+  assert(t.stats()[0].rows === 1, 'одиночный: append после truncate работает');
+
+  t.close();
+  store.closeAll();
+
+  // Персистентность: после reopen — только строка, добавленная ПОСЛЕ truncate.
+  const s2 = new Store(dir, { autoCompact: false });
+  const t2 = s2.open('trunc');
+  const rows2 = t2.allRows();
+  assert(rows2.length === 1 && rows2[0].ts === 5000,
+    `одиночный: после reopen — 1 новая строка, got ${JSON.stringify(rows2)}`);
+  s2.closeAll();
+}
+{
+  // Тир-режим: truncate сбрасывает rollup-чекпоинт, повторный rollup не блокируется.
+  const dir = tmpDir();
+  const store = new Store(dir, { autoCompact: false });
+  const t = store.create(defineLogTable({
+    name: 'truncr',
+    columns: { ts: 'delta', host: 'dictionary', value: 'auto' },
+    retention: '1s:5s,60s:10m',
+    agg: { value: 'avg' },
+    dims: ['host'],
+    nowProvider: () => 100000,
+    autoRollup: false, autoPurge: false,
+  }));
+
+  t.append({ ts: 1000, host: 'h1', value: 10 });
+  t.rollup(100000);
+  assert(t.stats()[1].rows === 1, 'тир: агрегат в грубом тире после rollup');
+  assert(fs.existsSync(path.join(dir, 'journals', 'truncr', '_rollup.json')),
+    'тир: файл чекпоинта существует до truncate');
+
+  const r = t.truncate();
+  assert(r.removedRows === 1, `truncate → removedRows=1, got ${r.removedRows}`);
+  assert(t.stats()[0].rows === 0 && t.stats()[1].rows === 0, 'тир: оба тира пусты после truncate');
+  assert(!fs.existsSync(path.join(dir, 'journals', 'truncr', '_rollup.json')),
+    'тир: файл чекпоинта удалён');
+
+  // Ключевой сценарий: чекпоинт сброшен → новый rollup не заблокирован
+  // (без сброса условие maxRollable <= cp навсегда пропускало бы перенос).
+  t.append({ ts: 2000, host: 'h1', value: 20 });
+  t.rollup(100000);
+  assert(t.stats()[0].rows === 0, 'тир: тонкий тир пуст (строка перенесена, чекпоинт сброшен)');
+  const coarse = t.journal(1).allRows();
+  assert(coarse.length === 1 && coarse[0].value === 20,
+    `тир: новый агрегат avg(20)=20, got ${JSON.stringify(coarse)}`);
+
+  t.close();
+  store.closeAll();
+}
+
 console.log(`\nТесты table (Фазы 4-6): ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

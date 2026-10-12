@@ -33,7 +33,8 @@ export type {
   StoreStats,
   TableTierStat,
   TimelineBucket,
-  RollupReport
+  RollupReport,
+  TruncateResult
 } from './types.ts';
 
 export type {

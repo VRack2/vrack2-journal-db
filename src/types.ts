@@ -196,6 +196,12 @@ export interface PurgeResult {
   rewrittenSegments: number;
 }
 
+/** Результат полной очистки таблицы/журнала (truncate). */
+export interface TruncateResult {
+  /** Сколько строк удалено. */
+  removedRows: number;
+}
+
 /** Один бакет таймлайна: интервал времени и сколько строк в нём. */
 export interface TimelineBucket {
   /** Начало бакета (ms, включительно). */

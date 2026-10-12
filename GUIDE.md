@@ -98,7 +98,7 @@ npm install vrack2-journal-db
 Два уровня:
 
 - **Store** — каталог таблиц, привязанный к каталогу на диске.
-- **Table** — таблица: `append` / `query` / `aggregate` / `scan` / `sql` / `compact` / `purge`.
+- **Table** — таблица: `append` / `query` / `aggregate` / `scan` / `sql` / `compact` / `purge` / `truncate`.
 
 Таблицу создаёте через `store.create(def)`. Описание `def` собирает `defineLogTable()`,
 `defineUpsertTable()`, `defineSummingTable()` или `defineCollapsingTable()` — разница
@@ -226,7 +226,7 @@ cpu.append({ ts: Date.now(), host: 'web-1', value: 42.3 });
 cpu.flush();      // дописать активный сегмент на диск (WAL срезается)
 cpu.compact();    // слить закрытые сегменты в один (дедупликация)
 cpu.purge('now-30d'); // удалить строки старше 30 дней
-cpu.clear();      // очистить таблицу полностью
+cpu.truncate();    // удалить ВСЕ данные таблицы (строки без ts тоже; rollup-чекпоинты сбрасываются)
 ```
 
 ## Чтение данных
