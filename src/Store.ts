@@ -87,9 +87,17 @@ export class Store {
     return this.baseDir;
   }
 
-  /** Создать каталог журнала (no-op при повторном вызове). */
+  /** Создать каталог журнала (no-op при повторном вызове); убрать осиротевшие tmp от упавших процессов. */
   init(): void {
     fs.mkdirSync(this.journalsDir, { recursive: true });
+    const dir = path.dirname(this._manifestPath());
+    try {
+      for (const f of fs.readdirSync(dir)) {
+        if (f.startsWith(MANIFEST_FILE + '.tmp.')) {
+          try { fs.unlinkSync(path.join(dir, f)); } catch {}
+        }
+      }
+    } catch {}
   }
 
   // --------------------------------------------------
@@ -231,9 +239,13 @@ export class Store {
     manifest.tables[def.name] = def;
     const p = this._manifestPath();
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    const tmp = `${p}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(manifest, null, 2));
-    fs.renameSync(tmp, p);
+    const tmp = `${p}.tmp.${process.pid}`;
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(manifest, null, 2));
+      fs.renameSync(tmp, p);
+    } finally {
+      try { fs.unlinkSync(tmp); } catch {}
+    }
   }
 
   /**
