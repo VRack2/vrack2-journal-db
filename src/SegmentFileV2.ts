@@ -14,6 +14,15 @@
 import zlib from 'node:zlib';
 import { Compression } from './Compression.ts';
 import type { SerializedSegment } from './types.ts';
+import ErrorManager from './errors/ErrorManager.ts';
+
+ErrorManager.registerMany('SegmentFileV2', [
+  { short: 'SFW_PARSE', description: 'Не удалось прочитать сегмент (v1 JSON)', rules: { reason: 'string' } },
+  { short: 'SFW_TOO_SMALL', description: 'Повреждённый сегмент: файл слишком мал' },
+  { short: 'SFW_FORMAT', description: 'Неподдерживаемый формат файла сегмента', rules: { format: 'number' } },
+  { short: 'SFW_CRC', description: 'Повреждённый сегмент: контрольная сумма не совпадает' },
+  { short: 'SFW_DECOMPRESS', description: 'Повреждённый сегмент: не удалось разжать', rules: { reason: 'string' } },
+]);
 
 export class SegmentFileV2 {
   /** Магические байты формата ("JSDB"). */
@@ -50,18 +59,18 @@ export class SegmentFileV2 {
     try {
       return JSON.parse(buf.toString('utf-8')) as SerializedSegment;
     } catch (e) {
-      throw new Error(`Не удалось прочитать сегмент: ${this.msg(e)}`);
+      throw ErrorManager.make('SFW_PARSE', { reason: this.msg(e) });
     }
   }
 
   private static decodeV2(buf: Buffer): SerializedSegment {
     if (buf.length < this.HEADER_SIZE + this.CRC_SIZE) {
-      throw new Error('Повреждённый сегмент: файл слишком мал');
+      throw ErrorManager.make('SFW_TOO_SMALL');
     }
 
     const format = buf[4];
     if (format !== this.FORMAT_GZIP_JSON) {
-      throw new Error(`Неподдерживаемый формат файла сегмента: ${format}`);
+      throw ErrorManager.make('SFW_FORMAT', { format });
     }
 
     // Проверка контрольной суммы до разжатия — битые файлы не читаем
@@ -69,14 +78,14 @@ export class SegmentFileV2 {
     const storedCrc = buf.readUInt32LE(buf.length - this.CRC_SIZE);
     const actualCrc = zlib.crc32(body) >>> 0;
     if (storedCrc !== actualCrc) {
-      throw new Error('Повреждённый сегмент: контрольная сумма не совпадает');
+      throw ErrorManager.make('SFW_CRC');
     }
 
     let json: Buffer;
     try {
       json = Compression.decompress(buf.subarray(this.HEADER_SIZE, buf.length - this.CRC_SIZE), 'gzip');
     } catch (e) {
-      throw new Error(`Повреждённый сегмент: ${this.msg(e)}`);
+      throw ErrorManager.make('SFW_DECOMPRESS', { reason: this.msg(e) });
     }
 
     return JSON.parse(json.toString('utf-8')) as SerializedSegment;

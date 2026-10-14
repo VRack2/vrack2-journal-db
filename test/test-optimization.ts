@@ -11,6 +11,7 @@ import { DictionaryColumn } from '../src/columns/DictionaryColumn.ts';
 import { DeltaColumn } from '../src/columns/DeltaColumn.ts';
 import { RLEColumn } from '../src/columns/RLEColumn.ts';
 import type { Schema } from '../src/types.ts';
+import ErrorManager from '../src/errors/ErrorManager.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.join(__dirname, '..', 'test-data', 'opt');
@@ -125,9 +126,9 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   try {
     new DeltaColumn().append('не число');
   } catch (e) {
-    threw = e instanceof TypeError;
+    threw = ErrorManager.isCode(e, 'COL_DELTA_TYPE');
   }
-  assert(threw, 'DeltaColumn.append(string) → TypeError');
+  assert(threw, 'DeltaColumn.append(string) → COL_DELTA_TYPE');
 
   // Round-trip
   const c2 = new DeltaColumn();

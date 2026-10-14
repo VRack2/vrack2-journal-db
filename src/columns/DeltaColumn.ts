@@ -7,15 +7,18 @@
 
 import { Column } from './Column.ts';
 import type { DeltaColumnData, JsonValue, SerializedColumn } from '../types.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
+
+ErrorManager.registerMany('DeltaColumn', [
+  { short: 'COL_DELTA_TYPE', description: 'DeltaColumn.append: ожидается число', rules: { value: 'string' } },
+]);
 
 export class DeltaColumn extends Column {
   values: number[] = [];
 
   append(value: JsonValue): void {
     if (typeof value !== 'number' || Number.isNaN(value)) {
-      throw new TypeError(
-        `DeltaColumn.append: ожидается число, получено ${String(value)} (${value === null ? 'null' : typeof value})`
-      );
+      throw ErrorManager.make('COL_DELTA_TYPE', { value: String(value) });
     }
     this.values.push(value);
     this._length++;

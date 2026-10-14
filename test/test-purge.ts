@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/Journal.ts';
+import ErrorManager from '../src/errors/ErrorManager.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -162,9 +163,9 @@ const segFiles = (name: string): string[] =>
   try {
     j.purge('yesterday' as never);
   } catch (e) {
-    threw = e instanceof RangeError;
+    threw = ErrorManager.isError(e);
   }
-  assert(threw, "purge('yesterday') → RangeError");
+  assert(threw, "purge('yesterday') → ошибка");
   j.close();
 }
 

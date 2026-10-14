@@ -4,7 +4,7 @@
 //   - WHERE (=, !=, <, <=, >, >=, BETWEEN, IN, NOT IN, IS [NOT] NULL);
 //   - ORDER BY / LIMIT / OFFSET;
 //   - raw-режим (SELECT * / SELECT fields);
-//   - парсинг ошибок (SqlError).
+//   - парсинг ошибок (ErrorManager: коды SQL_*/JRN_*).
 // Каждый запрос проверяется против brute-force по allRows().
 // ============================================================
 
@@ -13,7 +13,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/Journal.ts';
 import { Sql } from '../src/Sql.ts';
-import { SqlError } from '../src/SqlError.ts';
+import ErrorManager from '../src/errors/ErrorManager.ts';
 import type { Schema, Row } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -151,7 +151,7 @@ function avg(arr: number[]): number {
   ];
   for (const q of bad) {
     let threw = false;
-    try { Sql.parse(q); } catch (e) { threw = e instanceof SqlError || e instanceof Error; }
+    try { Sql.parse(q); } catch (e) { threw = ErrorManager.isError(e); }
     assert(threw, `parseSql бросает ошибку: ${q}`);
   }
 }
@@ -333,22 +333,22 @@ function avg(arr: number[]): number {
   // Ошибка: чужое имя журнала
   let e1: unknown = null;
   try { j.sql(`INSERT INTO other (ts, value) VALUES (${T0}, 1)`); } catch (e) { e1 = e; }
-  assert(e1 instanceof SqlError, `insert: чужое имя → SqlError (получено ${String(e1)})`);
+  assert(ErrorManager.isCode(e1, 'JRN_INSERT_NAME'), `insert: чужое имя → JRN_INSERT_NAME (получено ${String(e1)})`);
 
   // Ошибка: лишних значений больше, чем колонок
   let e2: unknown = null;
   try { j.sql(`INSERT INTO m (ts, value) VALUES (${T0}, 1, 2)`); } catch (e) { e2 = e; }
-  assert(e2 instanceof SqlError, `insert: лишнее значение → SqlError (получено ${String(e2)})`);
+  assert(ErrorManager.isCode(e2, 'SQL_INSERT_MORE'), `insert: лишнее значение → SQL_INSERT_MORE (получено ${String(e2)})`);
 
   // Ошибка: значений меньше колонок
   let e3: unknown = null;
   try { j.sql(`INSERT INTO m (ts, value, level) VALUES (${T0}, 1)`); } catch (e) { e3 = e; }
-  assert(e3 instanceof SqlError, `insert: нехватка значения → SqlError (получено ${String(e3)})`);
+  assert(ErrorManager.isCode(e3, 'SQL_INSERT_COUNT'), `insert: нехватка значения → SQL_INSERT_COUNT (получено ${String(e3)})`);
 
   // Ошибка: хвост после VALUES
   let e4: unknown = null;
   try { j.sql(`INSERT INTO m (ts) VALUES (${T0}) EXTRA`); } catch (e) { e4 = e; }
-  assert(e4 instanceof SqlError, `insert: хвост запроса → SqlError (получено ${String(e4)})`);
+  assert(ErrorManager.isCode(e4, 'SQL_TRAILING'), `insert: хвост запроса → SQL_TRAILING (получено ${String(e4)})`);
 
   j.close();
 
@@ -395,7 +395,7 @@ function avg(arr: number[]): number {
   // FROM с чужим именем — ошибка
   let e1: unknown = null;
   try { j.sql(`SELECT host, avg(value) FROM other WHERE ts >= ${T0} GROUP BY host`); } catch (e) { e1 = e; }
-  assert(e1 instanceof SqlError, `phase4: FROM other → SqlError (получено ${String(e1)})`);
+  assert(ErrorManager.isCode(e1, 'JRN_FROM_NAME'), `phase4: FROM other → JRN_FROM_NAME (получено ${String(e1)})`);
 
   // FROM префикс — совместимо с тирными именами (mt.tier0 начинается с 'mt')
   const j2 = new Journal(dir, { lock: 'off' });

@@ -36,11 +36,18 @@ import { ENGINE_META_KEY } from './compaction/Descriptor.ts';
 import { engineDescriptorOf } from './compaction/define.ts';
 import type { AnyTableDef, LogTableDef, TableDescription, TableRuntime } from './compaction/define.ts';
 import type { EngineKind } from './compaction/types.ts';
+import ErrorManager from './errors/ErrorManager.ts';
 
 const MANIFEST_FILE = '_store.json';
 const isSegmentFile = (f: string): boolean => f.endsWith('.seg') || f.endsWith('.json');
 const idFromFile = (f: string): string =>
   f.endsWith('.seg') ? f.slice(0, -4) : f.endsWith('.json') ? f.slice(0, -5) : f;
+
+ErrorManager.registerMany('Store', [
+  { short: 'STO_LOCK', description: "Store: lock должно быть 'pid' или 'off'", rules: { lock: 'string' } },
+  { short: 'STO_JOURNAL_NOT_FOUND', description: 'Store: журнал не найден в открытой сессии', rules: { name: 'string' } },
+  { short: 'STO_TABLE_NOT_FOUND', description: 'Store: таблица не найдена (нет ни в манифесте, ни сегментов на диске)', rules: { name: 'string' } },
+]);
 
 export class Store {
   readonly baseDir: string;
@@ -70,7 +77,7 @@ export class Store {
     this.defaultRowsPerSegment = opts.defaultRowsPerSegment ?? DEFAULT_ROWS_PER_SEGMENT;
     const lock = opts.lock ?? 'pid';
     if (lock !== 'pid' && lock !== 'off') {
-      throw new RangeError("Store: lock должно быть 'pid' или 'off'");
+      throw ErrorManager.make('STO_LOCK', { lock: String(lock) });
     }
     this.lockMode = lock;
     this.format = opts.format ?? 'v2';
@@ -137,7 +144,7 @@ export class Store {
   _closeJournal(name: string): void {
     const journal = this.openJournals.get(name);
     if (!journal) {
-      throw new Error(`Journal not found: ${name}`);
+      throw ErrorManager.make('STO_JOURNAL_NOT_FOUND', { name });
     }
     journal.close();
     this.openJournals.delete(name);
@@ -261,7 +268,7 @@ export class Store {
       files = [];
     }
     if (files.length === 0) {
-      throw new RangeError(`Store: таблица "${name}" не найдена (нет манифеста и сегментов)`);
+      throw ErrorManager.make('STO_TABLE_NOT_FOUND', { name });
     }
     const seg = SegmentFile.read(fs.readFileSync(path.join(dir, files[0])));
     const columns: Schema = {};

@@ -4,6 +4,11 @@
 // ============================================================
 
 import type { NumCodec } from './types.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
+
+ErrorManager.registerMany('RleCodec', [
+  { short: 'NC_RLE_NOT_INT', description: 'RleCodec: значение не целое — rle только для целых', rules: { value: 'number' } },
+]);
 
 export class RleCodec implements NumCodec {
   readonly name = 'rle';
@@ -16,7 +21,7 @@ export class RleCodec implements NumCodec {
     for (let i = 0; i < n; i++) {
       const v = values[i];
       if (!Number.isInteger(v)) {
-        throw new RangeError('RleCodec: значение не целое — rle только для целых');
+        throw ErrorManager.make('NC_RLE_NOT_INT', { value: v });
       }
       const last = runs[runs.length - 1];
       if (last && last.value === v) {

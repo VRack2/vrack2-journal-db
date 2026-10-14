@@ -62,7 +62,57 @@ import { Descriptor, ENGINE_META_KEY } from './compaction/Descriptor.ts';
 import { RetentionEngine } from './RetentionEngine.ts';
 import type { ApplyReport, ConversionPlan, ScanWhere, TierStatus } from './types.ts';
 import { Sql } from './Sql.ts';
-import { SqlError } from './SqlError.ts';
+import ErrorManager from './errors/ErrorManager.ts';
+
+ErrorManager.registerMany('Table', [
+  { short: 'TBL_SCAN_AGG', description: 'Table: scan — agg/groupBy в тир-режиме: используйте aggregate()/sql()' },
+  { short: 'TBL_INSERT_NAME', description: 'INSERT INTO — не эта таблица', rules: { name: 'string', table: 'string' } },
+  { short: 'TBL_TABLE_NAME', description: 'таблица запроса не совпадает с таблицей', rules: { table: 'string', name: 'string' } },
+  { short: 'TBL_GROUP_BY_TIER', description: 'GROUP BY в тир-режиме — пока не поддерживается' },
+  { short: 'TBL_WHERE_AGG_TIER', description: 'WHERE + агрегации в тир-режиме — пока не поддерживаются' },
+  { short: 'TBL_WHERE_OP', description: 'where — неизвестный оператор', rules: { op: 'string' } },
+  { short: 'TBL_RETENTION_STRING', description: 'Table: retention — непустая строка, например "5s:1d,15s:1w,1m:1mon"' },
+  { short: 'TBL_RETENTION_EMPTY', description: 'Table: retention — хотя бы один тир вида "res:ttl"' },
+  { short: 'TBL_RETENTION_TIER_FORMAT', description: 'Table: retention — тир в формате "res:ttl"', rules: { part: 'string' } },
+  { short: 'TBL_RETENTION_RES', description: 'Table: retention — разрешение', rules: { res: 'string', message: 'string' } },
+  { short: 'TBL_RETENTION_TTL', description: 'Table: retention — ttl', rules: { ttl: 'string', message: 'string' } },
+  { short: 'TBL_RETENTION_RES_POS', description: 'Table: retention — res должно быть > 0', rules: { part: 'string' } },
+  { short: 'TBL_RETENTION_TTL_POS', description: 'Table: retention — ttl должно быть > 0', rules: { part: 'string' } },
+  { short: 'TBL_RETENTION_RES_ASC', description: 'Table: retention — разрешения должны неубывать слева направо (тонкий → грубый)' },
+  { short: 'TBL_RETENTION_TTL_ASC', description: 'Table: retention — ttl должны неубывать слева направо' },
+  { short: 'TBL_NAME_EMPTY', description: 'Table: name — непустая строка' },
+  { short: 'TBL_NAME_SLASH', description: 'Table: name не должно содержать "/" (тиры создаются как <name>/r<res>)' },
+  { short: 'TBL_DEF_REQUIRED', description: 'Table: def обязателен ({ columns: { … } })' },
+  { short: 'TBL_NAME_MISMATCH', description: 'Table: name не совпадает с def.name', rules: { name: 'string', defName: 'string' } },
+  { short: 'TBL_COLUMNS_EMPTY', description: 'Table: def.columns — непустая схема { поле: тип }' },
+  { short: 'TBL_KEY_EMPTY', description: 'Table: def.key: непустой массив полей ключа', rules: { kind: 'string' } },
+  { short: 'TBL_KEY_NOT_IN_SCHEMA', description: 'Table: ключ не в схеме', rules: { kind: 'string', field: 'string' } },
+  { short: 'TBL_AGG_FIELD', description: 'Table: agg — поле не найдено в columns', rules: { field: 'string' } },
+  { short: 'TBL_AGG_FN', description: 'Table: agg — fn min|max|sum|avg|count', rules: { field: 'string', fn: 'string' } },
+  { short: 'TBL_DIMS_FIELD', description: 'Table: dims — поле не найдено в columns', rules: { field: 'string' } },
+  { short: 'TBL_MAINT_MIN_INTERVAL', description: 'Table: maintenanceMinIntervalMs — число >= 0' },
+  { short: 'TBL_AGG_NEED_FIELDS', description: 'Table: нужны не-ts поля для агрегации', rules: { kind: 'string' } },
+  { short: 'TBL_ROLLUP_NEED_FIELDS', description: 'Table: схема должна содержать хотя бы одну не-ts колонку для rollup' },
+  { short: 'TBL_TIERS_EMPTY', description: 'Table: tiers — непустой массив' },
+  { short: 'TBL_TIERS_RES_POS', description: 'Table: tiers — resMs должно быть > 0' },
+  { short: 'TBL_TIERS_TTL_POS', description: 'Table: tiers — ttlMs должно быть > 0' },
+  { short: 'TBL_TIERS_RES_ASC', description: 'Table: tiers — разрешения должны неубывать (тонкий → грубый)' },
+  { short: 'TBL_TIERS_TTL_ASC', description: 'Table: tiers — ttl должны неубывать (по возрастанию возраста)' },
+  { short: 'TBL_JOURNAL_INDEX', description: 'Table: нет журнала', rules: { index: 'number' } },
+  { short: 'TBL_NOT_OPEN', description: 'Table: не открыта (вызван close())' },
+  { short: 'TBL_TAIL_COUNT', description: 'Table: tail — count >= 0' },
+  { short: 'TBL_TL_INTERVAL', description: 'Table: timeline — интервал: число мс > 0 или строка вида "15m"' },
+  { short: 'TBL_AGG_EXPRS', description: 'Table: aggregate() — exprs: непустой массив { field, fn }' },
+  { short: 'TBL_AGG_FIELD_EMPTY', description: 'Table: aggregate() — expr.field: непустое имя поля' },
+  { short: 'TBL_AGG_EXPR_FN', description: 'Table: aggregate() — expr.fn: min|max|sum|avg|count', rules: { fn: 'string' } },
+  { short: 'TBL_PCTL_LEVEL', description: 'Table: percentile() — level: число в (0, 1)', rules: { level: 'string' } },
+  { short: 'TBL_ROLLUP_NO_TIERS', description: 'Table: rollup() — таблица без retention (нет тиров)' },
+  { short: 'TBL_ROLLUP_NOW', description: 'Table: rollup(now) — now: конечное число (мс)' },
+  { short: 'TBL_ROLLUP_ONE_NO_TIERS', description: 'Table: rollupOne() — таблица без retention (нет тиров)' },
+  { short: 'TBL_ROLLUP_ONE_NOW', description: 'Table: rollupOne(now) — now: конечное число (мс)' },
+  { short: 'TBL_ROLLUP_ONE_RES', description: 'Table: rollupOne() — res не совпадает с тиром (или тир 0)', rules: { res: 'number' } },
+  { short: 'TBL_NO_STORAGE', description: 'Table: def.storage не задан (нет retention-тиров кодирования)' },
+]);
 
 // Минимальный структурный интерфейс хранилища (Store из store.ts подходит
 // без импорта — исключает циклическую зависимость store.ts ↔ table.ts).
@@ -112,44 +162,44 @@ export interface RollupOneReport {
 export function parseRetention(retention: string): ResolutionTier[] {
   const s = String(retention).trim();
   if (!s) {
-    throw new RangeError('Table: retention — непустая строка, например "5s:1d,15s:1w,1m:1mon"');
+    throw ErrorManager.make('TBL_RETENTION_STRING');
   }
   const parts = s.split(',').map(p => p.trim()).filter(p => p.length > 0);
   if (parts.length === 0) {
-    throw new RangeError('Table: retention — хотя бы один тир вида "res:ttl"');
+    throw ErrorManager.make('TBL_RETENTION_EMPTY');
   }
   const tiers: ResolutionTier[] = [];
   for (const part of parts) {
     const m = part.match(/^(\S+):(\S+)$/);
     if (!m) {
-      throw new RangeError(`Table: retention — тир в формате "res:ttl" (получено "${part}")`);
+      throw ErrorManager.make('TBL_RETENTION_TIER_FORMAT', { part });
     }
     let resMs: number;
     let ttlMs: number;
     try {
       resMs = Interval.parseInterval(m[1]);
     } catch (e) {
-      throw new RangeError(`Table: retention — разрешение "${m[1]}": ${(e as Error).message}`);
+      throw ErrorManager.make('TBL_RETENTION_RES', { res: m[1], message: (e as Error).message });
     }
     try {
       ttlMs = Interval.parseInterval(m[2]);
     } catch (e) {
-      throw new RangeError(`Table: retention — ttl "${m[2]}": ${(e as Error).message}`);
+      throw ErrorManager.make('TBL_RETENTION_TTL', { ttl: m[2], message: (e as Error).message });
     }
     if (!Number.isFinite(resMs) || resMs <= 0) {
-      throw new RangeError(`Table: retention — res должно быть > 0 (получено "${part}")`);
+      throw ErrorManager.make('TBL_RETENTION_RES_POS', { part });
     }
     if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
-      throw new RangeError(`Table: retention — ttl должно быть > 0 (получено "${part}")`);
+      throw ErrorManager.make('TBL_RETENTION_TTL_POS', { part });
     }
     tiers.push({ resMs, ttlMs });
   }
   for (let i = 1; i < tiers.length; i++) {
     if (tiers[i].resMs < tiers[i - 1].resMs) {
-      throw new RangeError('Table: retention — разрешения должны неубывать слева направо (тонкий → грубый)');
+      throw ErrorManager.make('TBL_RETENTION_RES_ASC');
     }
     if (tiers[i].ttlMs < tiers[i - 1].ttlMs) {
-      throw new RangeError('Table: retention — ttl должны неубывать слева направо');
+      throw ErrorManager.make('TBL_RETENTION_TTL_ASC');
     }
   }
   return tiers;
@@ -192,20 +242,20 @@ export class Table {
 
   constructor(store: TableStore, name: string, def: AnyTableDef) {
     if (typeof name !== 'string' || name.length === 0) {
-      throw new RangeError('Table: name — непустая строка');
+      throw ErrorManager.make('TBL_NAME_EMPTY');
     }
     if (name.includes('/')) {
-      throw new RangeError('Table: name не должно содержать "/" (тиры создаются как <name>/r<res>)');
+      throw ErrorManager.make('TBL_NAME_SLASH');
     }
     if (!def || typeof def !== 'object') {
-      throw new RangeError('Table: def обязателен ({ columns: { … } })');
+      throw ErrorManager.make('TBL_DEF_REQUIRED');
     }
     if (def.name !== undefined && def.name !== name) {
-      throw new RangeError(`Table: name '${name}' не совпадает с def.name '${def.name}'`);
+      throw ErrorManager.make('TBL_NAME_MISMATCH', { name, defName: String(def.name) });
     }
     const columns = def.columns;
     if (!columns || typeof columns !== 'object' || Object.keys(columns).length === 0) {
-      throw new RangeError('Table: def.columns — непустая схема { поле: тип }');
+      throw ErrorManager.make('TBL_COLUMNS_EMPTY');
     }
     this.store = store;
     this.name = name;
@@ -221,10 +271,10 @@ export class Table {
     if (this.kind !== 'log') {
       const key = (def as { key?: string[] }).key;
       if (!Array.isArray(key) || key.length === 0 || key.some(f => typeof f !== 'string' || f.length === 0)) {
-        throw new RangeError(`Table: kind '${this.kind}' — def.key: непустой массив полей ключа`);
+        throw ErrorManager.make('TBL_KEY_EMPTY', { kind: this.kind });
       }
       for (const f of key) {
-        if (!(f in schema)) throw new RangeError(`Table: kind '${this.kind}' — ключ '${f}' не в схеме`);
+        if (!(f in schema)) throw ErrorManager.make('TBL_KEY_NOT_IN_SCHEMA', { kind: this.kind, field: f });
       }
     }
 
@@ -234,9 +284,9 @@ export class Table {
       agg = Table._defaultAgg(this.kind, schema, def);
     }
     for (const [f, fn] of Object.entries(agg)) {
-      if (!(f in schema)) throw new RangeError(`Table: agg.${f} — поле не найдено в columns`);
+      if (!(f in schema)) throw ErrorManager.make('TBL_AGG_FIELD', { field: f });
       if (!isAggFn(fn)) {
-        throw new RangeError(`Table: agg.${f} — fn min|max|sum|avg|count (получено ${String(fn)})`);
+        throw ErrorManager.make('TBL_AGG_FN', { field: f, fn: String(fn) });
       }
     }
     this.agg = agg;
@@ -244,7 +294,7 @@ export class Table {
     // --- размеры rollup ----------------------------------------------------
     if (def.dims && def.dims.length > 0) {
       for (const f of def.dims) {
-        if (!(f in schema)) throw new RangeError(`Table: dims — поле "${f}" не найдено в columns`);
+        if (!(f in schema)) throw ErrorManager.make('TBL_DIMS_FIELD', { field: f });
       }
       this.dims = def.dims.slice();
     } else {
@@ -265,7 +315,7 @@ export class Table {
     this.autoPurge = def.autoPurge ?? true;
     const minInterval = def.maintenanceMinIntervalMs ?? DEFAULT_MAINTENANCE_INTERVAL_MS;
     if (minInterval < 0 || !Number.isFinite(minInterval)) {
-      throw new RangeError('Table: maintenanceMinIntervalMs — число >= 0');
+      throw ErrorManager.make('TBL_MAINT_MIN_INTERVAL');
     }
     this.maintenanceMinIntervalMs = minInterval;
     // Первое авто-обслуживание не раньше, чем через maintenanceMinIntervalMs
@@ -366,32 +416,32 @@ export class Table {
       if (Object.keys(out).length > 0) return out;
       const first = Object.keys(schema).find(f => f !== 'ts');
       if (first) return { [first]: 'sum' };
-      throw new RangeError(`Table: kind '${kind}' — нужны не-ts поля для агрегации`);
+      throw ErrorManager.make('TBL_AGG_NEED_FIELDS', { kind });
     }
     const first = Object.keys(schema).find(f => f !== 'ts');
     if (!first) {
-      throw new RangeError('Table: схема должна содержать хотя бы одну не-ts колонку для rollup');
+      throw ErrorManager.make('TBL_ROLLUP_NEED_FIELDS');
     }
     return { [first]: 'avg' };
   }
 
   /** Валидирует явный массив тиров (res/ttl > 0, неубывающие). */
   static validateTiers(tiers: ResolutionTier[]): void {
-    if (!tiers || tiers.length === 0) throw new RangeError('Table: tiers — непустой массив');
+    if (!tiers || tiers.length === 0) throw ErrorManager.make('TBL_TIERS_EMPTY');
     for (const t of tiers) {
       if (!Number.isFinite(t.resMs) || t.resMs <= 0) {
-        throw new RangeError('Table: tiers — resMs должно быть > 0');
+        throw ErrorManager.make('TBL_TIERS_RES_POS');
       }
       if (!Number.isFinite(t.ttlMs) || t.ttlMs <= 0) {
-        throw new RangeError('Table: tiers — ttlMs должно быть > 0');
+        throw ErrorManager.make('TBL_TIERS_TTL_POS');
       }
     }
     for (let i = 1; i < tiers.length; i++) {
       if (tiers[i].resMs < tiers[i - 1].resMs) {
-        throw new RangeError('Table: tiers — разрешения должны неубывать (тонкий → грубый)');
+        throw ErrorManager.make('TBL_TIERS_RES_ASC');
       }
       if (tiers[i].ttlMs < tiers[i - 1].ttlMs) {
-        throw new RangeError('Table: tiers — ttl должны неубывать (по возрастанию возраста)');
+        throw ErrorManager.make('TBL_TIERS_TTL_ASC');
       }
     }
   }
@@ -411,13 +461,13 @@ export class Table {
 
   /** Имя журнала тира (для отладки): одиночный режим — <name>, тир — <name>/r<resMs>. */
   journalName(i: number): string {
-    if (i < 0 || i >= this.journals.length) throw new RangeError(`Table: нет журнала ${i}`);
+    if (i < 0 || i >= this.journals.length) throw ErrorManager.make('TBL_JOURNAL_INDEX', { index: i });
     return this.journalNames[i];
   }
 
   /** Открытый журнал под индексом (0 — самый тонкий/единственный). */
   journal(i: number): Journal {
-    if (i < 0 || i >= this.journals.length) throw new RangeError(`Table: нет журнала ${i}`);
+    if (i < 0 || i >= this.journals.length) throw ErrorManager.make('TBL_JOURNAL_INDEX', { index: i });
     return this.journals[i];
   }
 
@@ -473,7 +523,7 @@ export class Table {
   }
 
   private _assertOpen(): void {
-    if (!this.isOpen) throw new Error('Table: не открыта (вызван close())');
+    if (!this.isOpen) throw ErrorManager.make('TBL_NOT_OPEN');
   }
 
   // --------------------------------------------------
@@ -530,7 +580,7 @@ export class Table {
   /** Последние `count` строк (по ts). Одиночный журнал — прямая делегация. */
   tail(count: number): Row[] {
     this._assertOpen();
-    if (count < 0) throw new RangeError('Table: tail — count >= 0');
+    if (count < 0) throw ErrorManager.make('TBL_TAIL_COUNT');
     if (!this.tiers) return this.journals[0].tail(count);
     return this.allRows().slice(-count);
   }
@@ -547,7 +597,7 @@ export class Table {
     const now = this.now();
     const [start, end] = Interval.period(opts.start ?? 0, opts.end ?? now, now);
     if (opts.agg || opts.groupBy) {
-      throw new SqlError('Table: scan — agg/groupBy в тир-режиме: используйте aggregate()/sql()');
+      throw ErrorManager.make('TBL_SCAN_AGG');
     }
     let rows = this.query(start, end);
     if (opts.where && opts.where.length > 0) {
@@ -570,14 +620,14 @@ export class Table {
     if (head === 'INSERT') {
       const ins = Sql.parseInsert(query);
       if (ins.name !== this.name && !ins.name.startsWith(`${this.name}/`)) {
-        throw new SqlError(`SQL: INSERT INTO ${ins.name} — не таблица '${this.name}'`);
+        throw ErrorManager.make('TBL_INSERT_NAME', { name: ins.name, table: this.name });
       }
       for (const row of ins.rows) this.append(row);
       return ins.rows.length;
     }
     const opts = Sql.parse(query);
     if (opts.table !== undefined && opts.table !== this.name) {
-      throw new SqlError(`SQL: таблица '${opts.table}' — это '${this.name}'`);
+      throw ErrorManager.make('TBL_TABLE_NAME', { table: opts.table, name: this.name });
     }
     if (!this.tiers) return this.journals[0].scan(opts);
 
@@ -587,19 +637,19 @@ export class Table {
     // Агрегации (без GROUP BY) — через aggregate().
     if (opts.agg) {
       if (opts.groupBy) {
-        throw new SqlError('SQL: GROUP BY в тир-режиме — пока не поддерживается');
+        throw ErrorManager.make('TBL_GROUP_BY_TIER');
       }
       const exprs: AggregateExpr[] = [];
       for (const [f, fns] of Object.entries(opts.agg)) {
         for (const fn of fns) exprs.push({ field: f, fn });
       }
       if (opts.where && opts.where.length > 0) {
-        throw new SqlError('SQL: WHERE + агрегации в тир-режиме — пока не поддерживаются');
+        throw ErrorManager.make('TBL_WHERE_AGG_TIER');
       }
       return this.aggregate(start, end, exprs);
     }
     if (opts.groupBy) {
-      throw new SqlError('SQL: GROUP BY в тир-режиме — пока не поддерживается');
+      throw ErrorManager.make('TBL_GROUP_BY_TIER');
     }
 
     let rows = this.query(start, end);
@@ -640,7 +690,7 @@ export class Table {
       case 'isNull': return v === null || v === undefined;
       case 'isNotNull': return v !== null && v !== undefined;
     }
-    throw new SqlError(`SQL: where — неизвестный оператор '${w.op}'`);
+    throw ErrorManager.make('TBL_WHERE_OP', { op: String(w.op) });
   }
 
   /**
@@ -656,7 +706,7 @@ export class Table {
     this._assertOpen();
     const int = typeof interval === 'number' ? interval : Interval.parseInterval(interval);
     if (!Number.isFinite(int) || int <= 0) {
-      throw new RangeError('Table: timeline — интервал: число мс > 0 или строка вида "15m"');
+      throw ErrorManager.make('TBL_TL_INTERVAL');
     }
     const [startTs, endTs] = Interval.period(start, end, this.now());
 
@@ -696,14 +746,14 @@ export class Table {
     exprs: AggregateExpr[],
   ): Record<string, number | null> {
     if (!Array.isArray(exprs) || exprs.length === 0) {
-      throw new RangeError('Table: aggregate() — exprs: непустой массив { field, fn }');
+      throw ErrorManager.make('TBL_AGG_EXPRS');
     }
     for (const e of exprs) {
       if (!e || typeof e.field !== 'string' || e.field.length === 0) {
-        throw new RangeError('Table: aggregate() — expr.field: непустое имя поля');
+        throw ErrorManager.make('TBL_AGG_FIELD_EMPTY');
       }
       if (!isAggFn(e.fn)) {
-        throw new RangeError(`Table: aggregate() — expr.fn: min|max|sum|avg|count (получено ${String(e.fn)})`);
+        throw ErrorManager.make('TBL_AGG_EXPR_FN', { fn: String(e.fn) });
       }
     }
     const rows = this.query(start, end);
@@ -738,7 +788,7 @@ export class Table {
     const lv = Array.isArray(levels) ? levels.slice() : [levels];
     for (const q of lv) {
       if (typeof q !== 'number' || !Number.isFinite(q) || q <= 0 || q >= 1) {
-        throw new RangeError(`Table: percentile() — level: число в (0, 1) (получено ${String(q)})`);
+        throw ErrorManager.make('TBL_PCTL_LEVEL', { level: String(q) });
       }
     }
     const rows = this.query(start, end);
@@ -771,10 +821,10 @@ export class Table {
   rollup(now?: number): RollupReport {
     this._assertOpen();
     if (!this.tiers) {
-      throw new RangeError('Table: rollup() — таблица без retention (нет тиров)');
+      throw ErrorManager.make('TBL_ROLLUP_NO_TIERS');
     }
     const nowTs = typeof now === 'number' ? now : this.now();
-    if (!Number.isFinite(nowTs)) throw new RangeError('Table: rollup(now) — now: конечное число (мс)');
+    if (!Number.isFinite(nowTs)) throw ErrorManager.make('TBL_ROLLUP_NOW');
 
     let pairs = 0;
     let rolledRows = 0;
@@ -832,7 +882,7 @@ export class Table {
   rollupOne(cfgOrNow: RollupConfig | number, now?: number): RollupOneReport {
     this._assertOpen();
     if (!this.tiers) {
-      throw new RangeError('Table: rollupOne() — таблица без retention (нет тиров)');
+      throw ErrorManager.make('TBL_ROLLUP_ONE_NO_TIERS');
     }
     let cfg: RollupConfig;
     let nowTs: number;
@@ -844,11 +894,11 @@ export class Table {
       cfg = cfgOrNow;
       nowTs = now !== undefined ? now : this.now();
     }
-    if (!Number.isFinite(nowTs)) throw new RangeError('Table: rollupOne(now) — now: конечное число (мс)');
+    if (!Number.isFinite(nowTs)) throw ErrorManager.make('TBL_ROLLUP_ONE_NOW');
 
     const targetIdx = this.tiers.findIndex(t => t.resMs === cfg.res);
     if (targetIdx <= 0) {
-      throw new RangeError(`Table: rollupOne() — res ${cfg.res} не совпадает с тиром (или тир 0)`);
+      throw ErrorManager.make('TBL_ROLLUP_ONE_RES', { res: cfg.res });
     }
     const fineIdx = targetIdx - 1;
     const fine = this.journals[fineIdx];
@@ -984,14 +1034,14 @@ export class Table {
   /** Статус retention-тиров кодирования (по первому журналу). */
   storageStatus(now?: number): TierStatus[] {
     this._assertOpen();
-    if (!this.hasStorage) throw new RangeError('Table: def.storage не задан (нет retention-тиров кодирования)');
+    if (!this.hasStorage) throw ErrorManager.make('TBL_NO_STORAGE');
     return this.engines[0].status(now);
   }
 
   /** План retention-кодирования (dry-run) по всем журналам. */
   storagePlan(now?: number): ConversionPlan[] {
     this._assertOpen();
-    if (!this.hasStorage) throw new RangeError('Table: def.storage не задан (нет retention-тиров кодирования)');
+    if (!this.hasStorage) throw ErrorManager.make('TBL_NO_STORAGE');
     let out: ConversionPlan[] = [];
     for (const e of this.engines) out = out.concat(e.plan(now));
     return out;
@@ -1000,7 +1050,7 @@ export class Table {
   /** Применить retention-кодирование (перекодирование + слияние блоков). */
   storageApply(now?: number): ApplyReport {
     this._assertOpen();
-    if (!this.hasStorage) throw new RangeError('Table: def.storage не задан (нет retention-тиров кодирования)');
+    if (!this.hasStorage) throw ErrorManager.make('TBL_NO_STORAGE');
     let reencoded = 0;
     let merged = 0;
     let skipped = 0;
@@ -1024,7 +1074,7 @@ export class Table {
   /** Слияние блоков в одном тире кодирования (id из RetentionEngine.defaultTiers()). */
   storageCompactTier(tierId: string, now?: number) {
     this._assertOpen();
-    if (!this.hasStorage) throw new RangeError('Table: def.storage не задан (нет retention-тиров кодирования)');
+    if (!this.hasStorage) throw ErrorManager.make('TBL_NO_STORAGE');
     let mergedGroups = 0;
     let beforeSegments = 0;
     let afterSegments = 0;

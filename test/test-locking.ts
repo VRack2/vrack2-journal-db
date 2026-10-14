@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/Journal.ts';
 import { Store } from '../src/Store.ts';
+import ErrorManager from '../src/errors/ErrorManager.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -136,17 +137,17 @@ const lockPathOf = (name: string): string => path.join(baseDir, 'journals', name
   try {
     new Journal(baseDir, { lock: 'bogus' as never });
   } catch (e) {
-    threw = e instanceof RangeError;
+    threw = ErrorManager.isError(e);
   }
-  assert(threw, "Journal: lock:'bogus' → RangeError");
+  assert(threw, "Journal: lock:'bogus' → ошибка");
 
   threw = false;
   try {
     new Store(baseDir, { lock: 'bogus' as never });
   } catch (e) {
-    threw = e instanceof RangeError;
+    threw = ErrorManager.isError(e);
   }
-  assert(threw, "Store: lock:'bogus' → RangeError");
+  assert(threw, "Store: lock:'bogus' → ошибка");
 
   // Store прокидывает режим в создаваемые журналы
   const store = new Store(baseDir, { lock: 'off' });

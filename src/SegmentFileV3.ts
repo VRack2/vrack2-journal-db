@@ -32,6 +32,13 @@ import type {
   Metadata,
   Schema,
 } from './types.ts';
+import ErrorManager from './errors/ErrorManager.ts';
+
+ErrorManager.registerMany('SegmentFileV3', [
+  { short: 'SFW3_NOT_V3', description: 'decodeV3: буфер не является сегментом v3' },
+  { short: 'SFW3_TOO_SMALL', description: 'Повреждённый сегмент v3: файл слишком мал' },
+  { short: 'SFW3_CRC', description: 'Повреждённый сегмент v3: контрольная сумма не совпадает' },
+]);
 
 const V3 = 3;
 
@@ -140,10 +147,10 @@ export class SegmentFileV3 {
   /** Буфер v3 → в-памяти сегмент. */
   static decode(buf: Buffer): Segment {
     if (!this.isV3(buf)) {
-      throw new Error('decodeV3: буфер не является сегментом v3');
+      throw ErrorManager.make('SFW3_NOT_V3');
     }
     if (buf.length < 12) {
-      throw new Error('Повреждённый сегмент v3: файл слишком мал');
+      throw ErrorManager.make('SFW3_TOO_SMALL');
     }
 
     // CRC32 до разжатия — битые файлы не читаем
@@ -151,7 +158,7 @@ export class SegmentFileV3 {
     const storedCrc = buf.readUInt32LE(buf.length - 4);
     const actualCrc = zlib.crc32(body) >>> 0;
     if (storedCrc !== actualCrc) {
-      throw new Error('Повреждённый сегмент v3: контрольная сумма не совпадает');
+      throw ErrorManager.make('SFW3_CRC');
     }
 
     const headerLen = buf.readUInt32LE(8);

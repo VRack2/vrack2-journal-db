@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/Journal.ts';
 import { SegmentFileV2 } from '../src/SegmentFileV2.ts';
+import ErrorManager from '../src/errors/ErrorManager.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -292,10 +293,10 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   const empty = q.query('95', '100');
   assert(empty.length === 0, `query('95','100'): пусто (факт ${empty.length})`);
 
-  // некорректная строка → RangeError
+  // некорректная строка → ошибка
   let threw = false;
-  try { q.query('yesterday', 'now'); } catch (e) { threw = e instanceof RangeError; }
-  assert(threw, "query('yesterday','now') → RangeError");
+  try { q.query('yesterday', 'now'); } catch (e) { threw = ErrorManager.isError(e); }
+  assert(threw, "query('yesterday','now') → ошибка");
 
   q.close();
 }

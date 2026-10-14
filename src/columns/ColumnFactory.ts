@@ -10,6 +10,11 @@ import { AutoColumn } from './AutoColumn.ts';
 import { CatchAllColumn } from './CatchAllColumn.ts';
 import { Column } from './Column.ts';
 import type { ColumnType } from '../types.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
+
+ErrorManager.registerMany('ColumnFactory', [
+  { short: 'COL_TYPE_UNKNOWN', description: 'Unknown column type', rules: { type: 'string' } },
+]);
 
 export class ColumnFactory {
   /** Реестр: имя типа → класс. */
@@ -25,7 +30,7 @@ export class ColumnFactory {
   /** Создаёт колонку по имени типа. */
   static create(type: ColumnType): Column {
     const C = this.types[type];
-    if (!C) throw new Error(`Unknown column type: ${type}`);
+    if (!C) throw ErrorManager.make('COL_TYPE_UNKNOWN', { type: String(type) });
     return new C();
   }
 }

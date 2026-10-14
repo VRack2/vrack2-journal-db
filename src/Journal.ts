@@ -27,7 +27,50 @@ import { Compression } from './Compression.ts';
 import { Interval } from './Interval.ts';
 import { RetentionEngine } from './RetentionEngine.ts';
 import { Sql } from './Sql.ts';
-import { SqlError } from './SqlError.ts';
+import ErrorManager from './errors/ErrorManager.ts';
+
+ErrorManager.registerMany('Journal', [
+  { short: 'JRN_OPT_COMPACT_MIN', description: 'Journal: compactMinSegments должно быть целым числом >= 2' },
+  { short: 'JRN_OPT_WAL_BATCH', description: 'Journal: walBatchSize должно быть целым числом >= 1' },
+  { short: 'JRN_OPT_LOCK', description: "Journal: lock должно быть 'pid' или 'off'" },
+  { short: 'JRN_OPT_FORMAT', description: "Journal: format должно быть 'v2' или 'v3'" },
+  { short: 'JRN_OPT_COMPRESSION', description: "Journal: compression должно быть 'gzip' или 'zstd'" },
+  { short: 'JRN_ALREADY_OPEN', description: 'Journal already open', rules: { name: 'string' } },
+  { short: 'JRN_NOT_OPEN', description: 'Journal not open. Call open() first.' },
+  { short: 'JRN_MERGE_EMPTY', description: 'mergeClosedSegments: пустой список' },
+  { short: 'JRN_TL_INTERVAL', description: 'Journal: timeline() — interval: число (мс) или строка вида 1h/30m' },
+  { short: 'JRN_TL_INTERVAL_POS', description: 'Journal: timeline() — interval должно быть > 0 (мс)' },
+  { short: 'JRN_TL_PERIOD', description: 'Journal: timeline() — период: [start, end] (мс) или строка вида now-7d:now' },
+  { short: 'JRN_AGG_EXPRS', description: 'Journal: aggregate() — exprs: непустой массив { field, fn }' },
+  { short: 'JRN_AGG_FIELD', description: 'Journal: aggregate() — expr.field: непустое имя поля' },
+  { short: 'JRN_AGG_FN', description: 'Journal: aggregate() — expr.fn: min|max|sum|avg|count', rules: { fn: 'string' } },
+  { short: 'JRN_PCTL_FIELD', description: 'Journal: percentile() — field: непустое имя поля' },
+  { short: 'JRN_PCTL_LEVEL', description: 'Journal: percentile() — level: число в (0, 1)', rules: { level: 'string' } },
+  { short: 'JRN_DS_FIELD', description: 'Journal: downsample() — field: непустое имя поля' },
+  { short: 'JRN_DS_FNS', description: 'Journal: downsample() — fns: непустой массив min|max|sum|avg|count' },
+  { short: 'JRN_DS_FN', description: 'Journal: downsample() — fn: min|max|sum|avg|count', rules: { fn: 'string' } },
+  { short: 'JRN_DS_BUCKET', description: 'Journal: downsample() — bucketMs: число (мс) или строка вида 15m/1h' },
+  { short: 'JRN_DS_BUCKET_POS', description: 'Journal: downsample() — bucketMs должно быть > 0 (мс)' },
+  { short: 'JRN_INSERT_NAME', description: 'INSERT INTO — журнал открыт как другое имя', rules: { name: 'string', journal: 'string' } },
+  { short: 'JRN_FROM_NAME', description: 'SELECT FROM — журнал открыт как другое имя', rules: { table: 'string', journal: 'string' } },
+  { short: 'JRN_SCAN_RANGE', description: 'Journal: scan() — start должен быть <= end' },
+  { short: 'JRN_SCAN_WHERE_FIELD', description: 'Journal: scan() — where[].field: непустое имя поля' },
+  { short: 'JRN_SCAN_WHERE_OP', description: 'Journal: scan() — where[].op: допустимые операторы', rules: { op: 'string', allowed: 'string' } },
+  { short: 'JRN_SCAN_WHERE_IN', description: 'Journal: scan() — where[].value для in/nin: массив значений' },
+  { short: 'JRN_SCAN_AGG_FIELD', description: 'Journal: scan() — agg: непустое имя поля' },
+  { short: 'JRN_SCAN_AGG_FNS', description: 'Journal: scan() — agg.поле: непустой массив функций' },
+  { short: 'JRN_SCAN_AGG_FN', description: 'Journal: scan() — agg.поле: min|max|sum|avg|count', rules: { fn: 'string' } },
+  { short: 'JRN_SCAN_GROUPBY_AGG', description: 'Journal: scan() — groupBy требует agg' },
+  { short: 'JRN_SCAN_GROUPBY', description: 'Journal: scan() — groupBy: непустое имя поля' },
+  { short: 'JRN_SCAN_SELECT', description: 'Journal: scan() — select: непустой список полей' },
+  { short: 'JRN_SCAN_SELECT_FIELD', description: 'Journal: scan() — select[].field: непустое имя поля' },
+  { short: 'JRN_SCAN_ORDER', description: "Journal: scan() — order: 'asc' или 'desc'" },
+  { short: 'JRN_SCAN_LIMIT', description: 'Journal: scan() — limit: целое число >= 0' },
+  { short: 'JRN_SCAN_OFFSET', description: 'Journal: scan() — offset: целое число >= 0' },
+  { short: 'JRN_SEG_UNKNOWN', description: 'Неизвестный сегмент', rules: { id: 'string' } },
+  { short: 'JRN_SEG_READ', description: 'Не удалось прочитать сегмент', rules: { file: 'string', message: 'string' } },
+  { short: 'JRN_LOCKED', description: "Журнал заблокирован процессом. Если других владельцев нет, откройте журнал с { lock: 'off' } или удалите .lock", rules: { pid: 'number', lockPath: 'string' } },
+]);
 import { ENGINE_META_KEY, Descriptor } from './compaction/Descriptor.ts';
 import { Log } from './compaction/Log.ts';
 import { Upsert } from './compaction/Upsert.ts';
@@ -320,24 +363,24 @@ export class Journal {
     this.autoCompact = opts.autoCompact ?? true;
     const minSeg = opts.compactMinSegments ?? DEFAULT_COMPACT_MIN_SEGMENTS;
     if (!Number.isInteger(minSeg) || minSeg < 2) {
-      throw new RangeError('Journal: compactMinSegments должно быть целым числом >= 2');
+      throw ErrorManager.make('JRN_OPT_COMPACT_MIN');
     }
     this.compactMinSegments = minSeg;
     const batch = opts.walBatchSize ?? DEFAULT_WAL_BATCH_ROWS;
     if (!Number.isInteger(batch) || batch < 1) {
-      throw new RangeError('Journal: walBatchSize должно быть целым числом >= 1');
+      throw ErrorManager.make('JRN_OPT_WAL_BATCH');
     }
     this.walBatchSize = batch;
 
     const lock = opts.lock ?? 'pid';
     if (lock !== 'pid' && lock !== 'off') {
-      throw new RangeError("Journal: lock должно быть 'pid' или 'off'");
+      throw ErrorManager.make('JRN_OPT_LOCK');
     }
     this.lockMode = lock;
 
     const format = opts.format ?? 'v2';
     if (format !== 'v2' && format !== 'v3') {
-      throw new RangeError("Journal: format должно быть 'v2' или 'v3'");
+      throw ErrorManager.make('JRN_OPT_FORMAT');
     }
     this.format = format;
 
@@ -345,7 +388,7 @@ export class Journal {
     // переопределяет. На старых Node — gzip.
     const compression = opts.compression ?? Compression.default();
     if (compression !== 'gzip' && compression !== 'zstd') {
-      throw new RangeError("Journal: compression должно быть 'gzip' или 'zstd'");
+      throw ErrorManager.make('JRN_OPT_COMPRESSION');
     }
     this.compression = compression;
 
@@ -382,7 +425,7 @@ export class Journal {
 
   open(name: string, schema: Schema, metadata: Metadata = {}): void {
     if (this.isOpen) {
-      throw new Error(`Journal already open: ${this.name}`);
+      throw ErrorManager.make('JRN_ALREADY_OPEN', { name: this.name });
     }
 
     this.name = name;
@@ -440,7 +483,7 @@ export class Journal {
 
   close(): void {
     if (!this.isOpen) {
-      throw new Error('Journal not open');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
     // Сначала WAL целиком на диске: если активных строк нет (flush — no-op),
     // они всё равно переживут закрытие и будут проиграны при следующем open.
@@ -458,7 +501,7 @@ export class Journal {
 
   append(row: Row): void {
     if (!this.isOpen || !this.activeSegment) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
 
     // WAL: строка копится в буфере и уходит на диск пачкой (одним системным
@@ -537,7 +580,7 @@ export class Journal {
    */
   clear(): void {
     if (!this.isOpen) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
 
     const dir = this.journalPath();
@@ -581,7 +624,7 @@ export class Journal {
    */
   compact(): CompactResult {
     if (!this.isOpen) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
 
     // Lazy-миграция (Фаза 5): старые v1/v2 сегменты → v3 перед слиянием.
@@ -686,7 +729,7 @@ export class Journal {
    * ```
    */
   migrateToV3(): { migrated: number; logicalRows: number } {
-    if (!this.isOpen) throw new Error('Journal not open. Call open() first.');
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     if (this.format !== 'v3') return { migrated: 0, logicalRows: 0 };
 
     const encode = (s: Segment) => SegmentFileV3.encode(s, { compression: this.compression, codecs: this.codecs });
@@ -716,7 +759,7 @@ export class Journal {
    */
   purge(beforeTs: number | string): PurgeResult {
     if (!this.isOpen) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
     // Граница: число (мс) или строка вида 'now-1d' (удалить всё старше N дней назад)
     const before = Interval.resolve(beforeTs);
@@ -813,13 +856,13 @@ export class Journal {
 
   /** ID закрытых сегментов в хронологическом порядке. */
   closedSegmentIds(): string[] {
-    if (!this.isOpen) throw new Error('Journal not open. Call open() first.');
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     return this._sortedClosedIds();
   }
 
   /** Закрытый сегмент из кэша/диска (для RetentionEngine). */
   getClosedSegment(id: string): Segment {
-    if (!this.isOpen) throw new Error('Journal not open. Call open() first.');
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     return this._loadClosedSegment(id);
   }
 
@@ -860,7 +903,7 @@ export class Journal {
    * Возвращает имя нового файла.
    */
   reencodeClosedSegment(id: string, encode: (seg: Segment) => Buffer): string {
-    if (!this.isOpen) throw new Error('Journal not open. Call open() first.');
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     const seg = this._loadClosedSegment(id);
     const fileName = `${id}${SEG_V3_EXT}`;
     const filePath = path.join(this.journalPath(), fileName);
@@ -883,9 +926,9 @@ export class Journal {
    * `encode` — как закодировать слитый сегмент (тир целевой).
    */
   mergeClosedSegments(ids: string[], encode: (seg: Segment) => Buffer): string {
-    if (!this.isOpen) throw new Error('Journal not open. Call open() first.');
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     const sorted = [...new Set(ids)];
-    if (sorted.length === 0) throw new RangeError('mergeClosedSegments: пустой список');
+    if (sorted.length === 0) throw ErrorManager.make('JRN_MERGE_EMPTY');
     const rows: Row[] = [];
     for (const id of sorted) {
       const seg = this._loadClosedSegment(id);
@@ -927,7 +970,7 @@ export class Journal {
    */
   timeline(interval: number | string, period: [number, number] | string): TimelineBucket[] {
     if (!this.isOpen) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
 
     // Интервал: число (мс) или строка вида '1h'/'30m' (VRackDB-совместимо)
@@ -935,12 +978,12 @@ export class Journal {
     if (typeof interval === 'string') {
       int = Interval.parseInterval(interval);
     } else if (typeof interval !== 'number' || !Number.isFinite(interval)) {
-      throw new RangeError('Journal: timeline() — interval: число (мс) или строка вида 1h/30m');
+      throw ErrorManager.make('JRN_TL_INTERVAL');
     } else {
       int = interval;
     }
     if (int <= 0) {
-      throw new RangeError('Journal: timeline() — interval должно быть > 0 (мс)');
+      throw ErrorManager.make('JRN_TL_INTERVAL_POS');
     }
 
     // Период: [start, end] в мс или строка вида 'now-7d:now'
@@ -949,7 +992,7 @@ export class Journal {
     if (typeof period === 'string') {
       [start, end] = Interval.period(period);
     } else if (!Array.isArray(period) || period.length < 2) {
-      throw new RangeError('Journal: timeline() — период: [start, end] (мс) или строка вида now-7d:now');
+      throw ErrorManager.make('JRN_TL_PERIOD');
     } else {
       [start, end] = Interval.period(period[0], period[1]);
     }
@@ -1031,17 +1074,17 @@ export class Journal {
     exprs: AggregateExpr[],
   ): Record<string, number | null> {
     if (!this.isOpen) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
     if (!Array.isArray(exprs) || exprs.length === 0) {
-      throw new RangeError('Journal: aggregate() — exprs: непустой массив { field, fn }');
+      throw ErrorManager.make('JRN_AGG_EXPRS');
     }
     for (const e of exprs) {
       if (!e || typeof e.field !== 'string' || e.field.length === 0) {
-        throw new RangeError('Journal: aggregate() — expr.field: непустое имя поля');
+        throw ErrorManager.make('JRN_AGG_FIELD');
       }
       if (!isAggFn(e.fn)) {
-        throw new RangeError(`Journal: aggregate() — expr.fn: min|max|sum|avg|count (получено ${String(e.fn)})`);
+        throw ErrorManager.make('JRN_AGG_FN', { fn: String(e.fn) });
       }
     }
 
@@ -1112,15 +1155,15 @@ export class Journal {
     levels: number | number[],
   ): Record<string, number | null> {
     if (!this.isOpen) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
     if (typeof field !== 'string' || field.length === 0) {
-      throw new RangeError('Journal: percentile() — field: непустое имя поля');
+      throw ErrorManager.make('JRN_PCTL_FIELD');
     }
     const lv = Array.isArray(levels) ? levels.slice() : [levels];
     for (const q of lv) {
       if (typeof q !== 'number' || !Number.isFinite(q) || q <= 0 || q >= 1) {
-        throw new RangeError(`Journal: percentile() — level: число в (0, 1) (получено ${String(q)})`);
+        throw ErrorManager.make('JRN_PCTL_LEVEL', { level: String(q) });
       }
     }
     const [start, end] = Interval.period(startTs, endTs);
@@ -1161,17 +1204,17 @@ export class Journal {
     fns: AggFn[],
   ): DownsampleBucket[] {
     if (!this.isOpen) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
     if (typeof field !== 'string' || field.length === 0) {
-      throw new RangeError('Journal: downsample() — field: непустое имя поля');
+      throw ErrorManager.make('JRN_DS_FIELD');
     }
     if (!Array.isArray(fns) || fns.length === 0) {
-      throw new RangeError('Journal: downsample() — fns: непустой массив min|max|sum|avg|count');
+      throw ErrorManager.make('JRN_DS_FNS');
     }
     for (const fn of fns) {
       if (!isAggFn(fn)) {
-        throw new RangeError(`Journal: downsample() — fn: min|max|sum|avg|count (получено ${String(fn)})`);
+        throw ErrorManager.make('JRN_DS_FN', { fn: String(fn) });
       }
     }
 
@@ -1179,12 +1222,12 @@ export class Journal {
     if (typeof bucketMs === 'string') {
       bucket = Interval.parseInterval(bucketMs);
     } else if (typeof bucketMs !== 'number' || !Number.isFinite(bucketMs)) {
-      throw new RangeError('Journal: downsample() — bucketMs: число (мс) или строка вида 15m/1h');
+      throw ErrorManager.make('JRN_DS_BUCKET');
     } else {
       bucket = bucketMs;
     }
     if (bucket <= 0) {
-      throw new RangeError('Journal: downsample() — bucketMs должно быть > 0 (мс)');
+      throw ErrorManager.make('JRN_DS_BUCKET_POS');
     }
 
     const [start, end] = Interval.period(startTs, endTs);
@@ -1290,7 +1333,7 @@ export class Journal {
    */
   scan(opts: ScanOptions): Row[] {
     if (!this.isOpen) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
     const plan = this._compileScan(opts);
 
@@ -1532,18 +1575,18 @@ export class Journal {
    * этот журнал и возвращает число записанных строк; имя журнала в запросе
    * должно совпадать с именем открытого журнала.
    *
-   * Детали и синтаксис — см. Sql.ts. Бросает SqlError при ошибке синтаксиса.
+    * Детали и синтаксис — см. Sql.ts. Бросает ошибку (код JRN_ или SQL_) при ошибке синтаксиса.
    */
   sql(query: string): Row[] | number {
     if (!this.isOpen) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
     const head = query.trimStart();
     const firstWord = head.split(/\s+/, 1)[0].toUpperCase();
     if (firstWord === 'INSERT') {
       const ins = Sql.parseInsert(query);
       if (ins.name !== this.name) {
-        throw new SqlError(`SQL: INSERT INTO ${ins.name} — журнал открыт как '${this.name}'`);
+        throw ErrorManager.make('JRN_INSERT_NAME', { name: ins.name, journal: this.name });
       }
       for (const row of ins.rows) this.append(row);
       return ins.rows.length;
@@ -1551,7 +1594,7 @@ export class Journal {
     const opts = Sql.parse(query);
     const journalName = this.name ?? '';
     if (opts.table !== undefined && journalName !== opts.table && !journalName.startsWith(opts.table + '.')) {
-      throw new SqlError(`SQL: SELECT FROM ${opts.table} — журнал открыт как '${journalName}'`);
+      throw ErrorManager.make('JRN_FROM_NAME', { table: opts.table, journal: journalName });
     }
     return this.scan(opts);
   }
@@ -1561,7 +1604,7 @@ export class Journal {
     const start = opts.start !== undefined ? Interval.resolve(opts.start) : null;
     const end = opts.end !== undefined ? Interval.resolve(opts.end) : null;
     if (start !== null && end !== null && end < start) {
-      throw new RangeError('Journal: scan() — start должен быть <= end');
+      throw ErrorManager.make('JRN_SCAN_RANGE');
     }
 
     // where
@@ -1569,14 +1612,14 @@ export class Journal {
     if (opts.where) {
       for (const w of opts.where) {
         if (!w || typeof w.field !== 'string' || w.field.length === 0) {
-          throw new RangeError('Journal: scan() — where[].field: непустое имя поля');
+          throw ErrorManager.make('JRN_SCAN_WHERE_FIELD');
         }
         if (!isScanOp(w.op)) {
-          throw new RangeError(`Journal: scan() — where[].op: ${SCAN_OPS.join('|')} (получено ${String(w.op)})`);
+          throw ErrorManager.make('JRN_SCAN_WHERE_OP', { op: String(w.op), allowed: SCAN_OPS.join('|') });
         }
         if (w.op === 'in' || w.op === 'nin') {
           if (!Array.isArray(w.value)) {
-            throw new RangeError('Journal: scan() — where[].value для in/nin: массив значений');
+            throw ErrorManager.make('JRN_SCAN_WHERE_IN');
           }
         }
         where.push({ field: w.field, op: w.op, value: w.value ?? null });
@@ -1590,14 +1633,14 @@ export class Journal {
     if (agg) {
       for (const [field, fns] of Object.entries(opts.agg!)) {
         if (typeof field !== 'string' || field.length === 0) {
-          throw new RangeError('Journal: scan() — agg: непустое имя поля');
+          throw ErrorManager.make('JRN_SCAN_AGG_FIELD');
         }
         if (!Array.isArray(fns) || fns.length === 0) {
-          throw new RangeError('Journal: scan() — agg.поле: непустой массив функций');
+          throw ErrorManager.make('JRN_SCAN_AGG_FNS');
         }
         for (const fn of fns) {
           if (!isAggFn(fn)) {
-            throw new RangeError(`Journal: scan() — agg.поле: min|max|sum|avg|count (получено ${String(fn)})`);
+            throw ErrorManager.make('JRN_SCAN_AGG_FN', { fn: String(fn) });
           }
         }
         aggSpec.push({ field, fns });
@@ -1609,12 +1652,12 @@ export class Journal {
     let groupBy: string[] = [];
     if (opts.groupBy !== undefined) {
       if (!agg) {
-        throw new RangeError('Journal: scan() — groupBy требует agg');
+        throw ErrorManager.make('JRN_SCAN_GROUPBY_AGG');
       }
       const gb = Array.isArray(opts.groupBy) ? opts.groupBy : [opts.groupBy];
       for (const g of gb) {
         if (typeof g !== 'string' || g.length === 0) {
-          throw new RangeError('Journal: scan() — groupBy: непустое имя поля');
+          throw ErrorManager.make('JRN_SCAN_GROUPBY');
         }
       }
       groupBy = gb;
@@ -1627,11 +1670,11 @@ export class Journal {
         ? [...opts.select]
         : (this.schema ? Object.keys(this.schema) : []);
       if (select.length === 0) {
-        throw new RangeError('Journal: scan() — select: непустой список полей (схема пуста?)');
+        throw ErrorManager.make('JRN_SCAN_SELECT');
       }
       for (const f of select) {
         if (typeof f !== 'string' || f.length === 0) {
-          throw new RangeError('Journal: scan() — select[].field: непустое имя поля');
+          throw ErrorManager.make('JRN_SCAN_SELECT_FIELD');
         }
       }
     } else {
@@ -1641,7 +1684,7 @@ export class Journal {
     // order: agg — desc (top-k), raw — asc (хронология)
     const order = opts.order ?? (agg ? 'desc' : 'asc');
     if (order !== 'asc' && order !== 'desc') {
-      throw new RangeError("Journal: scan() — order: 'asc' или 'desc'");
+      throw ErrorManager.make('JRN_SCAN_ORDER');
     }
     const orderSign: 1 | -1 = order === 'asc' ? 1 : -1;
 
@@ -1649,12 +1692,12 @@ export class Journal {
     let limit: number | null = null;
     if (opts.limit !== undefined) {
       if (!Number.isInteger(opts.limit) || opts.limit < 0) {
-        throw new RangeError('Journal: scan() — limit: целое число >= 0');
+        throw ErrorManager.make('JRN_SCAN_LIMIT');
       }
       limit = opts.limit;
     }
     const offset = opts.offset !== undefined
-      ? (Number.isInteger(opts.offset) && opts.offset >= 0 ? opts.offset : (() => { throw new RangeError('Journal: scan() — offset: целое число >= 0'); })())
+      ? (Number.isInteger(opts.offset) && opts.offset >= 0 ? opts.offset : (() => { throw ErrorManager.make('JRN_SCAN_OFFSET'); })())
       : 0;
 
     // hasTsFilter — нужен ли диапазон ts в цикле (условия where по 'ts'
@@ -1772,7 +1815,7 @@ export class Journal {
    */
   tail(count: number): Row[] {
     if (!this.isOpen) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
     if (count <= 0) return [];
 
@@ -1816,7 +1859,7 @@ export class Journal {
    */
   page(limit: number, offset = 0, order: 'asc' | 'desc' = 'asc'): Row[] {
     if (!this.isOpen) {
-      throw new Error('Journal not open. Call open() first.');
+      throw ErrorManager.make('JRN_NOT_OPEN');
     }
     if (!Number.isInteger(limit) || limit < 1) return [];
     let skip = Number.isInteger(offset) && offset > 0 ? offset : 0;
@@ -1954,7 +1997,7 @@ export class Journal {
 
     const fileName = this.segmentIndex.get(id);
     if (!fileName) {
-      throw new Error(`Неизвестный сегмент: ${id}`);
+      throw ErrorManager.make('JRN_SEG_UNKNOWN', { id });
     }
 
     let seg: Segment;
@@ -1964,7 +2007,7 @@ export class Journal {
       seg = SegmentFile.read(buf);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
-      throw new Error(`Не удалось прочитать сегмент ${fileName}: ${message}`);
+      throw ErrorManager.make('JRN_SEG_READ', { file: fileName, message: String(message) });
     }
     // Кэшируем границы: для старых файлов без .meta это единственный способ,
     // и дальше query()/stats() смогут работать по этим данным.
@@ -2210,11 +2253,7 @@ export class Journal {
     }
 
     if (this._pidAlive(holderPid)) {
-      throw new Error(
-        `Журнал заблокирован процессом ${holderPid} (${lockPath}). ` +
-        'Если других владельцев действительно нет (например, умер worker_threads), ' +
-        "откройте журнал с { lock: 'off' } или удалите .lock"
-      );
+      throw ErrorManager.make('JRN_LOCKED', { pid: holderPid, lockPath });
     }
 
     fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, ts: Date.now() }));

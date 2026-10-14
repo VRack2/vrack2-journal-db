@@ -14,6 +14,8 @@
 //   'now-7d:now'                            — период [start, end] (→ мс)
 // ============================================================
 
+import ErrorManager from './errors/ErrorManager.ts';
+
 /** Единица времени → миллисекунды (маппинг совпадает с VRackDB: mon=30д, y=365д). */
 const UNIT_MS: Record<string, number> = {
   ms: 1,
@@ -25,6 +27,17 @@ const UNIT_MS: Record<string, number> = {
   mon: 2_592_000_000, // 30 дней
   y: 31_536_000_000   // 365 дней
 };
+
+ErrorManager.registerMany('Interval', [
+  { short: 'INT_UNIT_UNKNOWN', description: 'Interval: неизвестная единица (доступно: ms s m h d w mon y)', rules: { unit: 'string' } },
+  { short: 'INT_PARSE', description: 'Interval: некорректный интервал, примеры: 10s, 1m, 1h, 1d' },
+  { short: 'INT_RESOLVE', description: 'Interval: resolve — число (мс) или строка вида now-1d/1700000000000' },
+  { short: 'INT_PERIOD_FORMAT', description: 'Interval: период в формате «start:end», например now-7d:now' },
+  { short: 'INT_PERIOD_ARGS', description: 'Interval: period — две границы (start, end) или строка "start:end"' },
+  { short: 'INT_RANGE_ORDER', description: 'Interval: start должен быть <= end' },
+  { short: 'INT_TIME_NOT_INT', description: 'Interval: time должен быть целым числом' },
+  { short: 'INT_PRECISION', description: 'Interval: precision — целое число > 0' },
+]);
 
 export class Interval {
   /** Множитель из стандартного JS-времени (мс) в нашу базовую единицу (МС). */
@@ -48,14 +61,12 @@ export class Interval {
     if (m) {
       const unit = UNIT_MS[m[2]];
       if (unit === undefined) {
-        throw new RangeError(
-          `Interval: неизвестная единица «${m[2]}» (доступно: ms s m h d w mon y)`
-        );
+        throw ErrorManager.make('INT_UNIT_UNKNOWN', { unit: m[2] });
       }
       return Math.round(parseInt(m[1], 10) * unit);
     }
     if (!/^\d+$/.test(s)) {
-      throw new RangeError('Interval: некорректный интервал, примеры: 10s, 1m, 1h, 1d');
+      throw ErrorManager.make('INT_PARSE');
     }
     return parseInt(s, 10);
   }
@@ -94,7 +105,7 @@ export class Interval {
   static resolve(value: number | string, now: number = Date.now()): number {
     const v = typeof value === 'string' ? Interval.partOfPeriod(value, now) : value;
     if (typeof v !== 'number' || !Number.isFinite(v)) {
-      throw new RangeError('Interval: resolve — число (мс) или строка вида now-1d/1700000000000');
+      throw ErrorManager.make('INT_RESOLVE', { value: String(value) });
     }
     return v;
   }
@@ -118,12 +129,12 @@ export class Interval {
     ) {
       const parts = String(a).replace(/\s/g, '').split(':');
       if (parts.length !== 2 || parts[0] === '' || parts[1] === '') {
-        throw new RangeError('Interval: период в формате «start:end», например now-7d:now');
+        throw ErrorManager.make('INT_PERIOD_FORMAT', { period: String(a) });
       }
       return Interval._pair(parts[0], parts[1], typeof b === 'number' ? b : Date.now());
     }
     if (b === undefined) {
-      throw new RangeError('Interval: period — две границы (start, end) или строка "start:end"');
+      throw ErrorManager.make('INT_PERIOD_ARGS');
     }
     return Interval._pair(a, b, now !== undefined ? now : Date.now());
   }
@@ -133,7 +144,7 @@ export class Interval {
     const s = Interval.resolve(start, now);
     const e = Interval.resolve(end, now);
     if (e < s) {
-      throw new RangeError('Interval: start должен быть <= end');
+      throw ErrorManager.make('INT_RANGE_ORDER', { start: s, end: e });
     }
     return [s, e];
   }
@@ -141,10 +152,10 @@ export class Interval {
   /** Округляет время вниз до кратности `precision`. */
   static roundTime(time: number, precision: number): number {
     if (!Number.isInteger(time)) {
-      throw new RangeError('Interval: time должен быть целым числом');
+      throw ErrorManager.make('INT_TIME_NOT_INT', { time });
     }
     if (!Number.isInteger(precision) || precision <= 0) {
-      throw new RangeError('Interval: precision — целое число > 0');
+      throw ErrorManager.make('INT_PRECISION', { precision });
     }
     return time - (time % precision);
   }
@@ -152,7 +163,7 @@ export class Interval {
   /** Точки разбиения [start, end] с шагом `precision` (start/end округляются вниз). */
   static getIntervals(start: number, end: number, precision: number): number[] {
     if (start > end) {
-      throw new RangeError('Interval: start должен быть <= end');
+      throw ErrorManager.make('INT_RANGE_ORDER', { start, end });
     }
     start = Interval.roundTime(start, precision);
     end = Interval.roundTime(end, precision);

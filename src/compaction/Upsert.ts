@@ -16,6 +16,11 @@
 import type { Row } from './types.ts';
 import type { Descriptor } from './Descriptor.ts';
 import { Engine } from './Engine.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
+
+ErrorManager.registerMany('Upsert', [
+  { short: 'DEF_UPSERT_VERSION', description: 'upsert: требуется version (колонка «новизны»)' },
+]);
 
 export class Upsert extends Engine {
   constructor(desc: Descriptor) {
@@ -24,7 +29,7 @@ export class Upsert extends Engine {
 
   merge(rows: Row[]): Row[] {
     if (!this.desc.version) {
-      throw new RangeError('upsert: требуется version (колонка «новизны»)');
+      throw ErrorManager.make('DEF_UPSERT_VERSION');
     }
     const best = new Map<string, { row: Row; v: number; order: number }>();
     rows.forEach((row, order) => {

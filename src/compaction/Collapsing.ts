@@ -17,6 +17,11 @@
 import type { Row } from './types.ts';
 import type { Descriptor } from './Descriptor.ts';
 import { Engine } from './Engine.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
+
+ErrorManager.registerMany('Collapsing', [
+  { short: 'DEF_COLLAPSING_SIGN', description: 'collapsing: требуется sign (колонка знака +1/-1)' },
+]);
 
 export class Collapsing extends Engine {
   constructor(desc: Descriptor) {
@@ -26,7 +31,7 @@ export class Collapsing extends Engine {
   merge(rows: Row[]): Row[] {
     const sign = this.desc.sign;
     if (!sign) {
-      throw new RangeError('collapsing: требуется sign (колонка знака +1/-1)');
+      throw ErrorManager.make('DEF_COLLAPSING_SIGN');
     }
     const out: Row[] = [];
     for (const group of this.groupByKey(rows).values()) {

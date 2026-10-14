@@ -34,9 +34,15 @@ import type {
   SegmentEncoding,
   TierStatus,
 } from './types.ts';
+import ErrorManager from './errors/ErrorManager.ts';
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
+
+ErrorManager.registerMany('RetentionEngine', [
+  { short: 'RET_HOST', description: 'RetentionEngine: host (journal) обязателен' },
+  { short: 'RET_TIER_UNKNOWN', description: 'Неизвестный тир', rules: { tierId: 'string' } },
+]);
 
 /**
  * Часть Journal, с которой работает RetentionEngine.
@@ -82,7 +88,7 @@ export class RetentionEngine {
   private readonly encCache = new Map<string, SegmentEncoding>();
 
   constructor(host: RetentionHost, tiers?: RetentionTier[], nowProvider?: () => number) {
-    if (!host) throw new TypeError('RetentionEngine: host (journal) обязателен');
+    if (!host) throw ErrorManager.make('RET_HOST');
     this.host = host;
     this.tiers = (tiers ?? RetentionEngine.defaultTiers())
       .slice()
@@ -235,7 +241,7 @@ export class RetentionEngine {
   compactTier(tierId: string, now?: number): CompactTierReport {
     const t = now ?? this.now();
     const tier = this.tiers.find(x => x.id === tierId);
-    if (!tier) throw new RangeError(`Неизвестный тир: ${tierId}`);
+    if (!tier) throw ErrorManager.make('RET_TIER_UNKNOWN', { tierId });
     const groups = this.groupByTier(t).filter(g => g.tier.id === tierId);
     let mergedGroups = 0;
     const beforeSegments = this.host.closedSegmentIds().length;

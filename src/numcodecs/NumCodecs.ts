@@ -16,6 +16,11 @@ import { DoubleDeltaCodec } from './DoubleDeltaCodec.ts';
 import { GorillaCodec } from './GorillaCodec.ts';
 import { RleCodec } from './RleCodec.ts';
 import type { NumCodec } from './types.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
+
+ErrorManager.registerMany('NumCodecs', [
+  { short: 'NC_CODEC_UNKNOWN', description: 'Неизвестный числовой кодек', rules: { name: 'string' } },
+]);
 
 export class NumCodecs {
   /** Реестр: имя кодека → экземпляр. */
@@ -26,10 +31,10 @@ export class NumCodecs {
     rle: new RleCodec()
   };
 
-  /** Кодек по имени (RangeError на неизвестном). */
+  /** Кодек по имени (NC_CODEC_UNKNOWN на неизвестном). */
   static get(name: string): NumCodec {
     const c = this.registry[name];
-    if (!c) throw new RangeError(`Неизвестный числовой кодек: ${name} (доступно: ${Object.keys(this.registry).join(', ')})`);
+    if (!c) throw ErrorManager.make('NC_CODEC_UNKNOWN', { name, available: Object.keys(this.registry).join(', ') });
     return c;
   }
 

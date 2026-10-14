@@ -5,6 +5,12 @@
 import { Column } from './columns/Column.ts';
 import { ColumnFactory } from './columns/ColumnFactory.ts';
 import type { ColumnSummary, JsonValue, Metadata, Row, Schema, SerializedColumn, SerializedSegment } from './types.ts';
+import ErrorManager from './errors/ErrorManager.ts';
+
+ErrorManager.registerMany('Segment', [
+  { short: 'SEG_ROW_OOB', description: 'Segment: логический индекс строки вне диапазона', rules: { index: 'number', max: 'number' } },
+  { short: 'SEG_VERSION', description: 'Неподдерживаемая версия формата сегмента', rules: { version: 'number' } },
+]);
 
 export class Segment {
   readonly id: string;
@@ -107,7 +113,7 @@ export class Segment {
 
   get(fieldName: string, logicalIndex: number): JsonValue {
     if (logicalIndex < 0 || logicalIndex >= this.rowCount) {
-      throw new RangeError(`Row index ${logicalIndex} out of bounds (0..${this.rowCount - 1})`);
+      throw ErrorManager.make('SEG_ROW_OOB', { index: logicalIndex, max: this.rowCount - 1 });
     }
     const column = this.columns[fieldName];
     // Поле появилось в схеме позже — старые сегменты его не знают.
@@ -183,7 +189,7 @@ export class Segment {
 
   static deserialize(data: SerializedSegment): Segment {
     if (data.formatVersion !== undefined && data.formatVersion > 2) {
-      throw new Error(`Неподдерживаемая версия формата сегмента: ${data.formatVersion}`);
+      throw ErrorManager.make('SEG_VERSION', { version: data.formatVersion });
     }
 
     const segment = new Segment(data.id, data.schema, data.metadata);

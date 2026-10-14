@@ -3,13 +3,19 @@
 // (порядок итерации Map = порядок вставки, переinsert = touch)
 // ============================================================
 
+import ErrorManager from './errors/ErrorManager.ts';
+
+ErrorManager.registerMany('LRUCache', [
+  { short: 'LRU_MAXSIZE', description: 'LRUCache: maxSize должно быть целым числом >= 1', rules: { maxSize: 'number' } },
+]);
+
 export class LRUCache<K, V> {
   readonly maxSize: number;
   private _map = new Map<K, V>();
 
   constructor(maxSize = 32) {
     if (!Number.isInteger(maxSize) || maxSize < 1) {
-      throw new RangeError('LRUCache: maxSize должно быть целым числом >= 1');
+      throw ErrorManager.make('LRU_MAXSIZE', { maxSize });
     }
     this.maxSize = maxSize;
   }

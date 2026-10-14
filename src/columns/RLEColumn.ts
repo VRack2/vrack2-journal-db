@@ -6,6 +6,11 @@
 
 import { Column } from './Column.ts';
 import type { JsonValue, RLEColumnData, RLERun, SerializedColumn } from '../types.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
+
+ErrorManager.registerMany('RLEColumn', [
+  { short: 'COL_RLE_BOUNDS', description: 'RLEColumn: индекс вне диапазона', rules: { index: 'number' } },
+]);
 
 export class RLEColumn extends Column {
   runs: RLERun[] = [];
@@ -25,7 +30,7 @@ export class RLEColumn extends Column {
 
   get(i: number): JsonValue {
     if (i < 0 || i >= this._length) {
-      throw new RangeError(`Index ${i} out of bounds`);
+      throw ErrorManager.make('COL_RLE_BOUNDS', { index: i });
     }
     // Бинарный поиск: первый offset, строго больше i
     let lo = 0;

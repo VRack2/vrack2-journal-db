@@ -21,6 +21,28 @@
 
 import type { AggFn, OpenJournalOptions, ResolutionTier, RetentionTier, Schema } from '../types.ts';
 import { Descriptor } from './Descriptor.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
+
+ErrorManager.registerMany('define', [
+  { short: 'DEF_NAME_EMPTY', description: 'name — непустая строка', rules: { kind: 'string' } },
+  { short: 'DEF_NAME_SLASH', description: 'name не должно содержать "/"', rules: { kind: 'string' } },
+  { short: 'DEF_COLUMNS_OBJECT', description: 'columns — объект «поле → тип колонки»', rules: { kind: 'string' } },
+  { short: 'DEF_COLUMNS_EMPTY', description: 'columns — непустая схема', rules: { kind: 'string' } },
+  { short: 'DEF_RETENTION_AGG', description: 'retention/tiers — требует явный agg (поле → min|max|sum|avg|count)', rules: { kind: 'string' } },
+  { short: 'DEF_TIERS_EMPTY', description: 'tiers — непустой массив { resMs, ttlMs }', rules: { kind: 'string' } },
+  { short: 'DEF_TIERS_POSITIVE', description: 'tiers — resMs/ttlMs должны быть > 0', rules: { kind: 'string' } },
+  { short: 'DEF_TIERS_ORDER', description: 'tiers — resMs и ttlMs должны неубывать (тонкий → грубый)', rules: { kind: 'string' } },
+  { short: 'DEF_AGG_FIELD', description: 'agg — поле не найдено в columns', rules: { kind: 'string', field: 'string' } },
+  { short: 'DEF_AGG_FN', description: 'agg — fn min|max|sum|avg|count', rules: { kind: 'string', field: 'string', fn: 'string' } },
+  { short: 'DEF_DIMS_EMPTY', description: 'dims — непустой массив полей', rules: { kind: 'string' } },
+  { short: 'DEF_DIMS_FIELD', description: 'dims — поле не найдено в columns', rules: { kind: 'string', field: 'string' } },
+  { short: 'DEF_STORAGE_TIERS', description: 'storage.tiers — объекты { id, from, to, … }', rules: { kind: 'string' } },
+  { short: 'DEF_KEY_EMPTY', description: 'key — непустой массив полей identity-ключа', rules: { kind: 'string' } },
+  { short: 'DEF_KEY_FIELD', description: 'key — поле не найдено в columns', rules: { kind: 'string', field: 'string' } },
+  { short: 'DEF_COLUMN_NAME', description: 'требуется непустое имя колонки', rules: { kind: 'string' } },
+  { short: 'DEF_COLUMN_NOT_FOUND', description: 'колонка не найдена в columns', rules: { kind: 'string', field: 'string' } },
+  { short: 'DEF_SUMMING_SUM', description: 'summing: sum — непустой массив числовых колонок', rules: { kind: 'string' } },
+]);
 
 // --------------------------------------------------
 // Базовое + специфичные описания (дискриминированный union по kind)
@@ -125,61 +147,61 @@ const AGG_FNS: ReadonlySet<string> = new Set(['min', 'max', 'sum', 'avg', 'count
 
 function validateBase(cfg: BaseTableDef, kind: string): void {
   if (typeof cfg.name !== 'string' || cfg.name.trim().length === 0) {
-    throw new RangeError(`${kind}: name — непустая строка`);
+    throw ErrorManager.make('DEF_NAME_EMPTY', { kind });
   }
   if (cfg.name.includes('/')) {
-    throw new RangeError(`${kind}: name не должно содержать "/"`);
+    throw ErrorManager.make('DEF_NAME_SLASH', { kind });
   }
   if (!cfg.columns || typeof cfg.columns !== 'object') {
-    throw new RangeError(`${kind}: columns — объект «поле → тип колонки»`);
+    throw ErrorManager.make('DEF_COLUMNS_OBJECT', { kind });
   }
   if (Object.keys(cfg.columns).length === 0) {
-    throw new RangeError(`${kind}: columns — непустая схема`);
+    throw ErrorManager.make('DEF_COLUMNS_EMPTY', { kind });
   }
   // --- retention/agg/dims --------------------------------------------------
   if ((cfg.retention !== undefined || cfg.tiers !== undefined)
     && (!cfg.agg || Object.keys(cfg.agg).length === 0)) {
-    throw new RangeError(`${kind}: retention/tiers — требует явный agg (поле → min|max|sum|avg|count)`);
+    throw ErrorManager.make('DEF_RETENTION_AGG', { kind });
   }
   if (cfg.tiers !== undefined) {
     if (!Array.isArray(cfg.tiers) || cfg.tiers.length === 0) {
-      throw new RangeError(`${kind}: tiers — непустой массив { resMs, ttlMs }`);
+      throw ErrorManager.make('DEF_TIERS_EMPTY', { kind });
     }
     for (const t of cfg.tiers) {
       if (!t || !Number.isFinite(t.resMs) || t.resMs <= 0 || !Number.isFinite(t.ttlMs) || t.ttlMs <= 0) {
-        throw new RangeError(`${kind}: tiers — resMs/ttlMs должны быть > 0`);
+        throw ErrorManager.make('DEF_TIERS_POSITIVE', { kind });
       }
     }
     for (let i = 1; i < cfg.tiers.length; i++) {
       if (cfg.tiers[i].resMs < cfg.tiers[i - 1].resMs || cfg.tiers[i].ttlMs < cfg.tiers[i - 1].ttlMs) {
-        throw new RangeError(`${kind}: tiers — resMs и ttlMs должны неубывать (тонкий → грубый)`);
+        throw ErrorManager.make('DEF_TIERS_ORDER', { kind });
       }
     }
   }
   if (cfg.agg) {
     for (const [f, fn] of Object.entries(cfg.agg)) {
       if (!(f in cfg.columns)) {
-        throw new RangeError(`${kind}: agg.${f} — поле не найдено в columns`);
+        throw ErrorManager.make('DEF_AGG_FIELD', { kind, field: f });
       }
       if (!AGG_FNS.has(fn)) {
-        throw new RangeError(`${kind}: agg.${f} — fn min|max|sum|avg|count (получено ${String(fn)})`);
+        throw ErrorManager.make('DEF_AGG_FN', { kind, field: f, fn: String(fn) });
       }
     }
   }
   if (cfg.dims) {
     if (!Array.isArray(cfg.dims) || cfg.dims.length === 0) {
-      throw new RangeError(`${kind}: dims — непустой массив полей`);
+      throw ErrorManager.make('DEF_DIMS_EMPTY', { kind });
     }
     for (const f of cfg.dims) {
       if (typeof f !== 'string' || !(f in cfg.columns)) {
-        throw new RangeError(`${kind}: dims — поле "${String(f)}" не найдено в columns`);
+        throw ErrorManager.make('DEF_DIMS_FIELD', { kind, field: String(f) });
       }
     }
   }
   if (cfg.storage && cfg.storage.tiers) {
     for (const t of cfg.storage.tiers) {
       if (!t || typeof t.id !== 'string' || !Number.isFinite(t.from) || !Number.isFinite(t.to)) {
-        throw new RangeError(`${kind}: storage.tiers — объекты { id, from, to, … }`);
+        throw ErrorManager.make('DEF_STORAGE_TIERS', { kind });
       }
     }
   }
@@ -187,21 +209,21 @@ function validateBase(cfg: BaseTableDef, kind: string): void {
 
 function validateKey(cfg: BaseTableDef & { key: unknown }, kind: string): void {
   if (!Array.isArray(cfg.key) || cfg.key.length === 0) {
-    throw new RangeError(`${kind}: key — непустой массив полей identity-ключа`);
+    throw ErrorManager.make('DEF_KEY_EMPTY', { kind });
   }
   for (const f of cfg.key) {
     if (typeof f !== 'string' || !(f in cfg.columns)) {
-      throw new RangeError(`${kind}: key — поле "${String(f)}" не найдено в columns`);
+      throw ErrorManager.make('DEF_KEY_FIELD', { kind, field: String(f) });
     }
   }
 }
 
 function requireColumn(cfg: BaseTableDef, field: unknown, kind: string): string {
   if (typeof field !== 'string' || field.length === 0) {
-    throw new RangeError(`${kind}: требуется непустое имя колонки`);
+    throw ErrorManager.make('DEF_COLUMN_NAME', { kind });
   }
   if (!(field in cfg.columns)) {
-    throw new RangeError(`${kind}: колонка "${field}" не найдена в columns`);
+    throw ErrorManager.make('DEF_COLUMN_NOT_FOUND', { kind, field });
   }
   return field;
 }
@@ -229,7 +251,7 @@ export function defineSummingTable(cfg: Omit<SummingTableDef, 'kind'>): SummingT
   validateBase(cfg, 'summing');
   validateKey(cfg, 'summing');
   if (!Array.isArray(cfg.sum) || cfg.sum.length === 0) {
-    throw new RangeError('summing: sum — непустой массив числовых колонок');
+    throw ErrorManager.make('DEF_SUMMING_SUM', { kind: 'summing' });
   }
   const sum = cfg.sum.map(s => requireColumn(cfg, s, 'summing'));
   const version = cfg.version != null ? requireColumn(cfg, cfg.version, 'summing') : undefined;
