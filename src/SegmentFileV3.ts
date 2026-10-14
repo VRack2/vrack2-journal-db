@@ -1,24 +1,22 @@
-// ============================================================
-// SegmentFileV3.ts — Бинарный формат сегмента v3 (Фаза 2)
+// SegmentFileV3.ts — Binary segment format v3 (Phase 2).
 //
-//   [0..3]    "JSDB"
-//   [4]       3  (версия)
-//   [5..7]    0
-//   [8..11]   headerLen (u32 LE)
-//   [12 ..]   header JSON (UTF-8): схема, саммари, rowMap, кодек колонки,
-//             порядок колонок, способ сжатия
-//   далее, для каждой колонки (в порядке columnOrder):
+//   [0..3]     "JSDB"
+//   [4]        3  (version)
+//   [5..7]     0
+//   [8..11]    headerLen (u32 LE)
+//   [12 ..]    header JSON (UTF-8): schema, summaries, rowMap, column codec,
+//              column order, compression method
+//   then, for each column (in columnOrder):
 //     [blobLen u32]
-//     [сжатый блоб]   (gzip по умолчанию, zstd — опция)
-//   [N-4..N-1] CRC32 всех предыдущих байтов
+//     [compressed blob]   (gzip by default, zstd — option)
+//   [N-4..N-1] CRC32 of all preceding bytes
 //
-// Колонки:
-//   numeric — маска null + числовой кодек (f64|doubleDelta|gorilla|rle)
-//   dict    — словарь отдельных значений + индекс на строку
+// Columns:
+//   numeric — null mask + numeric codec (f64|doubleDelta|gorilla|rle)
+//   dict    — dictionary of distinct values + index per row
 //
-// Lossless: все значения восстанавливаются точно. v1/v2 читаются как раньше;
-// запись v3 включается флагом format:'v3' (см. Journal).
-// ============================================================
+// Lossless: all values are restored exactly. v1/v2 are read as before;
+// v3 writes are enabled by the format:'v3' flag (see Journal).
 
 import zlib from 'node:zlib';
 import { Segment } from './Segment.ts';
@@ -35,18 +33,18 @@ import type {
 import ErrorManager from './errors/ErrorManager.ts';
 
 ErrorManager.registerMany('SegmentFileV3', [
-  { short: 'SFW3_NOT_V3', description: 'decodeV3: буфер не является сегментом v3' },
-  { short: 'SFW3_TOO_SMALL', description: 'Повреждённый сегмент v3: файл слишком мал' },
-  { short: 'SFW3_CRC', description: 'Повреждённый сегмент v3: контрольная сумма не совпадает' },
+  { short: 'SFW3_NOT_V3', description: 'decodeV3: buffer is not a v3 segment' },
+  { short: 'SFW3_TOO_SMALL', description: 'Corrupted v3 segment: file too small' },
+  { short: 'SFW3_CRC', description: 'Corrupted v3 segment: checksum mismatch' },
 ]);
 
 const V3 = 3;
 
 export interface V3EncodeOptions {
-  /** Способ сжатия блобов: 'zstd' (по умолчанию при Node ≥ 23.8) или 'gzip'. */
+  /** Blob compression: 'zstd' (default on Node ≥ 23.8) or 'gzip'. */
   compression?: CompressionKind;
-  /** Явный выбор числового кодека для колонки (field → имя кодека).
-   *  Пропущенные колонки — авто-выбор по данным (NumCodecs.autoPick). */
+  /** Explicit numeric codec for a column (field → codec name).
+   *  Omitted columns — auto-picked from data (NumCodecs.autoPick). */
   codecs?: Record<string, string>;
 }
 
@@ -73,12 +71,12 @@ interface V3Header {
 }
 
 export class SegmentFileV3 {
-  /** Является ли буфер сегментом v3 (по магическим байтам и версии). */
+  /** Whether the buffer is a v3 segment (by magic bytes and version). */
   static isV3(buf: Buffer): boolean {
     return buf.length >= 5 && buf.subarray(0, 4).equals(Buffer.from('JSDB', 'ascii')) && buf[4] === V3;
   }
 
-  /** Сериализует сегмент в буфер v3 (бинарные блобы + сжатие + CRC32). */
+  /** Serialize a segment to a v3 buffer (binary blobs + compression + CRC32). */
   static encode(segment: Segment, opts: V3EncodeOptions = {}): Buffer {
     const compression: CompressionKind = opts.compression ?? Compression.default();
     const columnOrder = Object.keys(segment.schema);
@@ -144,7 +142,7 @@ export class SegmentFileV3 {
     return Buffer.concat([body, tail]);
   }
 
-  /** Буфер v3 → в-памяти сегмент. */
+  /** v3 buffer → in-memory segment. */
   static decode(buf: Buffer): Segment {
     if (!this.isV3(buf)) {
       throw ErrorManager.make('SFW3_NOT_V3');
@@ -153,7 +151,7 @@ export class SegmentFileV3 {
       throw ErrorManager.make('SFW3_TOO_SMALL');
     }
 
-    // CRC32 до разжатия — битые файлы не читаем
+    // CRC32 before decompression — corrupt files are rejected
     const body = buf.subarray(0, buf.length - 4);
     const storedCrc = buf.readUInt32LE(buf.length - 4);
     const actualCrc = zlib.crc32(body) >>> 0;
@@ -179,7 +177,7 @@ export class SegmentFileV3 {
     seg.physicalRowCount = header.physicalRowCount;
     seg.minTs = header.minTs;
     seg.maxTs = header.maxTs;
-    // v3-запись всегда хранит tsCount и summaries (см. encode) — fallback не нужен
+    // v3 writes always store tsCount and summaries (see encode) — no fallback needed
     seg.tsCount = typeof header.tsCount === 'number' ? header.tsCount : 0;
     seg.rowMap = header.rowMap;
     seg.summaries = header.summaries && typeof header.summaries === 'object'
@@ -202,7 +200,7 @@ export class SegmentFileV3 {
   }
 
   // --------------------------------------------------
-  // Классификация колонки и ключ словаря
+  // Column classification and dictionary key
   // --------------------------------------------------
 
   private static pickKind(values: JsonValue[]): 'numeric' | 'dict' {
@@ -221,7 +219,7 @@ export class SegmentFileV3 {
   }
 
   // --------------------------------------------------
-  // Кодирование блоба колонки
+  // Column blob encoding
   // --------------------------------------------------
 
   private static encodeNumericBlob(
@@ -241,10 +239,10 @@ export class SegmentFileV3 {
       }
     }
 
-    // Незнакомое имя кодека — ошибка (опечатка не должна молча уйти в f64).
+    // Unknown codec name — error (typos must not silently fall into f64).
     const codec = NumCodecs.get(codecName);
-    // Запрошенный кодек не подошёл данным (например, rle на дробных — бросает) →
-    // честно переходим на f64 и фиксируем ИСПОЛЬЗОВАННЫЙ кодек в схеме.
+    // Requested codec didn't fit the data (e.g. rle on fractions — throws) →
+    // fall back to f64 and record the ACTUALLY USED codec in the schema.
     let codecUsed = codecName;
     let codecBuf: Buffer;
     try {
@@ -294,7 +292,7 @@ export class SegmentFileV3 {
   }
 
   // --------------------------------------------------
-  // Декодирование блоба колонки
+  // Column blob decoding
   // --------------------------------------------------
 
   private static decodeNumericBlob(blob: Buffer, codecName: string, physicalRowCount: number): JsonValue[] {

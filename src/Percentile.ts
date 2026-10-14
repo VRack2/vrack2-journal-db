@@ -1,14 +1,12 @@
-// ============================================================
-// Percentile.ts — Квантили: точный расчёт по отсортированным значениям
-// ============================================================
+// Percentile.ts — Quantiles: exact computation over sorted values
 
 export class Percentile {
-  /** Ключ результата квантили: 0.95 → 'p95', 0.875 → 'p87.5'. */
+  /** Quantile result key: 0.95 → 'p95', 0.875 → 'p87.5'. */
   static key(q: number): string {
     return 'p' + Math.round(q * 1000) / 10;
   }
 
-  /** Квантиль (linear interpolation, метод numpy 'linear') по отсортированному массиву. */
+  /** Quantile (linear interpolation, numpy 'linear' method) over a sorted array. */
   static of(sortedVals: number[], q: number): number {
     const n = sortedVals.length;
     if (n === 1) return sortedVals[0];

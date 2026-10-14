@@ -1,15 +1,13 @@
-// ============================================================
-// columns/RLEColumn.ts — Run-Length Encoding
-// runs — [{value, count}], offsets — накопленные границы
-// для O(log n) доступа к произвольной позиции
-// ============================================================
+// columns/RLEColumn.ts — Run-Length Encoding.
+// runs — [{value, count}], offsets — cumulative bounds
+// for O(log n) access to an arbitrary position
 
 import { Column } from './Column.ts';
 import type { JsonValue, RLEColumnData, RLERun, SerializedColumn } from '../types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('RLEColumn', [
-  { short: 'COL_RLE_BOUNDS', description: 'RLEColumn: индекс вне диапазона', rules: { index: 'number' } },
+  { short: 'COL_RLE_BOUNDS', description: 'RLEColumn: index out of range', rules: { index: 'number' } },
 ]);
 
 export class RLEColumn extends Column {
@@ -32,7 +30,7 @@ export class RLEColumn extends Column {
     if (i < 0 || i >= this._length) {
       throw ErrorManager.make('COL_RLE_BOUNDS', { index: i });
     }
-    // Бинарный поиск: первый offset, строго больше i
+    // Binary search: first offset strictly greater than i
     let lo = 0;
     let hi = this.offsets.length - 1;
     while (lo < hi) {

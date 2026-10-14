@@ -1,6 +1,4 @@
-// ============================================================
-// segment.ts — Сегмент данных с дедупликацией строк
-// ============================================================
+// Segment.ts — Data segment with row deduplication
 
 import { Column } from './columns/Column.ts';
 import { ColumnFactory } from './columns/ColumnFactory.ts';
@@ -8,8 +6,8 @@ import type { ColumnSummary, JsonValue, Metadata, Row, Schema, SerializedColumn,
 import ErrorManager from './errors/ErrorManager.ts';
 
 ErrorManager.registerMany('Segment', [
-  { short: 'SEG_ROW_OOB', description: 'Segment: логический индекс строки вне диапазона', rules: { index: 'number', max: 'number' } },
-  { short: 'SEG_VERSION', description: 'Неподдерживаемая версия формата сегмента', rules: { version: 'number' } },
+  { short: 'SEG_ROW_OOB', description: 'Segment: logical row index out of range', rules: { index: 'number', max: 'number' } },
+  { short: 'SEG_VERSION', description: 'Unsupported segment format version', rules: { version: 'number' } },
 ]);
 
 export class Segment {
@@ -18,24 +16,24 @@ export class Segment {
   metadata: Metadata;
 
   columns: Record<string, Column> = {};
-  rowMap: number[] = [];       // логический индекс → физический индекс
+  rowMap: number[] = [];       // logical index → physical index
   rowCount = 0;
   physicalRowCount = 0;
-  /** Сколько строк несёт числовой ts — нужно purge(), чтобы не удалять строки без ts. */
+  /** How many rows carry a numeric ts — purge() relies on it to not delete rows without ts. */
   tsCount = 0;
   minTs: number | null = null;
   maxTs: number | null = null;
 
-  /** Сегментные саммари числовых колонок: поле → {min,max,sum,count}.
-   *  Ведутся по логическим строкам (дубли учитываются, как в getRow).
-   *  Используются aggregate()/downsample() как fast-path для сегментов,
-   *  целиком лежащих в диапазоне. */
+  /** Segment-level summaries of numeric columns: field → {min,max,sum,count}.
+   *  Kept over logical rows (duplicates counted, as in getRow).
+   *  Used by aggregate()/downsample() as a fast-path for segments
+   *  lying entirely inside the range. */
   summaries: Record<string, ColumnSummary> = {};
 
-  /** Имя поля-«корзины» (тип catchall) для полей вне схемы, либо null */
+  /** Name of the "catch-all" field (catchall type) for fields outside the schema, or null */
   private _catchAllField: string | null = null;
 
-  /** Имена полей схемы — считаются один раз вместо Object.keys() в hot-путях. */
+  /** Schema field names — computed once instead of Object.keys() in hot paths. */
   private readonly _fields: string[];
 
   constructor(id: string, schema: Schema, metadata: Metadata = {}) {
@@ -61,9 +59,9 @@ export class Segment {
       if (this.maxTs === null || ts > this.maxTs) this.maxTs = ts;
     }
 
-    // Нормализация строки под схему:
-    //  - объявленные поля, отсутствующие в строке → null-падинг;
-    //  - лишние поля → в catchall-колонку (если объявлена), иначе отбрасываются.
+    // Normalize the row against the schema:
+    //  - declared fields missing from the row → null padding;
+    //  - extra fields → the catchall column (if declared), otherwise dropped.
     const values: Record<string, JsonValue> = {};
     const extras: Row = {};
     for (const [key, value] of Object.entries(row)) {
@@ -80,9 +78,9 @@ export class Segment {
       values[this._catchAllField] = extras;
     }
 
-    // Саммари числовых колонок — по каждой логической строке (дубли учитываются),
-    // чтобы совпадать с getRow()/aggregate(). Учитываются только строки с числовым
-    // ts (aggregate() их исключает) и только конечные числа (null/не-числа — нет).
+    // Summaries of numeric columns — per logical row (duplicates counted),
+    // to match getRow()/aggregate(). Only rows with a numeric ts are counted
+    // (aggregate() excludes them) and only finite numbers (null/non-numeric are not).
     if (hasTs) {
       for (const fieldName of this._fields) {
         const v = values[fieldName];
@@ -92,16 +90,16 @@ export class Segment {
       }
     }
 
-    // Дедупликация: последняя уникальная строка всегда лежит под
-    // физическим индексом physicalRowCount - 1 (новые строки нумеруются
-    // по порядку, дубли не инкрементируют счётчик)
+    // Deduplication: the last unique row always sits at physical index
+    // physicalRowCount - 1 (new rows are numbered in order, duplicates do not
+    // increment the counter)
     if (this.physicalRowCount > 0 && this._equalsValues(values, this.physicalRowCount - 1)) {
       this.rowMap.push(this.physicalRowCount - 1);
       this.rowCount++;
       return;
     }
 
-    // Новая уникальная строка
+    // New unique row
     for (const fieldName of this._fields) {
       this.columns[fieldName].append(values[fieldName]);
     }
@@ -116,7 +114,7 @@ export class Segment {
       throw ErrorManager.make('SEG_ROW_OOB', { index: logicalIndex, max: this.rowCount - 1 });
     }
     const column = this.columns[fieldName];
-    // Поле появилось в схеме позже — старые сегменты его не знают.
+    // The field appeared in the schema later — older segments do not know it.
     if (!column) return null;
     const physicalIndex = this.rowMap[logicalIndex];
     return column.get(physicalIndex);
@@ -139,7 +137,7 @@ export class Segment {
     return true;
   }
 
-  /** Сравнение значений: примитивы — строго, объекты — по содержимому */
+  /** Value comparison: primitives — strict, objects — by content */
   private _valueEqual(a: JsonValue, b: JsonValue): boolean {
     if (a === b) return true;
     if (typeof a === 'object' && a !== null && typeof b === 'object' && b !== null) {
@@ -152,7 +150,7 @@ export class Segment {
     return false;
   }
 
-  /** Прибавляет одно числовое значение к саммари колонки (создаёт при первом). */
+  /** Adds one numeric value to the column summary (created on first call). */
   private _updateSummary(fieldName: string, value: number): void {
     let s = this.summaries[fieldName];
     if (!s) {
@@ -203,18 +201,18 @@ export class Segment {
       segment.columns[fieldName].deserialize(serializedData);
     }
 
-    // tsCount берём из файла; для старых сегментов (до этого поля) считаем сами —
-    // purge() опирается на него, чтобы не удалить строки без ts.
+    // tsCount comes from the file; for old segments (before this field) we compute it —
+    // purge() relies on it to not delete rows without ts.
     segment.tsCount = typeof data.tsCount === 'number' ? data.tsCount : segment._countTsRows();
 
-    // Саммари числовых колонок: из файла, либо пересчёт (старые сегменты).
+    // Summaries of numeric columns: from the file, or recomputed (old segments).
     segment.summaries = (data.summaries && typeof data.summaries === 'object')
       ? data.summaries
       : segment._computeSummaries();
     return segment;
   }
 
-  /** Сколько строк несёт числовой ts (строки без ts не учитываются). */
+  /** How many rows carry a numeric ts (rows without ts are not counted). */
   private _countTsRows(): number {
     const tsCol = this.columns['ts'];
     if (!tsCol) return 0;
@@ -225,14 +223,14 @@ export class Segment {
     return n;
   }
 
-  /** Пересчитывает саммари числовых колонок по логическим строкам,
-   *  как aggregate(): только строки с числовым ts, только конечные числа.
-   *  Для сегментов, записанных до появления поля summaries. */
+  /** Recomputes summaries of numeric columns over logical rows,
+   *  as aggregate() does: only rows with a numeric ts, only finite numbers.
+   *  For segments written before the summaries field existed. */
   private _computeSummaries(): Record<string, ColumnSummary> {
     const out: Record<string, ColumnSummary> = {};
     for (let i = 0; i < this.rowCount; i++) {
       const ts = this.get('ts', i);
-      if (typeof ts !== 'number') continue; // строки без ts вне агрегаций
+      if (typeof ts !== 'number') continue; // rows without ts are outside aggregation
       for (const fieldName of this._fields) {
         const v = this.get(fieldName, i);
         if (typeof v === 'number' && Number.isFinite(v)) {

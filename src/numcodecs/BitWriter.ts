@@ -1,12 +1,10 @@
-// ============================================================
-// numcodecs/BitWriter.ts — Битовые записи MSB-first (internal)
-// ============================================================
+// numcodecs/BitWriter.ts — Bit writing, MSB-first (internal)
 
 export class BitWriter {
   private bytes: number[] = [0];
-  private bitPos = 0; // занятые биты в текущем (последнем) байте, 0..7
+  private bitPos = 0; // bits occupied in the current (last) byte, 0..7
 
-  /** Записать `n` младших бит значения (MSB-first). n должно быть 1..32. */
+  /** Write the lower `n` bits of a value (MSB-first). n must be 1..32. */
   write(value: number, n: number): void {
     for (let i = n - 1; i >= 0; i--) {
       const bit = (value >>> i) & 1;
@@ -22,8 +20,8 @@ export class BitWriter {
   }
 
   finish(): Buffer {
-    // Последний байт может быть частично не заполнен (низшие биты = 0) —
-    // это корректное выравнивание, оставляем как есть.
+    // The last byte may be partially unfilled (low bits = 0) —
+    // correct alignment, left as-is.
     return Buffer.from(this.bytes);
   }
 }

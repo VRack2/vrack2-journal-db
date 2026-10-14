@@ -1,7 +1,5 @@
-// ============================================================
-// numcodecs/DoubleDeltaCodec.ts — вторые разности (lossless, f64)
-// v0, v1 как есть; далее d2[i] = (v[i]-v[i-1]) - (v[i-1]-v[i-2])
-// ============================================================
+// numcodecs/DoubleDeltaCodec.ts — Second differences (lossless, f64).
+// v0, v1 as-is; then d2[i] = (v[i]-v[i-1]) - (v[i-1]-v[i-2])
 
 import type { NumCodec } from './types.ts';
 

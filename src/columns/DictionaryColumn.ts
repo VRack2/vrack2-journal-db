@@ -1,21 +1,19 @@
-// ============================================================
-// columns/DictionaryColumn.ts — Словарное кодирование
-// Уникальные значения хранятся один раз, в data — индексы
-// ============================================================
+// columns/DictionaryColumn.ts — Dictionary encoding.
+// Distinct values are stored once; data holds indices.
 
 import { Column } from './Column.ts';
 import type { DictionaryColumnData, JsonValue, SerializedColumn } from '../types.ts';
 
 export class DictionaryColumn extends Column {
   dictionary: JsonValue[] = [];
-  /** value → index; после deserialize — null (строится лениво при первом append). */
+  /** value → index; null after deserialize (built lazily on first append). */
   indexMap: Map<JsonValue, number> | null = new Map();
   data: number[] = [];
 
   private _map(): Map<JsonValue, number> {
     if (this.indexMap === null) {
-      // Сегмент только что прочитан с диска: словарь уже собран при записи —
-      // восстанавливаем карту индексов и не держим её в памяти зря на read-only данных.
+      // Segment just read from disk: the dictionary was already built on write —
+      // restore the index map instead of keeping it in memory needlessly for read-only data.
       const map = new Map<JsonValue, number>();
       for (let i = 0; i < this.dictionary.length; i++) {
         map.set(this.dictionary[i], i);
@@ -49,7 +47,7 @@ export class DictionaryColumn extends Column {
     const s = data as DictionaryColumnData;
     this.dictionary = s.dictionary;
     this.data = s.data;
-    this.indexMap = null; // лениво в _map() при первом append — экономия памяти на read-only сегментах
+    this.indexMap = null; // lazily in _map() on first append — saves memory on read-only segments
     this._length = this.data.length;
   }
 }

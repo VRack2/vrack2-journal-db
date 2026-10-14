@@ -1,113 +1,112 @@
-// ============================================================
-// compaction/define.ts — Описания таблиц (define*Table)
+// compaction/define.ts — Table descriptions (define*Table)
 //
-// Единый «язык» для декларирования таблиц: одна функция на движок, у каждой
-// свои параметры (как движки ClickHouse). Возвращают типизированное описание
-// (AnyTableDef) — его можно передать в store.create(def), записать в манифест
-// _store.json или отдать коллеге/AI-агенту как самодостаточный артефакт.
+// A single "language" for declaring tables: one function per engine, each
+// with its own parameters (like ClickHouse engines). They return a typed
+// description (AnyTableDef) — it can be passed to store.create(def), written
+// to the _store.json manifest, or handed to a colleague/an AI agent as a
+// self-contained artifact.
 //
 //   const cpu = defineUpsertTable({
 //     name: 'cpu',
-//     desc: 'Состояние CPU: последняя версия по (host, metric)',
+//     desc: 'CPU state: the latest version per (host, metric)',
 //     columns: { ts: 'delta', host: 'dictionary', metric: 'dictionary', value: 'auto' },
 //     key: ['host', 'metric'],
 //     version: 'ts',
 //   });
 //   store.create(cpu);
 //
-// Валидация выполняется сразу при вызове define* — ошибки видны на месте
-// объявления, а не при первом compact().
-// ============================================================
+// Validation runs at the define* call — errors are visible at the declaration
+// site, not at the first compact().
 
 import type { AggFn, OpenJournalOptions, ResolutionTier, RetentionTier, Schema } from '../types.ts';
 import { Descriptor } from './Descriptor.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('define', [
-  { short: 'DEF_NAME_EMPTY', description: 'name — непустая строка', rules: { kind: 'string' } },
-  { short: 'DEF_NAME_SLASH', description: 'name не должно содержать "/"', rules: { kind: 'string' } },
-  { short: 'DEF_COLUMNS_OBJECT', description: 'columns — объект «поле → тип колонки»', rules: { kind: 'string' } },
-  { short: 'DEF_COLUMNS_EMPTY', description: 'columns — непустая схема', rules: { kind: 'string' } },
-  { short: 'DEF_RETENTION_AGG', description: 'retention/tiers — требует явный agg (поле → min|max|sum|avg|count)', rules: { kind: 'string' } },
-  { short: 'DEF_TIERS_EMPTY', description: 'tiers — непустой массив { resMs, ttlMs }', rules: { kind: 'string' } },
-  { short: 'DEF_TIERS_POSITIVE', description: 'tiers — resMs/ttlMs должны быть > 0', rules: { kind: 'string' } },
-  { short: 'DEF_TIERS_ORDER', description: 'tiers — resMs и ttlMs должны неубывать (тонкий → грубый)', rules: { kind: 'string' } },
-  { short: 'DEF_AGG_FIELD', description: 'agg — поле не найдено в columns', rules: { kind: 'string', field: 'string' } },
-  { short: 'DEF_AGG_FN', description: 'agg — fn min|max|sum|avg|count', rules: { kind: 'string', field: 'string', fn: 'string' } },
-  { short: 'DEF_DIMS_EMPTY', description: 'dims — непустой массив полей', rules: { kind: 'string' } },
-  { short: 'DEF_DIMS_FIELD', description: 'dims — поле не найдено в columns', rules: { kind: 'string', field: 'string' } },
-  { short: 'DEF_STORAGE_TIERS', description: 'storage.tiers — объекты { id, from, to, … }', rules: { kind: 'string' } },
-  { short: 'DEF_KEY_EMPTY', description: 'key — непустой массив полей identity-ключа', rules: { kind: 'string' } },
-  { short: 'DEF_KEY_FIELD', description: 'key — поле не найдено в columns', rules: { kind: 'string', field: 'string' } },
-  { short: 'DEF_COLUMN_NAME', description: 'требуется непустое имя колонки', rules: { kind: 'string' } },
-  { short: 'DEF_COLUMN_NOT_FOUND', description: 'колонка не найдена в columns', rules: { kind: 'string', field: 'string' } },
-  { short: 'DEF_SUMMING_SUM', description: 'summing: sum — непустой массив числовых колонок', rules: { kind: 'string' } },
+  { short: 'DEF_NAME_EMPTY', description: 'name must be a non-empty string', rules: { kind: 'string' } },
+  { short: 'DEF_NAME_SLASH', description: 'name must not contain "/"', rules: { kind: 'string' } },
+  { short: 'DEF_COLUMNS_OBJECT', description: 'columns must be an object "field → column type"', rules: { kind: 'string' } },
+  { short: 'DEF_COLUMNS_EMPTY', description: 'columns must be a non-empty schema', rules: { kind: 'string' } },
+  { short: 'DEF_RETENTION_AGG', description: 'retention/tiers requires an explicit agg (field → min|max|sum|avg|count)', rules: { kind: 'string' } },
+  { short: 'DEF_TIERS_EMPTY', description: 'tiers must be a non-empty array of { resMs, ttlMs }', rules: { kind: 'string' } },
+  { short: 'DEF_TIERS_POSITIVE', description: 'tiers resMs/ttlMs must be > 0', rules: { kind: 'string' } },
+  { short: 'DEF_TIERS_ORDER', description: 'tiers resMs and ttlMs must not decrease (fine → coarse)', rules: { kind: 'string' } },
+  { short: 'DEF_AGG_FIELD', description: 'agg field not found in columns', rules: { kind: 'string', field: 'string' } },
+  { short: 'DEF_AGG_FN', description: 'agg fn must be min|max|sum|avg|count', rules: { kind: 'string', field: 'string', fn: 'string' } },
+  { short: 'DEF_DIMS_EMPTY', description: 'dims must be a non-empty array of fields', rules: { kind: 'string' } },
+  { short: 'DEF_DIMS_FIELD', description: 'dims field not found in columns', rules: { kind: 'string', field: 'string' } },
+  { short: 'DEF_STORAGE_TIERS', description: 'storage.tiers must be objects { id, from, to, … }', rules: { kind: 'string' } },
+  { short: 'DEF_KEY_EMPTY', description: 'key must be a non-empty array of identity-key fields', rules: { kind: 'string' } },
+  { short: 'DEF_KEY_FIELD', description: 'key field not found in columns', rules: { kind: 'string', field: 'string' } },
+  { short: 'DEF_COLUMN_NAME', description: 'a non-empty column name is required', rules: { kind: 'string' } },
+  { short: 'DEF_COLUMN_NOT_FOUND', description: 'column not found in columns', rules: { kind: 'string', field: 'string' } },
+  { short: 'DEF_SUMMING_SUM', description: 'summing: sum must be a non-empty array of numeric columns', rules: { kind: 'string' } },
 ]);
 
 // --------------------------------------------------
-// Базовое + специфичные описания (дискриминированный union по kind)
+// Base + specific descriptions (discriminated union by kind)
 // --------------------------------------------------
 
-/** Storage-тиры (re-encode без потерь): кодек/сжатие по возрасту данных. */
+/** Storage tiers (lossless re-encode): codec/compression by data age. */
 export interface StorageConfig {
-  /** Тир'ы (по умолчанию RetentionEngine.defaultTiers()). */
+  /** Tiers (default: RetentionEngine.defaultTiers()). */
   tiers?: RetentionTier[];
 }
 
 interface BaseTableDef {
-  /** Имя таблицы (и имя каталога в хранилище). */
+  /** Table name (and directory name in the store). */
   name: string;
-  /** Человек- и AI-читаемое назначение: зачем таблица и что в ней хранится. */
+  /** Human- and AI-readable purpose: what the table is for and what it stores. */
   desc?: string;
-  /** Схема: поле → тип колонки. */
+  /** Schema: field → column type. */
   columns: Schema;
 
-  // --- правило склейки по возрасту (тиры/rollup), опционально ------------
-  /** Retention-политика 'res:ttl,res:ttl' (тиры разрешения).
-   *  Задана → таблица мультитирная (rollup + TTL). Требует явный `agg`. */
+  // --- age-based merging rule (tiers/rollup), optional ------------
+  /** Retention policy 'res:ttl,res:ttl' (resolution tiers).
+   *  Set → the table is multi-tier (rollup + TTL). Requires an explicit `agg`. */
   retention?: string;
-  /** Явный массив тиров (от тонких к грубым). Приоритет над `retention`.
-   *  Задан → таблица мультитирная. Требует явный `agg`. */
+  /** Explicit tier array (fine to coarse). Takes precedence over `retention`.
+   *  Set → the table is multi-tier. Requires an explicit `agg`. */
   tiers?: ResolutionTier[];
-  /** Агрегация rollup: поле → fn (min|max|sum|avg|count). Обязательно при `retention`. */
+  /** Rollup aggregation: field → fn (min|max|sum|avg|count). Required with `retention`. */
   agg?: Record<string, AggFn>;
-  /** Поля-размеры rollup (group-by). По умолчанию: ключ движка (без ts) или схема − ts − agg. */
+  /** Rollup dimension fields (group-by). Default: the engine key (without ts) or schema − ts − agg. */
   dims?: string[];
 
-  // --- storage (re-encode без потерь), опционально -------------------------
-  /** Storage-тиры (кодек/сжатие по возрасту, без потерь). По умолчанию выключено. */
+  // --- storage (lossless re-encode), optional -------------------------
+  /** Storage tiers (codec/compression by age, lossless). Disabled by default. */
   storage?: StorageConfig;
 
-  // --- обслуживание --------------------------------------------------------
-  /** Авто-ролап при append (по умолчанию true; только для тирных таблиц). */
+  // --- maintenance --------------------------------------------------------
+  /** Auto-rollup on append (default true; multi-tier tables only). */
   autoRollup?: boolean;
-  /** Авто-purge при append (по умолчанию true). */
+  /** Auto-purge on append (default true). */
   autoPurge?: boolean;
-  /** Троттлинг авто-обслуживания (мс, по умолчанию 30 000; 0 — каждый append). */
+  /** Throttling of auto-maintenance (ms, default 30 000; 0 — every append). */
   maintenanceMinIntervalMs?: number;
-  /** Провайдер «текущего времени» (тесты). По умолчанию Date.now. */
+  /** "Current time" provider (tests). Default: Date.now. */
   nowProvider?: () => number;
 
-  // --- физическое (журнал) --------------------------------------------------
-  /** Строк в сегменте. */
+  // --- physical (journal) --------------------------------------------------
+  /** Rows per segment. */
   rowsPerSegment?: number;
-  /** Физические опции журнала (lock, format, compression, codecs, walBatchSize, …). */
+  /** Physical journal options (lock, format, compression, codecs, walBatchSize, …). */
   opts?: OpenJournalOptions;
 }
 
-/** log — слияние без изменения строк. */
+/** log — merging without changing rows. */
 export interface LogTableDef extends BaseTableDef {
   kind: 'log';
 }
 
-/** upsert — по key оставить строку с max(version). */
+/** upsert — keep the row with max(version) per key. */
 export interface UpsertTableDef extends BaseTableDef {
   kind: 'upsert';
   key: string[];
   version: string;
 }
 
-/** summing — по key суммировать числовые колонки `sum`. */
+/** summing — sum numeric columns `sum` per key. */
 export interface SummingTableDef extends BaseTableDef {
   kind: 'summing';
   key: string[];
@@ -115,7 +114,7 @@ export interface SummingTableDef extends BaseTableDef {
   version?: string;
 }
 
-/** collapsing — по key гасить пары +1/-1 в колонке `sign`. */
+/** collapsing — cancel out +1/-1 pairs in column `sign` per key. */
 export interface CollapsingTableDef extends BaseTableDef {
   kind: 'collapsing';
   key: string[];
@@ -123,24 +122,24 @@ export interface CollapsingTableDef extends BaseTableDef {
   version?: string;
 }
 
-/** Любое описание таблицы — то, что принимает store.create() и пишет в манифест. */
+/** Any table description — what store.create() accepts and writes to the manifest. */
 export type AnyTableDef = LogTableDef | UpsertTableDef | SummingTableDef | CollapsingTableDef;
 
-/** Рантайм-статистика таблицы (из каталога журнала на диске). */
+/** Table runtime stats (from the journal directory on disk). */
 export interface TableRuntime {
-  /** Логических строк в закрытых сегментах (без активного). */
+  /** Logical rows in closed segments (excluding the active one). */
   rows: number;
-  /** Количество файлов сегментов. */
+  /** Number of segment files. */
   segments: number;
-  /** Размер сегментов на диске, байт. */
+  /** Segment size on disk, bytes. */
   sizeBytes: number;
 }
 
-/** Результат store.describe(): описание таблицы + рантайм-статистика. */
+/** Result of store.describe(): table description + runtime stats. */
 export type TableDescription = AnyTableDef & TableRuntime;
 
 // --------------------------------------------------
-// Валидация (базовые правила)
+// Validation (basic rules)
 // --------------------------------------------------
 
 const AGG_FNS: ReadonlySet<string> = new Set(['min', 'max', 'sum', 'avg', 'count']);
@@ -229,16 +228,16 @@ function requireColumn(cfg: BaseTableDef, field: unknown, kind: string): string 
 }
 
 // --------------------------------------------------
-// define* — одна функция на движок
+// define* — one function per engine
 // --------------------------------------------------
 
-/** log (MergeTree): слияние без изменения строк. */
+/** log (MergeTree): merging without changing rows. */
 export function defineLogTable(cfg: Omit<LogTableDef, 'kind'>): LogTableDef {
   validateBase(cfg, 'log');
   return { ...cfg, kind: 'log' };
 }
 
-/** upsert (ReplacingMergeTree): по key оставить строку с max(version). */
+/** upsert (ReplacingMergeTree): keep the row with max(version) per key. */
 export function defineUpsertTable(cfg: Omit<UpsertTableDef, 'kind'>): UpsertTableDef {
   validateBase(cfg, 'upsert');
   validateKey(cfg, 'upsert');
@@ -246,7 +245,7 @@ export function defineUpsertTable(cfg: Omit<UpsertTableDef, 'kind'>): UpsertTabl
   return { ...cfg, kind: 'upsert', version };
 }
 
-/** summing (SummingMergeTree): по key суммировать числовые колонки `sum`. */
+/** summing (SummingMergeTree): sum numeric columns `sum` per key. */
 export function defineSummingTable(cfg: Omit<SummingTableDef, 'kind'>): SummingTableDef {
   validateBase(cfg, 'summing');
   validateKey(cfg, 'summing');
@@ -258,7 +257,7 @@ export function defineSummingTable(cfg: Omit<SummingTableDef, 'kind'>): SummingT
   return { ...cfg, kind: 'summing', sum, version };
 }
 
-/** collapsing (CollapsingMergeTree): по key гасить пары +1/-1 в колонке `sign`. */
+/** collapsing (CollapsingMergeTree): cancel out +1/-1 pairs in column `sign` per key. */
 export function defineCollapsingTable(cfg: Omit<CollapsingTableDef, 'kind'>): CollapsingTableDef {
   validateBase(cfg, 'collapsing');
   validateKey(cfg, 'collapsing');
@@ -268,10 +267,10 @@ export function defineCollapsingTable(cfg: Omit<CollapsingTableDef, 'kind'>): Co
 }
 
 // --------------------------------------------------
-// Описание → дескриптор движка (для metadata/compact)
+// Description → engine descriptor (for metadata/compact)
 // --------------------------------------------------
 
-/** Достаёт из описания таблицы дескриптор движка (то, что нужно compact()). */
+/** Extracts the engine descriptor from a table description (what compact() needs). */
 export function engineDescriptorOf(def: AnyTableDef): Descriptor {
   switch (def.kind) {
     case 'log':

@@ -1,29 +1,27 @@
-// ============================================================
-// compaction/Descriptor.ts — Описание движка компактизации
+// compaction/Descriptor.ts — Description of a compaction engine.
 //
-// Ровно то, что compact() нужно для слияния строк. Хранится в metadata
-// журнала (под ключом ENGINE_META_KEY) и в манифесте _store.json.
+// Exactly what compact() needs to merge rows. Stored in the journal
+// metadata (under ENGINE_META_KEY) and in the _store.json manifest.
 //
-// Сериализация (toMeta / fromMeta) — часть самого описания, поэтому живёт
-// здесь, а не в types.ts и не в разбросанных функциях.
-// ============================================================
+// Serialization (toMeta / fromMeta) — part of the description itself,
+// so it lives here, not in types.ts and not in scattered functions.
 
 import type { JsonObject } from '../types.ts';
 import type { EngineKind } from './types.ts';
 
-/** Ключ в metadata журнала, под которым лежит дескриптор движка. */
+  /** Key in the journal metadata where the engine descriptor is stored. */
 export const ENGINE_META_KEY = '_engine';
 
-/** Нормализованное описание движка — параметры слияния. */
+  /** Normalized description of the engine — merge parameters. */
 export class Descriptor {
   readonly kind: EngineKind;
-  /** identity-ключ строки (upsert/summing/collapsing) — поля, по которым группируются строки. */
+  /** Row identity key (upsert/summing/collapsing) — fields rows are grouped by. */
   readonly key?: string[];
-  /** колонка «новизны» (upsert обязательна): строка с max(version) побеждает. */
+  /** "newness" column (required for upsert): the row with max(version) wins. */
   readonly version?: string;
-  /** числовые колонки, которые суммируются (summing). */
+  /** Numeric columns that are summed (summing). */
   readonly sum?: string[];
-  /** колонка знака +1/-1 (collapsing). */
+  /** +1/-1 sign column (collapsing). */
   readonly sign?: string;
 
   constructor(init: {
@@ -40,7 +38,7 @@ export class Descriptor {
     this.sign = init.sign;
   }
 
-  /** Чисто-сериграфическое JsonObject для metadata/манифеста (только присутствующие поля). */
+  /** Purely serializable JsonObject for metadata/manifest (only present fields). */
   toMeta(): JsonObject {
     const o: JsonObject = { kind: this.kind };
     if (this.key) o.key = this.key;
@@ -50,7 +48,7 @@ export class Descriptor {
     return o;
   }
 
-  /** Из metadata: вернёт Descriptor либо undefined, если движка нет/данные битые. */
+  /** From metadata: returns a Descriptor, or undefined if there is none / the data is corrupt. */
   static fromMeta(raw: unknown): Descriptor | undefined {
     if (raw === null || typeof raw !== 'object' || !('kind' in raw)) return undefined;
     const d = raw as Record<string, unknown>;

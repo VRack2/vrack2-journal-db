@@ -1,6 +1,4 @@
-// ============================================================
-// columns/RawColumn.ts — Хранение «как есть»
-// ============================================================
+// columns/RawColumn.ts — Storage "as-is"
 
 import { Column } from './Column.ts';
 import type { JsonValue, RawColumnData, SerializedColumn } from '../types.ts';

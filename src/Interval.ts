@@ -1,22 +1,15 @@
-// ============================================================
-// Interval.ts — «язык интервалов», совместимый с VRackDB Interval
-// (https://github.com/ponikrf/VRackDB), но базовая единица — миллисекунды.
+// Interval.ts — "interval language", VRackDB-compatible
+// (https://github.com/ponikrf/VRackDB), but the base unit is ms.
+// Syntax and method names match VRackDB, so existing code carries over.
+// No external dependencies.
 //
-//   VRackDB Interval:   MTU = секунда,  nowFactor = 0.001 (мс → сек)
-//   здесь (Interval):   MTU = миллисекунда, nowFactor = 1 (мс → мс)
-//
-// Синтаксис и имена методов совпадают с VRackDB, поэтому привычный код
-// (Interval.parseInterval('1h'), Interval.period('now-1d:now')) переносится
-// почти как есть. Без внешних зависимостей.
-//
-//   '15s' '10m' '1h' '1d' '2w' '3mon' '1y'  — интервал (→ мс)
-//   'now-1d' 'now+1h' 'now-1h-1m'           — относительный момент (→ мс)
-//   'now-7d:now'                            — период [start, end] (→ мс)
-// ============================================================
+//   '15s' '10m' '1h' '1d' '2w' '3mon' '1y'  — interval (→ ms)
+//   'now-1d' 'now+1h' 'now-1h-1m'           — relative point (→ ms)
+//   'now-7d:now'                            — period [start, end] (→ ms)
 
 import ErrorManager from './errors/ErrorManager.ts';
 
-/** Единица времени → миллисекунды (маппинг совпадает с VRackDB: mon=30д, y=365д). */
+/** Time unit → ms (mapping matches VRackDB: mon=30d, y=365d). */
 const UNIT_MS: Record<string, number> = {
   ms: 1,
   s: 1_000,
@@ -24,58 +17,55 @@ const UNIT_MS: Record<string, number> = {
   h: 3_600_000,
   d: 86_400_000,
   w: 604_800_000,
-  mon: 2_592_000_000, // 30 дней
-  y: 31_536_000_000   // 365 дней
+  mon: 2_592_000_000, // 30d
+  y: 31_536_000_000   // 365d
 };
 
 ErrorManager.registerMany('Interval', [
-  { short: 'INT_UNIT_UNKNOWN', description: 'Interval: неизвестная единица (доступно: ms s m h d w mon y)', rules: { unit: 'string' } },
-  { short: 'INT_PARSE', description: 'Interval: некорректный интервал, примеры: 10s, 1m, 1h, 1d' },
-  { short: 'INT_RESOLVE', description: 'Interval: resolve — число (мс) или строка вида now-1d/1700000000000' },
-  { short: 'INT_PERIOD_FORMAT', description: 'Interval: период в формате «start:end», например now-7d:now' },
-  { short: 'INT_PERIOD_ARGS', description: 'Interval: period — две границы (start, end) или строка "start:end"' },
-  { short: 'INT_RANGE_ORDER', description: 'Interval: start должен быть <= end' },
-  { short: 'INT_TIME_NOT_INT', description: 'Interval: time должен быть целым числом' },
-  { short: 'INT_PRECISION', description: 'Interval: precision — целое число > 0' },
+  { short: 'INT_UNIT_UNKNOWN', description: 'Interval: unknown unit (available: ms s m h d w mon y)', rules: { unit: 'string' } },
+  { short: 'INT_PARSE', description: 'Interval: invalid interval, examples: 10s, 1m, 1h, 1d' },
+  { short: 'INT_RESOLVE', description: 'Interval: resolve — number (ms) or a string like now-1d/1700000000000' },
+  { short: 'INT_PERIOD_FORMAT', description: 'Interval: period in "start:end" format, e.g. now-7d:now' },
+  { short: 'INT_PERIOD_ARGS', description: 'Interval: period — two bounds (start, end) or a "start:end" string' },
+  { short: 'INT_RANGE_ORDER', description: 'Interval: start must be <= end' },
+  { short: 'INT_TIME_NOT_INT', description: 'Interval: time must be an integer' },
+  { short: 'INT_PRECISION', description: 'Interval: precision — integer > 0' },
 ]);
 
 export class Interval {
-  /** Множитель из стандартного JS-времени (мс) в нашу базовую единицу (МС). */
+
+  /** Multiplier from standard JS time (ms) to the base unit (ms). */
   static getFactor(): number {
     return 1;
   }
 
-  /** Текущее время в нашей базовой единице (мс). */
+  /** Current time in ms. */
   static now(): number {
     return Date.now();
   }
 
   /**
-   * Интервал строкой → миллисекунды.
+   * Interval string → ms.
    *   '10s' → 10_000, '1m' → 60_000, '1h' → 3_600_000, '1d' → 86_400_000
-   *   '900' → 900 (просто число — уже мс)
+   *   '900' → 900 (plain number — already ms)
    */
   static parseInterval(ival: string): number {
     const s = String(ival).replace(/\s/g, '');
     const m = s.match(/^(\d+)([a-zA-Z]+)$/);
     if (m) {
       const unit = UNIT_MS[m[2]];
-      if (unit === undefined) {
-        throw ErrorManager.make('INT_UNIT_UNKNOWN', { unit: m[2] });
-      }
+      if (unit === undefined) throw ErrorManager.make('INT_UNIT_UNKNOWN', { unit: m[2] });
       return Math.round(parseInt(m[1], 10) * unit);
     }
-    if (!/^\d+$/.test(s)) {
-      throw ErrorManager.make('INT_PARSE');
-    }
+    if (!/^\d+$/.test(s)) throw ErrorManager.make('INT_PARSE');
     return parseInt(s, 10);
   }
 
   /**
-   * Относительный момент / отрезок → миллисекунды.
-   *   'now-10d' → now − 10д, 'now+1h' → now + 1ч, 'now-1h-1m' → now − 1ч − 1м
-   *   '10d'     → 10д,       '1700000000000' → это же (абсолютное время)
-   * Поддерживает операторы `+` и `-`.
+   * Relative point / span → ms.
+   *   'now-10d' → now − 10d, 'now+1h' → now + 1h, 'now-1h-1m' → now − 1h − 1m
+   *   '10d' → 10d, '1700000000000' → same (absolute time)
+   * Supports the `+` and `-` operators.
    */
   static partOfPeriod(str: string, now: number = Date.now()): number {
     const s = String(str).replace(/\s/g, '');
@@ -85,44 +75,31 @@ export class Interval {
       if (token === '-') { sign = -1; continue; }
       if (token === '+') { sign = 1; continue; }
       if (token === '') continue;
-      let value: number;
-      if (token === 'now') {
-        value = now;
-      } else if (/^\d+$/.test(token)) {
-        value = parseInt(token, 10);
-      } else {
-        value = Interval.parseInterval(token);
-      }
-      result += value * sign;
+      result +=  this.prepareInterval(token, now) * sign;
     }
     return result;
   }
 
-  /**
-   * Одна граница: число (мс) или строка «языка интервалов»
-   * ('now-1d'/'now'/'1700000000000') → миллисекунды. Числа проходят как есть.
-   */
+  protected static prepareInterval(token:string, now:number){
+      if (token === 'now') return now;
+      if (/^\d+$/.test(token)) return parseInt(token, 10); 
+      return Interval.parseInterval(token);
+  }
+
+
+  /** One bound: a number (ms) or an interval string ('now-1d'/'now'/'1700000000000') → ms. Numbers pass through. */
   static resolve(value: number | string, now: number = Date.now()): number {
     const v = typeof value === 'string' ? Interval.partOfPeriod(value, now) : value;
-    if (typeof v !== 'number' || !Number.isFinite(v)) {
-      throw ErrorManager.make('INT_RESOLVE', { value: String(value) });
-    }
+    if (typeof v !== 'number' || !Number.isFinite(v)) throw ErrorManager.make('INT_RESOLVE', { value: String(value) });
     return v;
   }
 
-  /**
-   * Период вида 'start:end' → [start, end] в мс.
-   *   'now-7d:now' → [now − 7д, now]
-   */
+  /** Period 'start:end' → [start, end] in ms. 'now-7d:now' → [now − 7d, now] */
   static period(period: string, now?: number): [number, number];
-  /**
-   * Период по двум границам — число (мс) или строка вида 'now-1d' на каждом
-   * конце → [start, end] в мс. Проверяет start <= end.
-   *   ('now-7d', 'now') → [now − 7д, now]
-   */
+  /** Period by two bounds (number ms or 'now-1d'-like strings) → [start, end] in ms. Checks start <= end. */
   static period(start: number | string, end: number | string, now?: number): [number, number];
   static period(a: string | number, b?: number | string, now?: number): [number, number] {
-    // Старая форма: (строка 'start:end', now?) — без явного третьего аргумента.
+    // Legacy form: (string 'start:end', now?) — no explicit third arg.
     if (
       typeof a === 'string' && now === undefined &&
       (b === undefined || typeof b === 'number')
@@ -133,34 +110,26 @@ export class Interval {
       }
       return Interval._pair(parts[0], parts[1], typeof b === 'number' ? b : Date.now());
     }
-    if (b === undefined) {
-      throw ErrorManager.make('INT_PERIOD_ARGS');
-    }
+    if (b === undefined) throw ErrorManager.make('INT_PERIOD_ARGS');
     return Interval._pair(a, b, now !== undefined ? now : Date.now());
   }
 
-  /** Общая часть period(): резолвит границы и проверяет start <= end. */
+  /** Shared part of period(): resolves bounds and checks start <= end. */
   private static _pair(start: number | string, end: number | string, now: number): [number, number] {
     const s = Interval.resolve(start, now);
     const e = Interval.resolve(end, now);
-    if (e < s) {
-      throw ErrorManager.make('INT_RANGE_ORDER', { start: s, end: e });
-    }
+    if (e < s) throw ErrorManager.make('INT_RANGE_ORDER', { start: s, end: e });
     return [s, e];
   }
 
-  /** Округляет время вниз до кратности `precision`. */
+  /** Round time down to a multiple of `precision`. */
   static roundTime(time: number, precision: number): number {
-    if (!Number.isInteger(time)) {
-      throw ErrorManager.make('INT_TIME_NOT_INT', { time });
-    }
-    if (!Number.isInteger(precision) || precision <= 0) {
-      throw ErrorManager.make('INT_PRECISION', { precision });
-    }
+    if (!Number.isInteger(time)) throw ErrorManager.make('INT_TIME_NOT_INT', { time });
+    if (!Number.isInteger(precision) || precision <= 0) throw ErrorManager.make('INT_PRECISION', { precision });
     return time - (time % precision);
   }
 
-  /** Точки разбиения [start, end] с шагом `precision` (start/end округляются вниз). */
+  /** Split points of [start, end] with step `precision` (start/end rounded down). */
   static getIntervals(start: number, end: number, precision: number): number[] {
     if (start > end) {
       throw ErrorManager.make('INT_RANGE_ORDER', { start, end });
@@ -173,7 +142,7 @@ export class Interval {
     return out;
   }
 
-  /** Размер интервала, чтобы в [start, end] попало ровно `count` отсчётов. */
+  /** Interval size so that [start, end] contains exactly `count` samples. */
   static getIntervalOfFixedCount(start: number, end: number, count: number): number {
     if (!Number.isFinite(count) || count <= 0) return 1;
     let c = Math.floor(Math.abs(start - end) / count);

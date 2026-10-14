@@ -7,6 +7,7 @@ import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/Journal.ts';
+import ErrorManager from '../src/errors/ErrorManager.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -101,7 +102,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
     b.open('locked', schema);
   } catch (e) {
     threw = true;
-    assert(/заблокирован/.test(String(e)), 'ошибка упоминает блокировку');
+    assert(ErrorManager.isCode(e, 'JRN_LOCKED'), 'ошибка упоминает блокировку');
   }
   assert(threw, 'второй open того же журнала бросает ошибку');
 

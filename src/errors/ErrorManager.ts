@@ -55,7 +55,7 @@ class ErrorManager {
     register(name: string, short: string, description: string, rules: { [key: string]: RuleType } = {}) {
         const reg = this.getRegistered(short)
         if (reg !== null) {
-            // Если уже есть идентичная запись - просто игнорим
+            // If there is already an identical record - just ignore it
             if (reg.name === name && reg.short === short && reg.description === description && JSON.stringify(reg.rules) === JSON.stringify(rules)) {
                 return
             }else {
@@ -77,14 +77,14 @@ class ErrorManager {
      * @param list Array of { short, description, rules? }
     */
     registerMany(name: string, list: Array<{ short: string, description: string, rules?: { [key: string]: RuleType } }>) {
-        // 1) Проверяем конфликтность: дубли short внутри списка + совпадение с уже зарегистрированными
+        // 1) Check for conflicts: duplicate shorts inside the list + match with already registered
         const seen = new Set<string>()
         for (const entry of list) {
             if (seen.has(entry.short)) throw this.make('EM_CODE_EXISTS', { short: entry.short })
             seen.add(entry.short)
             if (this.getRegistered(entry.short) !== null) throw this.make('EM_CODE_EXISTS', { short: entry.short })
         }
-        // 2) Атомарно регистрируем (конфликтов нет — просто пушим)
+        // 2) Register atomically (no conflicts - just push)
         for (const entry of list) {
             const nr: RegisteredError = { name, short: entry.short, description: entry.description, rules: entry.rules ?? {} }
             this.registeredList.push(nr)
@@ -102,7 +102,7 @@ class ErrorManager {
         if (reg === null) throw this.make('EM_CODE_NOT_FOUND')
         const ne = new CoreError(reg.name, reg.description, reg.short)
 
-        // Убираем из стека вызовы ErrorManager.make()
+        // Strip ErrorManager.make() calls from the stack
         if (typeof Error.captureStackTrace === 'function') {
             Error.captureStackTrace(ne, this.make);
         }
@@ -115,7 +115,7 @@ class ErrorManager {
     /**
      * Converts a normal error to a VRack error
      *
-     * @param error Ошибка для преобразования
+     * @param error Error to convert
      */
     convert(error: any) {
         if (error.vError) return error
@@ -125,8 +125,8 @@ class ErrorManager {
     }
 
     /**
-     * Проверяет является ли ошибка VRack2 Error
-     * и соответствует ли код переданной ошибке (проверяет vShort)
+     * Checks whether the error is a VRack2 Error
+     * and whether the code matches the given error (checks vShort)
     */
     isCode(error: any, code: string){
         if (!this.isError(error)) return false
@@ -135,10 +135,10 @@ class ErrorManager {
     }
 
     /**
-     * Проверяет - принадлежит объект ошибки VRack2 Error
+     * Checks whether the error object belongs to VRack2 Error
      *
-     * Это не обязательно должен быть класс CoreError но и
-     * любой сериализированный класс ошибки VRack2
+     * It does not necessarily have to be a CoreError class but any
+     * serialized VRack2 error class
     */
     isError(error: any){
         if (error instanceof CoreError) return true

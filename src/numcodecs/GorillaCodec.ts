@@ -1,16 +1,14 @@
-// ============================================================
-// numcodecs/GorillaCodec.ts — XOR соседних double (lossless, битовый)
+// numcodecs/GorillaCodec.ts — XOR of adjacent doubles (lossless, bit-level).
 //
-// Схема (само-консистентная, без потерь):
-//   первое значение — 64 бита как есть (hi32, lo32);
-//   далее x = prev XOR cur (64 бита):
-//     x == 0        → 1 бит (0);
-//     x != 0        → 1(1) + 6 бит L (ведущие нули, 0..63)
-//                     + (64-L) бит значимой части:
-//                       S = 64-L <= 32 → S бит lo32;
-//                       S >  32        → (S-32) бит hi32, затем 32 бит lo32.
-//   Медленно меняющиеся float (CPU/RAM) → малый x → мало бит.
-// ============================================================
+// Scheme (self-consistent, lossless):
+//   first value — 64 bits as-is (hi32, lo32);
+//   then x = prev XOR cur (64 bits):
+//     x == 0        → 1 bit (0);
+//     x != 0        → 1(1) + 6 bits L (leading zeros, 0..63)
+//                     + (64-L) bits of the significant part:
+//                       S = 64-L <= 32 → S bits of lo32;
+//                       S >  32        → (S-32) bits of hi32, then 32 bits of lo32.
+//   Slowly changing floats (CPU/RAM) → small x → few bits.
 
 import { BitWriter } from './BitWriter.ts';
 import { BitReader } from './BitReader.ts';
@@ -40,7 +38,7 @@ export class GorillaCodec implements NumCodec {
         w.write(1, 1);
         w.write(L, 6);
         if (S <= 32) {
-          w.write(xlo, S); // x < 2^S → значение в lo32
+           w.write(xlo, S); // x < 2^S → value in lo32
         } else {
           const hiBits = S - 32;
           w.write(xhi, hiBits); // xhi < 2^hiBits
@@ -84,7 +82,7 @@ export class GorillaCodec implements NumCodec {
   }
 
   // --------------------------------------------------
-  // double ⇆ 64-битное целое (без потери)
+  // double ⇆ 64-bit integer (lossless)
   // --------------------------------------------------
 
   private static f64ToParts(v: number): [number, number] {
@@ -106,7 +104,7 @@ export class GorillaCodec implements NumCodec {
     return [ahi ^ bhi, alo ^ blo];
   }
 
-  /** Ведущие нули 64-битного числа (hi, lo): 0..64. */
+  /** Leading zeros of a 64-bit number (hi, lo): 0..64. */
   private static leadingZeros64(hi: number, lo: number): number {
     if (hi !== 0) {
       let c = 0;

@@ -1,13 +1,11 @@
-// ============================================================
-// index.ts — Публичный API пакета vrack2-journal-db
+// index.ts — public API of the vrack2-journal-db package.
 //
-// Одно лицо (ClickHouse-модель): Store — каталог таблиц,
-// Table — таблица, define*Table — описание (движок + тиры).
-// Внутренняя механика (журналы, сегменты, кодексы, SQL-парсер)
-// не экспортируется — см. RULES.md §5.
-// ============================================================
+// One face (ClickHouse model): Store — the catalog of tables,
+// Table — a table, define*Table — a description (engine + tiers).
+// The internal machinery (journals, segments, codecs, the SQL parser)
+// is not exported — see RULES.md §5.
 
-// --- значения -------------------------------------------------
+// --- values -------------------------------------------------
 
 export { Store } from './Store.ts';
 export { Table } from './Table.ts';
@@ -19,7 +17,7 @@ export {
   defineCollapsingTable
 } from './compaction/define.ts';
 
-// --- типы -----------------------------------------------------
+// --- types -----------------------------------------------------
 
 export type {
   AggFn,

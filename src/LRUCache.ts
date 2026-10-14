@@ -1,12 +1,7 @@
-// ============================================================
-// LRUCache.ts — Простой LRU-кэш на основе Map
-// (порядок итерации Map = порядок вставки, переinsert = touch)
-// ============================================================
-
 import ErrorManager from './errors/ErrorManager.ts';
 
 ErrorManager.registerMany('LRUCache', [
-  { short: 'LRU_MAXSIZE', description: 'LRUCache: maxSize должно быть целым числом >= 1', rules: { maxSize: 'number' } },
+  { short: 'LRU_MAXSIZE', description: 'LRUCache: maxSize must be an integer >= 1', rules: { maxSize: 'number' } },
 ]);
 
 export class LRUCache<K, V> {
@@ -31,7 +26,7 @@ export class LRUCache<K, V> {
   get(key: K): V | undefined {
     if (!this._map.has(key)) return undefined;
     const value = this._map.get(key)!;
-    // Отмечаем как недавно использованный (переносим в конец)
+    // Mark as recently used (move to the end)
     this._map.delete(key);
     this._map.set(key, value);
     return value;
@@ -42,7 +37,7 @@ export class LRUCache<K, V> {
     this._map.set(key, value);
     while (this._map.size > this.maxSize) {
       const oldest = this._map.keys().next();
-      if (oldest.done) break; // недостижимо: size > maxSize гарантирует наличие ключа
+      if (oldest.done) break;
       this._map.delete(oldest.value);
     }
     return this;

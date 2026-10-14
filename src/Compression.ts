@@ -1,27 +1,24 @@
-// ============================================================
-// Compression.ts — Сжатие блобов (gzip/zstd, без потерь)
-//
-// zstd по умолчанию при Node ≥ 23.8 (где он есть в zlib),
-// иначе gzip. Явный выбор всегда переопределяет дефолт.
-// ============================================================
+// Compression.ts — Blob compression (gzip/zstd, lossless).
+// zstd is the default when present in zlib (Node ≥ 23.8), otherwise gzip.
+// An explicit choice always overrides the default.
 
 import zlib from 'node:zlib';
 import type { CompressionKind } from './types.ts';
 
 export class Compression {
-  /** Есть ли zstd в zlib (Node >= 23.8). */
+  /** Whether zstd is present in zlib (Node >= 23.8). */
   static zstdAvailable(): boolean {
     const z = zlib as unknown as { zstdCompressSync?: unknown };
     return typeof z.zstdCompressSync === 'function';
   }
 
-  /** Дефолт сжатия: zstd при Node >= 23.8 (где он есть в zlib), иначе gzip. */
+  /** Default compression: zstd if available, else gzip. */
   static default(): 'gzip' | 'zstd' {
     if (this.zstdAvailable()) return 'zstd';
     return 'gzip';
   }
 
-  /** Сжимает буфер выбранным способом ('none' — как есть). */
+  /** Compress a buffer with the selected method ('none' — as-is). */
   static compress(buf: Buffer, mode: CompressionKind): Buffer {
     if (mode === 'none') return buf;
     if (mode === 'zstd') {
@@ -33,7 +30,7 @@ export class Compression {
     return zlib.gzipSync(buf, { level: 6 });
   }
 
-  /** Разжимает буфер выбранным способом ('none' — как есть). */
+  /** Decompress a buffer with the selected method ('none' — as-is). */
   static decompress(buf: Buffer, mode: CompressionKind): Buffer {
     if (mode === 'none') return buf;
     if (mode === 'zstd') {

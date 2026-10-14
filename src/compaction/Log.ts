@@ -1,10 +1,8 @@
-// ============================================================
-// compaction/Log.ts — log (MergeTree)
+// compaction/Log.ts — log (MergeTree).
 //
-// Слияние без изменения строк: просто объединяет сегменты (дефолт). Порядок
-// строк сохраняется (хронологический). Это поведение compact() до появления
-// движков — совместимо со старыми журналами.
-// ============================================================
+// Merge without changing rows: just combines segments (default). Row order
+// is preserved (chronological). This is the pre-engines compact() behavior —
+// compatible with old journals.
 
 import type { Row } from './types.ts';
 import type { Descriptor } from './Descriptor.ts';

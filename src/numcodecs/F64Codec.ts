@@ -1,6 +1,4 @@
-// ============================================================
-// numcodecs/F64Codec.ts — базовая линия, 8 байт на значение
-// ============================================================
+// numcodecs/F64Codec.ts — Baseline, 8 bytes per value
 
 import type { NumCodec } from './types.ts';
 

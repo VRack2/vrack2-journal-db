@@ -64,7 +64,7 @@ const lockPathOf = (name: string): string => path.join(baseDir, 'journals', name
     blocked.open('shared', schema);
   } catch (e) {
     threw = true;
-    assert(/заблокирован/.test(String(e)), 'обычный open отклоняется при живой блокировке');
+    assert(ErrorManager.isCode(e, 'JRN_LOCKED'), 'обычный open отклоняется при живой блокировке');
   }
   assert(threw, 'обычный owner не может открыть журнал дважды');
 
@@ -109,7 +109,7 @@ const lockPathOf = (name: string): string => path.join(baseDir, 'journals', name
     j.open('orphan', schema);
   } catch (e) {
     threw = true;
-    assert(/заблокирован/.test(String(e)), 'ошибка упоминает блокировку');
+    assert(ErrorManager.isCode(e, 'JRN_LOCKED'), 'ошибка упоминает блокировку');
     assert(/lock: 'off'/.test(String(e)), 'ошибка подсказывает способ обхода (lock:\'off\')');
   }
   assert(threw, 'по умолчанию журнал с «живым» PID владельца не открывается — задокументированное ограничение');

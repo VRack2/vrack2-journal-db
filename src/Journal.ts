@@ -1,18 +1,10 @@
-// ============================================================
-// Journal.ts — Журнал событий
-// Закрытые сегменты грузятся с диска лениво (по требованию),
-// кэшируются в LRU. Активный сегмент живёт в памяти до flush.
-//
-// Надёжность:
-//  - WAL (wal.log): строки пишутся в WAL пачками (walBatchSize), буфер
-//    гарантированно сбрасывается на диск при flush/close/выходе процесса,
-//    при открытии после краха восстанавливается;
-//  - lockfile (.lock): один владелец журнала, устаревшие блокировки
-//    (мёртвый PID) забираются автоматически;
-//  - файлы сегментов v2: gzip + CRC32 (см. SegmentFileV2.ts); рядом лежит маленький
-//    сайдкар <файл>.meta с minTs/maxTs/счётчиками — позволяет пропускать
-//    чужие по времени файлы при query/stats без их разжатия.
-// ============================================================
+/*
+ * Journal — append-only event log. Closed segments load lazily from disk and are
+ * LRU-cached; the active segment lives in memory until flush.
+ * Durability: WAL (batched, drained on flush/close/exit, replayed after a crash),
+ * a single-owner lockfile (stale PIDs auto-reclaimed), and a per-segment .meta
+ * sidecar (minTs/maxTs/counts) so time-range queries skip non-overlapping files.
+ */
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,47 +22,48 @@ import { Sql } from './Sql.ts';
 import ErrorManager from './errors/ErrorManager.ts';
 
 ErrorManager.registerMany('Journal', [
-  { short: 'JRN_OPT_COMPACT_MIN', description: 'Journal: compactMinSegments должно быть целым числом >= 2' },
-  { short: 'JRN_OPT_WAL_BATCH', description: 'Journal: walBatchSize должно быть целым числом >= 1' },
-  { short: 'JRN_OPT_LOCK', description: "Journal: lock должно быть 'pid' или 'off'" },
-  { short: 'JRN_OPT_FORMAT', description: "Journal: format должно быть 'v2' или 'v3'" },
-  { short: 'JRN_OPT_COMPRESSION', description: "Journal: compression должно быть 'gzip' или 'zstd'" },
+  { short: 'JRN_OPT_COMPACT_MIN', description: 'compactMinSegments must be an integer >= 2' },
+  { short: 'JRN_OPT_WAL_BATCH', description: 'walBatchSize must be an integer >= 1' },
+  { short: 'JRN_OPT_LOCK', description: "lock must be 'pid' or 'off'" },
+  { short: 'JRN_OPT_FORMAT', description: "format must be 'v2' or 'v3'" },
+  { short: 'JRN_OPT_COMPRESSION', description: "compression must be 'gzip' or 'zstd'" },
   { short: 'JRN_ALREADY_OPEN', description: 'Journal already open', rules: { name: 'string' } },
   { short: 'JRN_NOT_OPEN', description: 'Journal not open. Call open() first.' },
-  { short: 'JRN_MERGE_EMPTY', description: 'mergeClosedSegments: пустой список' },
-  { short: 'JRN_TL_INTERVAL', description: 'Journal: timeline() — interval: число (мс) или строка вида 1h/30m' },
-  { short: 'JRN_TL_INTERVAL_POS', description: 'Journal: timeline() — interval должно быть > 0 (мс)' },
-  { short: 'JRN_TL_PERIOD', description: 'Journal: timeline() — период: [start, end] (мс) или строка вида now-7d:now' },
-  { short: 'JRN_AGG_EXPRS', description: 'Journal: aggregate() — exprs: непустой массив { field, fn }' },
-  { short: 'JRN_AGG_FIELD', description: 'Journal: aggregate() — expr.field: непустое имя поля' },
-  { short: 'JRN_AGG_FN', description: 'Journal: aggregate() — expr.fn: min|max|sum|avg|count', rules: { fn: 'string' } },
-  { short: 'JRN_PCTL_FIELD', description: 'Journal: percentile() — field: непустое имя поля' },
-  { short: 'JRN_PCTL_LEVEL', description: 'Journal: percentile() — level: число в (0, 1)', rules: { level: 'string' } },
-  { short: 'JRN_DS_FIELD', description: 'Journal: downsample() — field: непустое имя поля' },
-  { short: 'JRN_DS_FNS', description: 'Journal: downsample() — fns: непустой массив min|max|sum|avg|count' },
-  { short: 'JRN_DS_FN', description: 'Journal: downsample() — fn: min|max|sum|avg|count', rules: { fn: 'string' } },
-  { short: 'JRN_DS_BUCKET', description: 'Journal: downsample() — bucketMs: число (мс) или строка вида 15m/1h' },
-  { short: 'JRN_DS_BUCKET_POS', description: 'Journal: downsample() — bucketMs должно быть > 0 (мс)' },
-  { short: 'JRN_INSERT_NAME', description: 'INSERT INTO — журнал открыт как другое имя', rules: { name: 'string', journal: 'string' } },
-  { short: 'JRN_FROM_NAME', description: 'SELECT FROM — журнал открыт как другое имя', rules: { table: 'string', journal: 'string' } },
-  { short: 'JRN_SCAN_RANGE', description: 'Journal: scan() — start должен быть <= end' },
-  { short: 'JRN_SCAN_WHERE_FIELD', description: 'Journal: scan() — where[].field: непустое имя поля' },
-  { short: 'JRN_SCAN_WHERE_OP', description: 'Journal: scan() — where[].op: допустимые операторы', rules: { op: 'string', allowed: 'string' } },
-  { short: 'JRN_SCAN_WHERE_IN', description: 'Journal: scan() — where[].value для in/nin: массив значений' },
-  { short: 'JRN_SCAN_AGG_FIELD', description: 'Journal: scan() — agg: непустое имя поля' },
-  { short: 'JRN_SCAN_AGG_FNS', description: 'Journal: scan() — agg.поле: непустой массив функций' },
-  { short: 'JRN_SCAN_AGG_FN', description: 'Journal: scan() — agg.поле: min|max|sum|avg|count', rules: { fn: 'string' } },
-  { short: 'JRN_SCAN_GROUPBY_AGG', description: 'Journal: scan() — groupBy требует agg' },
-  { short: 'JRN_SCAN_GROUPBY', description: 'Journal: scan() — groupBy: непустое имя поля' },
-  { short: 'JRN_SCAN_SELECT', description: 'Journal: scan() — select: непустой список полей' },
-  { short: 'JRN_SCAN_SELECT_FIELD', description: 'Journal: scan() — select[].field: непустое имя поля' },
-  { short: 'JRN_SCAN_ORDER', description: "Journal: scan() — order: 'asc' или 'desc'" },
-  { short: 'JRN_SCAN_LIMIT', description: 'Journal: scan() — limit: целое число >= 0' },
-  { short: 'JRN_SCAN_OFFSET', description: 'Journal: scan() — offset: целое число >= 0' },
-  { short: 'JRN_SEG_UNKNOWN', description: 'Неизвестный сегмент', rules: { id: 'string' } },
-  { short: 'JRN_SEG_READ', description: 'Не удалось прочитать сегмент', rules: { file: 'string', message: 'string' } },
-  { short: 'JRN_LOCKED', description: "Журнал заблокирован процессом. Если других владельцев нет, откройте журнал с { lock: 'off' } или удалите .lock", rules: { pid: 'number', lockPath: 'string' } },
+  { short: 'JRN_MERGE_EMPTY', description: 'mergeClosedSegments: empty list' },
+  { short: 'JRN_TL_INTERVAL', description: 'timeline(): interval must be a number (ms) or string like "1h/30m"' },
+  { short: 'JRN_TL_INTERVAL_POS', description: 'timeline(): interval must be > 0 (ms)' },
+  { short: 'JRN_TL_PERIOD', description: 'timeline(): period must be [start, end] (ms) or string like "now-7d:now"' },
+  { short: 'JRN_AGG_EXPRS', description: 'aggregate(): exprs must be a non-empty array of { field, fn }' },
+  { short: 'JRN_AGG_FIELD', description: 'aggregate(): expr.field must be a non-empty string' },
+  { short: 'JRN_AGG_FN', description: 'aggregate(): expr.fn must be min|max|sum|avg|count', rules: { fn: 'string' } },
+  { short: 'JRN_PCTL_FIELD', description: 'percentile(): field must be a non-empty string' },
+  { short: 'JRN_PCTL_LEVEL', description: 'percentile(): level must be a number in (0, 1)', rules: { level: 'string' } },
+  { short: 'JRN_DS_FIELD', description: 'downsample(): field must be a non-empty string' },
+  { short: 'JRN_DS_FNS', description: 'downsample(): fns must be a non-empty array of min|max|sum|avg|count' },
+  { short: 'JRN_DS_FN', description: 'downsample(): fn must be min|max|sum|avg|count', rules: { fn: 'string' } },
+  { short: 'JRN_DS_BUCKET', description: 'downsample(): bucketMs must be a number (ms) or string like "15m/1h"' },
+  { short: 'JRN_DS_BUCKET_POS', description: 'downsample(): bucketMs must be > 0 (ms)' },
+  { short: 'JRN_INSERT_NAME', description: 'INSERT INTO: journal opened under a different name', rules: { name: 'string', journal: 'string' } },
+  { short: 'JRN_FROM_NAME', description: 'SELECT FROM: journal opened under a different name', rules: { table: 'string', journal: 'string' } },
+  { short: 'JRN_SCAN_RANGE', description: 'scan(): start must be <= end' },
+  { short: 'JRN_SCAN_WHERE_FIELD', description: 'scan(): where[].field must be a non-empty string' },
+  { short: 'JRN_SCAN_WHERE_OP', description: 'scan(): where[].op must be a valid operator', rules: { op: 'string', allowed: 'string' } },
+  { short: 'JRN_SCAN_WHERE_IN', description: 'scan(): where[].value for in/nin must be an array' },
+  { short: 'JRN_SCAN_AGG_FIELD', description: 'scan(): agg field must be a non-empty string' },
+  { short: 'JRN_SCAN_AGG_FNS', description: 'scan(): agg field must have a non-empty array of functions' },
+  { short: 'JRN_SCAN_AGG_FN', description: 'scan(): agg field function must be min|max|sum|avg|count', rules: { fn: 'string' } },
+  { short: 'JRN_SCAN_GROUPBY_AGG', description: 'scan(): groupBy requires agg' },
+  { short: 'JRN_SCAN_GROUPBY', description: 'scan(): groupBy must be a non-empty string' },
+  { short: 'JRN_SCAN_SELECT', description: 'scan(): select must be a non-empty list of fields' },
+  { short: 'JRN_SCAN_SELECT_FIELD', description: 'scan(): select[].field must be a non-empty string' },
+  { short: 'JRN_SCAN_ORDER', description: "scan(): order must be 'asc' or 'desc'" },
+  { short: 'JRN_SCAN_LIMIT', description: 'scan(): limit must be an integer >= 0' },
+  { short: 'JRN_SCAN_OFFSET', description: 'scan(): offset must be an integer >= 0' },
+  { short: 'JRN_SEG_UNKNOWN', description: 'Unknown segment', rules: { id: 'string' } },
+  { short: 'JRN_SEG_READ', description: 'Failed to read segment', rules: { file: 'string', message: 'string' } },
+  { short: 'JRN_LOCKED', description: "Journal locked by process. If no other owners exist, open with { lock: 'off' } or delete .lock", rules: { pid: 'number', lockPath: 'string' } },
 ]);
+
 import { ENGINE_META_KEY, Descriptor } from './compaction/Descriptor.ts';
 import { Log } from './compaction/Log.ts';
 import { Upsert } from './compaction/Upsert.ts';
@@ -78,85 +71,40 @@ import { Summing } from './compaction/Summing.ts';
 import { Collapsing } from './compaction/Collapsing.ts';
 import type { Engine } from './compaction/Engine.ts';
 
-/** kind → класс движка: единственное место, где маршрутизируют по виду. */
+/** kind → engine class; the single dispatch point by kind. */
 function makeEngine(desc: Descriptor): Engine {
   switch (desc.kind) {
-    case 'log':
-      return new Log(desc);
-    case 'upsert':
-      return new Upsert(desc);
-    case 'summing':
-      return new Summing(desc);
-    case 'collapsing':
-      return new Collapsing(desc);
+    case 'log': return new Log(desc);
+    case 'upsert': return new Upsert(desc);
+    case 'summing': return new Summing(desc);
+    case 'collapsing': return new Collapsing(desc);
   }
 }
+
 import type {
-  AggregateExpr,
-  AggFn,
-  ColumnSummary,
-  CompactResult,
-  CompressionMode,
-  DownsampleBucket,
-  JournalOptions,
-  JournalStats,
-  JsonValue,
-  LockMode,
-  Metadata,
-  PurgeResult,
-  RetentionTier,
-  Row,
-  ScanOp,
-  ScanOptions,
-  Schema,
-  SegmentFormat,
-  TimelineBucket,
+  AggregateExpr, AggFn, ColumnSummary, CompactResult, CompressionMode,
+  DownsampleBucket, JournalOptions, JournalStats, JsonValue, LockMode,
+  Metadata, PurgeResult, RetentionTier, Row, ScanOp, ScanOptions,
+  Schema, SegmentFormat, TimelineBucket,
 } from './types.ts';
 
 const LOCK_FILE = '.lock';
 const WAL_FILE = 'wal.log';
 const META_SUFFIX = '.meta';
-
-// Расширения файлов сегментов: v1/v2 → .json, v3 → .seg. Чтение прозрачное
-// (по магическим байтам), расширение — только для записи и индекса.
 const SEG_V3_EXT = '.seg';
 const SEG_V2_EXT = '.json';
-const isSegmentFile = (f: string): boolean =>
-  f.endsWith(SEG_V3_EXT) || f.endsWith(SEG_V2_EXT);
+
+const isSegmentFile = (f: string): boolean => f.endsWith(SEG_V3_EXT) || f.endsWith(SEG_V2_EXT);
 const idFromFile = (f: string): string =>
-  f.endsWith(SEG_V3_EXT) ? f.slice(0, -SEG_V3_EXT.length)
-  : f.endsWith(SEG_V2_EXT) ? f.slice(0, -SEG_V2_EXT.length)
-  : f;
+  f.endsWith(SEG_V3_EXT) ? f.slice(0, -SEG_V3_EXT.length) :
+  f.endsWith(SEG_V2_EXT) ? f.slice(0, -SEG_V2_EXT.length) : f;
 
-/**
- * Сколько строк набирается в один сегмент до flush'а на диск (по умолчанию).
- * Крупный дефолт осознанно: меньше файлов/unlink на SSD (меньше износа и
- * метаданных, записи постраничные и последовательные), а «пересекающий»
- * сегмент при purge/compact остаётся перекодируемым за разумное время.
- * Для чёткого контроля числа файлов сегментов (тесты, дедупликация)
- * передавайте меньшее `rowsPerSegment` явно.
- */
+/** Default rows per segment before flush. Deliberately large: fewer files/unlinks on SSD. */
 export const DEFAULT_ROWS_PER_SEGMENT = 10_000;
-
-/** Пачка WAL по умолчанию: сколько строк копится в памяти перед записью на диск. */
 const DEFAULT_WAL_BATCH_ROWS = 512;
-/** ...или сколько байтов накоплено (защита от больших строк). */
 const WAL_FLUSH_BYTES = 1_000_000;
-
-/**
- * Авто-компакт: сколько закрытых сегментов накопить, прежде чем после flush()
- * автоматически сливать их в один. Мелкий порог держит число файлов под контролем
- * (каждый сегмент — свои фиксированные байты + сайдкар), но не перекодирует
- * на каждый flush. 4 — стандартный LSM-порог.
- */
 export const DEFAULT_COMPACT_MIN_SEGMENTS = 4;
 
-// --------------------------------------------------
-// Сброс WAL-буферов всех открытых журналов при выходе процесса:
-// «крах» через process.exit(), uncaught exception, SIGINT/SIGTERM —
-// строки из буфера всё равно дописываются в wal.log.
-// (SIGKILL/kill -9 не перехватывается никем — это ограничение любой WAL.)
-// --------------------------------------------------
 const activeJournals = new Set<Journal>();
 let shutdownHooksInstalled = false;
 
@@ -166,40 +114,28 @@ function installShutdownHooks(): void {
 
   const drainAll = (): void => {
     for (const j of [...activeJournals]) {
-      try {
-        j._walDrain();
-      } catch {
-        // на пути к завершению — без вариантов, пропускаем
-      }
+      try { j._walDrain(); } catch { /* exiting anyway */ }
     }
   };
 
   process.on('exit', drainAll);
   const rekill = (sig: NodeJS.Signals): void => {
     drainAll();
-    process.kill(process.pid, sig); // listener уже сработал один раз → default action завершит процесс
+    process.kill(process.pid, sig);
   };
   process.once('SIGINT', () => rekill('SIGINT'));
   process.once('SIGTERM', () => rekill('SIGTERM'));
 }
 
-/** min/max ts + счётчики сегмента — из сайдкар'а .meta, без загрузки файла. */
 interface SegmentMeta {
   minTs: number | null;
   maxTs: number | null;
   rowCount: number;
   physicalRowCount: number;
-  /** Сколько строк несёт числовой ts. `null` — неизвестно (старый .meta). */
   tsCount: number | null;
-  /** Саммари числовых колонок. `null` — нет в .meta (старый файл). */
   summaries: Record<string, ColumnSummary> | null;
 }
 
-// --------------------------------------------------
-// Агрегации (Фаза 1) — min/max/sum/avg/count по диапазону
-// --------------------------------------------------
-
-/** Накопитель агрегата: min/max/sum/count по числовым значениям поля. */
 interface AggAcc {
   min: number;
   max: number;
@@ -209,7 +145,6 @@ interface AggAcc {
 
 const newAcc = (): AggAcc => ({ min: Infinity, max: -Infinity, sum: 0, count: 0 });
 
-/** Прибавляет одно числовое значение к накопителю. */
 function addValue(acc: AggAcc, v: number): void {
   if (v < acc.min) acc.min = v;
   if (v > acc.max) acc.max = v;
@@ -217,7 +152,6 @@ function addValue(acc: AggAcc, v: number): void {
   acc.count++;
 }
 
-/** Склеивает сегментное саммари в накопитель (fast-path без чтения данных). */
 function addSummary(acc: AggAcc, s: ColumnSummary): void {
   if (s.count === 0) return;
   if (s.min < acc.min) acc.min = s.min;
@@ -231,8 +165,6 @@ function isAggFn(fn: unknown): fn is AggFn {
   return typeof fn === 'string' && AGG_FNS.has(fn);
 }
 
-/** Значение агрегата по накопителю: count — число числовых значений,
- *  остальные — null, если числовых значений нет. */
 function aggValue(acc: AggAcc, fn: AggFn): number | null {
   switch (fn) {
     case 'count': return acc.count;
@@ -243,18 +175,12 @@ function aggValue(acc: AggAcc, fn: AggFn): number | null {
   }
 }
 
-// --------------------------------------------------
-// Скан (Фаза 3) — операторы where + скомпилированный план
-// --------------------------------------------------
-
 const SCAN_OPS: readonly ScanOp[] = ['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'in', 'nin', 'isNull', 'isNotNull'];
 const SCAN_OP_SET: ReadonlySet<string> = new Set(SCAN_OPS);
 function isScanOp(op: unknown): op is ScanOp {
   return typeof op === 'string' && SCAN_OP_SET.has(op);
 }
 
-/** Быстрый ключ ячейки для groupBy (без JSON.stringify на скалярах —
- *  частый случай). Разные типы дают разные ключи (число 1 ≠ строка '1'). */
 function keyOf(v: JsonValue): string {
   switch (typeof v) {
     case 'string':  return 's' + v;
@@ -262,11 +188,9 @@ function keyOf(v: JsonValue): string {
     case 'boolean': return 'b' + v;
   }
   if (v === null || v === undefined) return '\u0000n';
-  return 'j' + JSON.stringify(v); // объекты/массивы — fallback
+  return 'j' + JSON.stringify(v);
 }
 
-/** Проверка одного условия where по значению ячейки. Числовые сравнения —
- *  только для конечных чисел; null/не-число не проходит lt/le/gt/ge. */
 function whereOne(value: JsonValue, op: ScanOp, target: JsonValue): boolean {
   switch (op) {
     case 'eq':        return value === target;
@@ -283,7 +207,6 @@ function whereOne(value: JsonValue, op: ScanOp, target: JsonValue): boolean {
   return false;
 }
 
-/** Скомпилированный план скана — валидация и предвычисление один раз. */
 interface ScanPlan {
   start: number | null;
   end: number | null;
@@ -294,11 +217,9 @@ interface ScanPlan {
   aggSpec: { field: string; fns: AggFn[] }[];
   aggKeys: string[];
   select: string[];
-  /** 1 = asc, -1 = desc */
   order: 1 | -1;
   limit: number | null;
   offset: number;
-  /** Ключ, по которому сортируется результат. */
   sortKey: string;
 }
 
@@ -307,9 +228,7 @@ export class Journal {
   private readonly journalsDir: string;
   readonly rowsPerSegment: number;
   readonly maxCachedSegments: number;
-  /** Авто-компакт после flush() (по умолчанию true). */
   readonly autoCompact: boolean;
-  /** Порог закрытых сегментов перед авто-компактом (по умолчанию 4). */
   readonly compactMinSegments: number;
 
   name: string | null = null;
@@ -317,42 +236,44 @@ export class Journal {
   metadata: Metadata | null = null;
   activeSegment: Segment | null = null;
 
-  /** id сегмента → имя файла на диске */
+  /** Segment ID → disk file name */
   private segmentIndex = new Map<string, string>();
 
-  /** Уникальный суффикс ID сегментов: два открытых инстанса (lock:'off')
-   *  в одной миллисекунде не должны получить одинаковый ID и перезаписать файл. */
+  /** Unique segment ID suffix: prevents two open instances (lock:'off') in the same ms from overwriting a file. */
   private readonly _idNonce = Math.random().toString(16).slice(2, 8);
 
-  /** id сегмента → объект Segment (LRU) */
+  /** Segment ID → Segment object (LRU) */
   private _segmentCache: LRUCache<string, Segment>;
 
   segmentCounter = 0;
   isOpen = false;
 
-  /** Пачка WAL: сколько строк копится в памяти перед записью на диск. */
+  /** WAL batch: rows buffered in memory before disk write. */
   readonly walBatchSize: number;
 
-  /** Стратегия блокировки одним владельцем ('pid' | 'off'). */
+  /** Single-owner lock strategy ('pid' | 'off'). */
   readonly lockMode: LockMode;
 
-  /** Формат файлов сегментов при записи ('v2' | 'v3'); чтение — прозрачное. */
+  /** Segment file format on write ('v2' | 'v3'); reads are transparent. */
   readonly format: SegmentFormat;
-  /** Сжатие блобов в v3 ('gzip' | 'zstd'); игнорируется в v2. */
+
+  /** Blob compression in v3 ('gzip' | 'zstd'); ignored in v2. */
   readonly compression: CompressionMode;
-  /** Явные числовые кодек'и v3: поле → имя кодека. Пустое — авто-выбор. */
+
+  /** Explicit v3 numeric codecs: field → codec name. Empty = auto-select. */
   readonly codecs: Record<string, string>;
 
-  /** Тир'ы retention (Фаза 4); null — дефолтные (см. RetentionEngine.defaultTiers()). */
+  /** Retention tiers (Phase 4); null = defaults (see RetentionEngine.defaultTiers()). */
   private retentionTiers: RetentionTier[] | null = null;
-  /** Ленивый движок retention (см. getter `retention`). */
+
+  /** Lazy retention engine (see getter retention). */
   private retentionEngine: RetentionEngine | null = null;
 
-  /** Буфер WAL (сериализованные строки) — пишется одной append'ом. */
+  /** WAL buffer (serialized strings) — written in a single append. */
   private _walBuf: string[] = [];
   private _walBufBytes = 0;
 
-  /** id сегмента → min/max ts + счётчики из сайдкар'а .meta (без загрузки файла). */
+  /** segment id → min/max ts + counts from the .meta sidecar (no file load). */
   private segmentMeta = new Map<string, SegmentMeta>();
 
   constructor(baseDir: string, opts: JournalOptions = {}) {
@@ -362,44 +283,29 @@ export class Journal {
     this.maxCachedSegments = opts.maxCachedSegments ?? 32;
     this.autoCompact = opts.autoCompact ?? true;
     const minSeg = opts.compactMinSegments ?? DEFAULT_COMPACT_MIN_SEGMENTS;
-    if (!Number.isInteger(minSeg) || minSeg < 2) {
-      throw ErrorManager.make('JRN_OPT_COMPACT_MIN');
-    }
+    if (!Number.isInteger(minSeg) || minSeg < 2) throw ErrorManager.make('JRN_OPT_COMPACT_MIN');
     this.compactMinSegments = minSeg;
     const batch = opts.walBatchSize ?? DEFAULT_WAL_BATCH_ROWS;
-    if (!Number.isInteger(batch) || batch < 1) {
-      throw ErrorManager.make('JRN_OPT_WAL_BATCH');
-    }
+    if (!Number.isInteger(batch) || batch < 1) throw ErrorManager.make('JRN_OPT_WAL_BATCH');
     this.walBatchSize = batch;
 
     const lock = opts.lock ?? 'pid';
-    if (lock !== 'pid' && lock !== 'off') {
-      throw ErrorManager.make('JRN_OPT_LOCK');
-    }
+    if (lock !== 'pid' && lock !== 'off') throw ErrorManager.make('JRN_OPT_LOCK');
     this.lockMode = lock;
 
     const format = opts.format ?? 'v2';
-    if (format !== 'v2' && format !== 'v3') {
-      throw ErrorManager.make('JRN_OPT_FORMAT');
-    }
+    if (format !== 'v2' && format !== 'v3') throw ErrorManager.make('JRN_OPT_FORMAT');
     this.format = format;
 
-    // zstd — по умолчанию при Node >= 23.8 (Фаза 5); явный opts.compression
-    // переопределяет. На старых Node — gzip.
     const compression = opts.compression ?? Compression.default();
-    if (compression !== 'gzip' && compression !== 'zstd') {
-      throw ErrorManager.make('JRN_OPT_COMPRESSION');
-    }
+    if (compression !== 'gzip' && compression !== 'zstd') throw ErrorManager.make('JRN_OPT_COMPRESSION');
     this.compression = compression;
 
     this.codecs = opts.codecs && typeof opts.codecs === 'object' ? { ...opts.codecs } : {};
-    this.retentionTiers = Array.isArray(opts.retention) && opts.retention.length > 0
-      ? opts.retention.slice()
-      : null;
+    this.retentionTiers = Array.isArray(opts.retention) && opts.retention.length > 0 ? opts.retention.slice() : null;
     this._segmentCache = new LRUCache<string, Segment>(this.maxCachedSegments);
   }
 
-  /** Движок retention (Фаза 4): тир'ы из opts.retention или RetentionEngine.defaultTiers(). */
   get retention(): RetentionEngine {
     if (!this.retentionEngine) {
       this.retentionEngine = new RetentionEngine(this, this.retentionTiers ?? undefined);
@@ -407,26 +313,18 @@ export class Journal {
     return this.retentionEngine;
   }
 
-  /** Расширение файла сегмента при записи: v3 → .seg, v2 → .json. */
   private _segExt(): string {
     return this.format === 'v3' ? SEG_V3_EXT : SEG_V2_EXT;
   }
 
-  /** Кодирует сегмент в буфер файла (v2: gzip+JSON, v3: бинарные блобы). */
   private _encodeSegment(segment: Segment): Buffer {
     return this.format === 'v3'
       ? SegmentFileV3.encode(segment, { compression: this.compression, codecs: this.codecs })
       : SegmentFileV2.encode(segment.serialize());
   }
 
-  // --------------------------------------------------
-  // Открытие / закрытие
-  // --------------------------------------------------
-
   open(name: string, schema: Schema, metadata: Metadata = {}): void {
-    if (this.isOpen) {
-      throw ErrorManager.make('JRN_ALREADY_OPEN', { name: this.name });
-    }
+    if (this.isOpen) throw ErrorManager.make('JRN_ALREADY_OPEN', { name: this.name });
 
     this.name = name;
     this.schema = schema;
@@ -434,23 +332,15 @@ export class Journal {
 
     const journalPath = this.journalPath();
     fs.mkdirSync(journalPath, { recursive: true });
-
     this._acquireLock();
 
     try {
-      // Индексируем файлы сегментов на диске (без парсинга — данные
-      // будут загружены лениво при первом обращении). v1/v2 → .json, v3 → .seg
-      const files = fs.readdirSync(journalPath)
-        .filter(isSegmentFile)
-        .sort();
-
+      const files = fs.readdirSync(journalPath).filter(isSegmentFile).sort();
       this.segmentIndex.clear();
       this.segmentMeta.clear();
       for (const file of files) {
         const id = idFromFile(file);
         this.segmentIndex.set(id, file);
-        // Сайдкар с min/max ts + счётчиками: позволяет query()/stats()
-        // пропускать чужие по времени файлы вообще без их загрузки.
         try {
           const metaPath = path.join(journalPath, `${file}${META_SUFFIX}`);
           const m = JSON.parse(fs.readFileSync(metaPath, 'utf-8')) as SegmentMeta;
@@ -464,17 +354,14 @@ export class Journal {
               summaries: (m.summaries && typeof m.summaries === 'object') ? m.summaries : null
             });
           }
-        } catch {
-          // .meta нет (старые файлы) или повреждён — границы узнаем при загрузке
-        }
+        } catch { /* no .meta or corrupt */ }
       }
       this.segmentCounter = files.length;
-
       this._createNewActiveSegment();
       this.isOpen = true;
       activeJournals.add(this);
       installShutdownHooks();
-      this._replayWAL(); // восстановление несфлашенных строк после краха
+      this._replayWAL();
     } catch (e) {
       this._releaseLock();
       throw e;
@@ -482,11 +369,7 @@ export class Journal {
   }
 
   close(): void {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
-    // Сначала WAL целиком на диске: если активных строк нет (flush — no-op),
-    // они всё равно переживут закрытие и будут проиграны при следующем open.
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     this._walDrain();
     this.flush();
     this.activeSegment = null;
@@ -495,18 +378,11 @@ export class Journal {
     this._releaseLock();
   }
 
-  // --------------------------------------------------
-  // Запись
-  // --------------------------------------------------
+  // --- Writing ---
 
   append(row: Row): void {
-    if (!this.isOpen || !this.activeSegment) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
+    if (!this.isOpen || !this.activeSegment) throw ErrorManager.make('JRN_NOT_OPEN');
 
-    // WAL: строка копится в буфере и уходит на диск пачкой (одним системным
-    // вызовом). Буфер гарантированно сбрасывается при flush/close/выходе
-    // процесса — см. installShutdownHooks().
     const line = JSON.stringify(row) + '\n';
     this._walBuf.push(line);
     this._walBufBytes += line.length;
@@ -520,12 +396,8 @@ export class Journal {
     try {
       seg.append(row);
     } catch (e) {
-      // Строка отклонена схемой — откатываем WAL-запись: иначе она переживёт
-      // отказ append (буфер уходит на диск при flush/close/выходе процесса) и
-      // следующая open() упадёт на реплее.
-      if (drained) {
-        this._walRollbackLine(line);
-      } else {
+      if (drained) this._walRollbackLine(line);
+      else {
         this._walBuf.pop();
         this._walBufBytes -= line.length;
       }
@@ -534,12 +406,6 @@ export class Journal {
 
     if (seg.rowCount >= this.rowsPerSegment) {
       this.flush();
-
-      // Авто-компакт: только в цикле записи, когда append только что закрыл
-      // сегмент. Если закрытых сегментов накопилось порог — сливаем в один.
-      // compact() идемпотентен (требует >=2) и самоограничивается: после слияния
-      // счётчик падает ниже порога. Ручные операции (flush/purge/close) авто-
-      // компакт не вызывают — они явно управляются вызывающим кодом.
       if (this.autoCompact && this._sortedClosedIds().length >= this.compactMinSegments) {
         this.compact();
       }
@@ -548,132 +414,72 @@ export class Journal {
 
   flush(): void {
     const segment = this.activeSegment;
-    if (!segment || segment.rowCount === 0) {
-      return;
-    }
+    if (!segment || segment.rowCount === 0) return;
 
-    // Порядок важен: сначала WAL целиком на диске, потом файл сегмента,
-    // и только затем трим — в любой точке краха строки не теряются.
     this._walDrain();
-
     const fileName = `${segment.id}${this._segExt()}`;
     const filePath = path.join(this.journalPath(), fileName);
     const tmpPath = `${filePath}.tmp`;
 
-    // Атомарная запись: сначала во временный файл, затем rename.
-    // v2: gzip + CRC32 (см. SegmentFileV2.ts); v3: бинарные блобы (см. SegmentFileV3.ts).
     fs.writeFileSync(tmpPath, this._encodeSegment(segment));
     fs.renameSync(tmpPath, filePath);
-
     this._writeMeta(segment, fileName);
     this.segmentIndex.set(segment.id, fileName);
     this._segmentCache.set(segment.id, segment);
     this._createNewActiveSegment();
-    this._truncateWAL(); // все строки сегмента теперь на диске
+    this._truncateWAL();
   }
 
-  /**
-   * Полностью очищает журнал: все записи удаляются из памяти и с диска —
-   * файлы сегментов, их сайдкар'ы .meta, wal.log (включая строки в WAL-буфере)
-   * и остатки .tmp от прерванной записи. Блокировка (.lock) сохраняется.
-   * Журнал остаётся открытым: сразу можно продолжать append() — это чистый журнал.
-   */
   clear(): void {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
-
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     const dir = this.journalPath();
     for (const f of fs.readdirSync(dir)) {
       if (f === LOCK_FILE) continue;
-      // Сегменты, их .meta, wal.log и .tmp-остатки — всё удаляем
-      if (
-        isSegmentFile(f) ||
-        f.endsWith(`${META_SUFFIX}`) ||
-        f.endsWith('.tmp') ||
-        f === WAL_FILE
-      ) {
+      if (isSegmentFile(f) || f.endsWith(META_SUFFIX) || f.endsWith('.tmp') || f === WAL_FILE) {
         fs.rmSync(path.join(dir, f), { force: true });
       }
     }
-
-    // Сброс в-memory состояния (старые объекты уйдут по GC)
     this.segmentIndex.clear();
     this._segmentCache.clear();
     this.segmentMeta.clear();
     this._walBuf = [];
     this._walBufBytes = 0;
     this.activeSegment = null;
-
-    this._createNewActiveSegment(); // чистый активный сегмент — можно сразу писать
+    this._createNewActiveSegment();
   }
 
-  // --------------------------------------------------
-  // Компактизация
-  // --------------------------------------------------
+  // --- Compaction ---
 
-  /**
-   * Сливает все закрытые сегменты в один. Дедупликация применяется
-   * повторно уже на границах бывших сегментов, а auto-колонки
-   * перекодируются на объединённых данных (сэмпл может пересечь порог).
-   *
-   * Движок (engine): перед записью в слитый сегмент строки проходят
-   * `engine.merge(rows)` — движок восстанавливается из `metadata._engine`
-   * (log/upsert/summing/collapsing). Без движка — лог (строки не меняются,
-   * как раньше), поэтому старые журналы ведут себя как log и совместимы.
-   */
   compact(): CompactResult {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
-
-    // Lazy-миграция (Фаза 5): старые v1/v2 сегменты → v3 перед слиянием.
-    // Для ≥2 сегментов слияние ниже само пишет результат в v3; migrateToV3()
-    // закрывает случай единственного старого сегмента и делает миграцию явной.
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     this.migrateToV3();
 
     const ids = this._sortedClosedIds();
-    if (ids.length < 2) {
-      return { mergedSegments: 0, logicalRows: 0, physicalBefore: 0, physicalAfter: 0, collapsedRows: 0 };
-    }
+    if (ids.length < 2) return { mergedSegments: 0, logicalRows: 0, physicalBefore: 0, physicalAfter: 0, collapsedRows: 0 };
 
     let logicalRows = 0;
     let physicalBefore = 0;
     const rows: Row[] = [];
     for (const id of ids) {
       const seg = this._loadClosedSegment(id);
-      for (let i = 0; i < seg.rowCount; i++) {
-        rows.push(seg.getRow(i));
-      }
+      for (let i = 0; i < seg.rowCount; i++) rows.push(seg.getRow(i));
       logicalRows += seg.rowCount;
       physicalBefore += seg.physicalRowCount;
     }
 
-    // Движок: применяем стратегию слияния (log — идентично, upsert/summing/
-    // collapsing — сводят строки по identity-ключу). Дескриптор — из metadata.
-    const engineDesc = Descriptor.fromMeta(
-      (this.metadata as Record<string, unknown>)[ENGINE_META_KEY]
-    );
+    const engineDesc = Descriptor.fromMeta((this.metadata as Record<string, unknown>)[ENGINE_META_KEY]);
     const kept = engineDesc ? makeEngine(engineDesc).merge(rows) : rows;
     const collapsedRows = rows.length - kept.length;
 
-    const merged = new Segment(
-      `seg_${Date.now()}_${this.segmentCounter++}_${this._idNonce}`,
-      this.schema!,
-      { ...(this.metadata ?? {}) }
-    );
-    for (const row of kept) {
-      merged.append(row);
-    }
+    const merged = new Segment(`seg_${Date.now()}_${this.segmentCounter++}_${this._idNonce}`, this.schema!, { ...(this.metadata ?? {}) });
+    for (const row of kept) merged.append(row);
 
-    // Атомарная запись слитого сегмента + его сайдкар с границами
     const fileName = `${merged.id}${this._segExt()}`;
     const filePath = path.join(this.journalPath(), fileName);
     fs.writeFileSync(`${filePath}.tmp`, this._encodeSegment(merged));
     fs.renameSync(`${filePath}.tmp`, filePath);
     this._writeMeta(merged, fileName);
 
-    // Убираем старые сегменты с диска (и их сайдкар'ы), из индекса и кэша
     for (const id of ids) {
       const oldFile = this.segmentIndex.get(id);
       if (oldFile) {
@@ -688,16 +494,9 @@ export class Journal {
     this.segmentIndex.set(merged.id, fileName);
     this._segmentCache.set(merged.id, merged);
 
-    return {
-      mergedSegments: ids.length,
-      logicalRows,
-      physicalBefore,
-      physicalAfter: merged.physicalRowCount,
-      collapsedRows
-    };
+    return { mergedSegments: ids.length, logicalRows, physicalBefore, physicalAfter: merged.physicalRowCount, collapsedRows };
   }
 
-  /** Формат сегмента на диске: v3 (magic вер. 3), v2 (magic вер. 1), v1 (JSON). */
   private _detectSegFormat(file: string): 'v1' | 'v2' | 'v3' {
     let buf: Buffer;
     try {
@@ -705,29 +504,12 @@ export class Journal {
       try {
         buf = Buffer.alloc(5);
         if (fs.readSync(fd, buf, 0, 5, 0) < 5) return 'v1';
-      } finally {
-        fs.closeSync(fd);
-      }
-    } catch {
-      return 'v1';
-    }
-    if (buf.subarray(0, 4).toString('ascii') === 'JSDB') {
-      return buf[4] === 3 ? 'v3' : 'v2';
-    }
+      } finally { fs.closeSync(fd); }
+    } catch { return 'v1'; }
+    if (buf.subarray(0, 4).toString('ascii') === 'JSDB') return buf[4] === 3 ? 'v3' : 'v2';
     return 'v1';
   }
 
-  /**
-   * Lazy-миграция старых сегментов (v1/v2) в v3 (Фаза 5). Каждый старый сегмент
-   * перекодируется в текущий формат журнала (v3) атомарно с тем же id
-   * (расширение .json → .seg). Если журнал не v3 — ничего не делает.
-   * Идемпотентен: уже v3 сегменты пропускаются. Активный сегмент v3-журнала
-   * всегда v3, поэтому затрагивает только закрытые сегменты.
-   *
-   * ```ts
-   * j.migrateToV3(); // → { migrated: 2, logicalRows: 50000 }
-   * ```
-   */
   migrateToV3(): { migrated: number; logicalRows: number } {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     if (this.format !== 'v3') return { migrated: 0, logicalRows: 0 };
@@ -746,32 +528,14 @@ export class Journal {
     return { migrated, logicalRows };
   }
 
-  /**
-   * Удаляет строки старше границы: остаются строки с ts >= beforeTs.
-   * Строки без ts никогда не удаляются. Сегменты, целиком старше границы,
-   * удаляются по сайдкар'у .meta без чтения файла; сегмент, пересекающий
-   * границу, перекодируется без старых строк (атомарно). Активный сегмент
-   * сначала дописывается на диск, WAL обрезается — после purge() reopen
-   * не вернёт удалённые строки. Журнал остаётся открытым и пригодным к записи.
-   *
-   * `beforeTs` — число (мс) или строка «языка интервалов» (VRackDB):
-   * `purge('now-30d')` = удалить всё старше 30 дней назад.
-   */
   purge(beforeTs: number | string): PurgeResult {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
-    // Граница: число (мс) или строка вида 'now-1d' (удалить всё старше N дней назад)
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     const before = Interval.resolve(beforeTs);
 
-    // Активный сегмент — на диск, WAL — срезан: дальше всё единообразно
     if (this.activeSegment) {
       this._walDrain();
-      if (this.activeSegment.rowCount > 0) {
-        this.flush();
-      } else {
-        this._truncateWAL();
-      }
+      if (this.activeSegment.rowCount > 0) this.flush();
+      else this._truncateWAL();
     }
 
     let removedRows = 0;
@@ -785,24 +549,14 @@ export class Journal {
       const rowCount = meta?.rowCount ?? null;
       const tsCount = meta?.tsCount ?? null;
 
-      // Целиком старше границы — удаляем без чтения данных.
-      // Безопасно только если знаем, что строк без ts НЕТ: иначе fast-path
-      // удалил бы и их (строки без ts не удаляются никогда).
-      if (
-        maxTs !== null && maxTs < before &&
-        rowCount !== null && tsCount !== null && tsCount === rowCount
-      ) {
+      if (maxTs !== null && maxTs < before && rowCount !== null && tsCount !== null && tsCount === rowCount) {
         removedRows += rowCount;
         this._dropClosedSegment(id);
         removedSegments++;
         continue;
       }
-      // Целиком новее границы — не трогаем
-      if (minTs !== null && minTs >= before) {
-        continue;
-      }
+      if (minTs !== null && minTs >= before) continue;
 
-      // Пересекает границу (или границы/состав неизвестны) — перекодируем
       const seg = this._loadClosedSegment(id);
       const kept: Row[] = [];
       for (let i = 0; i < seg.rowCount; i++) {
@@ -811,20 +565,20 @@ export class Journal {
         if (typeof ts !== 'number' || ts >= before) kept.push(row);
       }
       const dropped = seg.rowCount - kept.length;
-      if (dropped === 0) continue; // старых строк нет — файл остаётся как есть
+      if (dropped === 0) continue;
 
       removedRows += dropped;
       const fresh = new Segment(seg.id, this.schema!, this.metadata ?? {});
       for (const row of kept) fresh.append(row);
 
       const oldFile = this.segmentIndex.get(id)!;
-      const fileName = `${id}${this._segExt()}`; // текущий формат журнала
+      const fileName = `${id}${this._segExt()}`;
       const filePath = path.join(this.journalPath(), fileName);
       fs.writeFileSync(`${filePath}.tmp`, this._encodeSegment(fresh));
-      fs.renameSync(`${filePath}.tmp`, filePath); // атомарно — краш не оставит «половину»
+      fs.renameSync(`${filePath}.tmp`, filePath);
       if (oldFile !== fileName) {
-        fs.rmSync(path.join(this.journalPath(), oldFile), { force: true }); // старый файл (другое расширение)
-        fs.rmSync(path.join(this.journalPath(), `${oldFile}${META_SUFFIX}`), { force: true }); // старый сайдкар
+        fs.rmSync(path.join(this.journalPath(), oldFile), { force: true });
+        fs.rmSync(path.join(this.journalPath(), `${oldFile}${META_SUFFIX}`), { force: true });
       }
       this._writeMeta(fresh, fileName);
       this._segmentCache.set(id, fresh);
@@ -832,13 +586,10 @@ export class Journal {
       rewrittenSegments++;
     }
 
-    // Свободный активный сегмент — журнал открыт и готов к записи
     this._createNewActiveSegment();
-
     return { removedRows, removedSegments, rewrittenSegments };
   }
 
-  /** Убирает закрытый сегмент: файл, сайдкар, индекс, кэш, метаданные. */
   private _dropClosedSegment(id: string): void {
     const oldFile = this.segmentIndex.get(id);
     if (oldFile) {
@@ -850,32 +601,23 @@ export class Journal {
     this.segmentMeta.delete(id);
   }
 
-  // --------------------------------------------------
-  // Retention (Фаза 4) — перекодирование / слияние закрытых сегментов
-  // --------------------------------------------------
+  // --- Retention (Phase 4) ---
 
-  /** ID закрытых сегментов в хронологическом порядке. */
   closedSegmentIds(): string[] {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     return this._sortedClosedIds();
   }
 
-  /** Закрытый сегмент из кэша/диска (для RetentionEngine). */
   getClosedSegment(id: string): Segment {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     return this._loadClosedSegment(id);
   }
 
-  /** Имя файла сегмента на диске — null, если неизвестно. */
   closedSegmentFile(id: string): string | null {
     return this.segmentIndex.get(id) ?? null;
   }
 
-  /** Границы + счётчики сегмента (из .meta/кэша) + размер файла — null, если неизвестно. */
-  closedSegmentInfo(id: string): {
-    minTs: number | null; maxTs: number | null;
-    rowCount: number | null; physicalRowCount: number | null; bytes: number | null;
-  } | null {
+  closedSegmentInfo(id: string): { minTs: number | null; maxTs: number | null; rowCount: number | null; physicalRowCount: number | null; bytes: number | null } | null {
     const file = this.segmentIndex.get(id);
     const meta = this.segmentMeta.get(id) ?? null;
     if (!file && !meta) return null;
@@ -883,25 +625,13 @@ export class Journal {
     if (file) {
       try { bytes = fs.statSync(path.join(this.journalPath(), file)).size; } catch { bytes = null; }
     }
-    return {
-      minTs: meta?.minTs ?? null,
-      maxTs: meta?.maxTs ?? null,
-      rowCount: meta?.rowCount ?? null,
-      physicalRowCount: meta?.physicalRowCount ?? null,
-      bytes
-    };
+    return { minTs: meta?.minTs ?? null, maxTs: meta?.maxTs ?? null, rowCount: meta?.rowCount ?? null, physicalRowCount: meta?.physicalRowCount ?? null, bytes };
   }
 
-  /** Новый уникальный ID сегмента. */
   newSegmentId(): string {
     return `seg_${Date.now()}_${this.segmentCounter++}_${this._idNonce}`;
   }
 
-  /**
-   * Перекодирует закрытый сегмент (те же данные, новый кодек/сжатие) атомарно.
-   * `encode` — как закодировать (обычно encodeV3 с параметрами тира).
-   * Возвращает имя нового файла.
-   */
   reencodeClosedSegment(id: string, encode: (seg: Segment) => Buffer): string {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     const seg = this._loadClosedSegment(id);
@@ -911,8 +641,8 @@ export class Journal {
     fs.writeFileSync(`${filePath}.tmp`, encode(seg));
     fs.renameSync(`${filePath}.tmp`, filePath);
     if (oldFile && oldFile !== fileName) {
-      fs.rmSync(path.join(this.journalPath(), oldFile), { force: true }); // старый файл (другое расширение)
-      fs.rmSync(path.join(this.journalPath(), `${oldFile}${META_SUFFIX}`), { force: true }); // старый сайдкар
+      fs.rmSync(path.join(this.journalPath(), oldFile), { force: true });
+      fs.rmSync(path.join(this.journalPath(), `${oldFile}${META_SUFFIX}`), { force: true });
     }
     this._writeMeta(seg, fileName);
     this._segmentCache.set(id, seg);
@@ -920,11 +650,6 @@ export class Journal {
     return fileName;
   }
 
-  /**
-   * Сливает несколько закрытых сегментов в один (дедупликация на границах,
-   * Фаза 4: блоки 1h → 1d). Возвращает ID нового сегмента.
-   * `encode` — как закодировать слитый сегмент (тир целевой).
-   */
   mergeClosedSegments(ids: string[], encode: (seg: Segment) => Buffer): string {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     const sorted = [...new Set(ids)];
@@ -956,62 +681,34 @@ export class Journal {
     return merged.id;
   }
 
-  /**
-   * Таймлайн: разбивает период [start, end] на бакеты шириной `interval` (мс)
-   * и считает в каждом, сколько строк с ts в [start_бакета, end_бакета).
-   * `hasData` = count > 0. Строки без ts не попадают в таймлайн.
-   *
-   * `interval` — число (мс) или строка вида '1h'/'30m' (VRackDB-совместимо, см. Interval).
-   * `period` — [start, end] в мс или строка вида 'now-7d:now'.
-   *
-   * Дёшево: сегмент, не пересекающий период, не читается (решение по min/max
-   * из сайдкар'а .meta). Читаются только сегменты, пересекающие хотя бы один
-   * бакет — и то один раз (кэш), строки бинуются в бакет по ts.
-   */
   timeline(interval: number | string, period: [number, number] | string): TimelineBucket[] {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
 
-    // Интервал: число (мс) или строка вида '1h'/'30m' (VRackDB-совместимо)
     let int: number;
-    if (typeof interval === 'string') {
-      int = Interval.parseInterval(interval);
-    } else if (typeof interval !== 'number' || !Number.isFinite(interval)) {
-      throw ErrorManager.make('JRN_TL_INTERVAL');
-    } else {
-      int = interval;
-    }
-    if (int <= 0) {
-      throw ErrorManager.make('JRN_TL_INTERVAL_POS');
-    }
+    if (typeof interval === 'string') int = Interval.parseInterval(interval);
+    else if (typeof interval !== 'number' || !Number.isFinite(interval)) throw ErrorManager.make('JRN_TL_INTERVAL');
+    else int = interval;
+    if (int <= 0) throw ErrorManager.make('JRN_TL_INTERVAL_POS');
 
-    // Период: [start, end] в мс или строка вида 'now-7d:now'
     let start: number;
     let end: number;
-    if (typeof period === 'string') {
-      [start, end] = Interval.period(period);
-    } else if (!Array.isArray(period) || period.length < 2) {
-      throw ErrorManager.make('JRN_TL_PERIOD');
-    } else {
-      [start, end] = Interval.period(period[0], period[1]);
-    }
+    if (typeof period === 'string') [start, end] = Interval.period(period);
+    else if (!Array.isArray(period) || period.length < 2) throw ErrorManager.make('JRN_TL_PERIOD');
+    else [start, end] = Interval.period(period[0], period[1]);
     if (end === start) return [];
 
     const n = Math.ceil((end - start) / int);
     const counts = new Array<number>(n).fill(0);
 
-    /** ts из [start, end) → индекс бакета; иначе игнорируем. */
     const bin = (ts: number): void => {
       if (ts < start || ts >= end) return;
       counts[Math.floor((ts - start) / int)]++;
     };
 
-    // Закрытые сегменты: по .meta пропускаем те, что точно вне периода
     for (const id of this._sortedClosedIds()) {
       const meta = this.segmentMeta.get(id);
       if (meta && meta.minTs !== null && meta.maxTs !== null) {
-        if (meta.maxTs < start || meta.minTs >= end) continue; // не пересекает период
+        if (meta.maxTs < start || meta.minTs >= end) continue;
       }
       const seg = this._loadClosedSegment(id);
       for (let i = 0; i < seg.rowCount; i++) {
@@ -1020,7 +717,6 @@ export class Journal {
       }
     }
 
-    // Активный сегмент — уже в памяти
     const active = this.activeSegment;
     if (active) {
       for (let i = 0; i < active.rowCount; i++) {
@@ -1032,81 +728,34 @@ export class Journal {
     const buckets: TimelineBucket[] = new Array(n);
     for (let i = 0; i < n; i++) {
       const bStart = start + i * int;
-      buckets[i] = {
-        start: bStart,
-        end: Math.min(bStart + int, end), // последний бакет = period.end
-        count: counts[i],
-        hasData: counts[i] > 0
-      };
+      buckets[i] = { start: bStart, end: Math.min(bStart + int, end), count: counts[i], hasData: counts[i] > 0 };
     }
     return buckets;
   }
 
-  // --------------------------------------------------
-  // Агрегации (Фаза 1)
-  // --------------------------------------------------
+  // --- Aggregations (Phase 1) ---
 
-  /**
-   * Агрегация по диапазону [startTs, endTs] (включительно с обеих сторон) —
-   * без материализации строк. Для сегментов, целиком лежащих в диапазоне,
-   * значения берутся из сегментных саммари (сайдкар .meta) без чтения данных;
-   * только граничные сегменты сканируются — и то только запрошенные колонки.
-   *
-   * ```ts
-   * j.aggregate('now-1h', 'now', [
-   *   { field: 'value', fn: 'avg' },
-   *   { field: 'value', fn: 'min' },
-   *   { field: 'value', fn: 'max' },
-   *   { field: 'value', fn: 'count' },
-   * ]);
-    * // → { value_avg: 42.3, value_min: 1.0, value_max: 99.9, value_count: 7184 }
-   * ```
-   *
-   * Семантика: все функции работают по числовым (конечным) значениям поля;
-   * null/не-числа пропускаются. `count` — количество числовых значений
-   * (0, если их нет); `min/max/sum/avg` — null, если числовых значений нет.
-   * Строки без числового ts не участвуют.
-    * Ключ результата — `поле_функция` (value_avg, ts_count, …).
-   */
-  aggregate(
-    startTs: number | string,
-    endTs: number | string,
-    exprs: AggregateExpr[],
-  ): Record<string, number | null> {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
-    if (!Array.isArray(exprs) || exprs.length === 0) {
-      throw ErrorManager.make('JRN_AGG_EXPRS');
-    }
+  aggregate(startTs: number | string, endTs: number | string, exprs: AggregateExpr[]): Record<string, number | null> {
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
+    if (!Array.isArray(exprs) || exprs.length === 0) throw ErrorManager.make('JRN_AGG_EXPRS');
     for (const e of exprs) {
-      if (!e || typeof e.field !== 'string' || e.field.length === 0) {
-        throw ErrorManager.make('JRN_AGG_FIELD');
-      }
-      if (!isAggFn(e.fn)) {
-        throw ErrorManager.make('JRN_AGG_FN', { fn: String(e.fn) });
-      }
+      if (!e || typeof e.field !== 'string' || e.field.length === 0) throw ErrorManager.make('JRN_AGG_FIELD');
+      if (!isAggFn(e.fn)) throw ErrorManager.make('JRN_AGG_FN', { fn: String(e.fn) });
     }
 
     const [start, end] = Interval.period(startTs, endTs);
-
     const fields: string[] = [...new Set(exprs.map(e => e.field))];
     const accs: Record<string, AggAcc> = {};
     for (const f of fields) accs[f] = newAcc();
 
-    // Закрытые сегменты
     for (const id of this._sortedClosedIds()) {
       const meta = this.segmentMeta.get(id);
       const minTs = meta?.minTs ?? null;
       const maxTs = meta?.maxTs ?? null;
       const summaries = meta?.summaries ?? null;
 
-      // Вне диапазона — не читаем вообще
-      if (minTs !== null && maxTs !== null && (maxTs < start || minTs > end)) {
-        continue;
-      }
+      if (minTs !== null && maxTs !== null && (maxTs < start || minTs > end)) continue;
 
-      // Целиком в диапазоне + есть саммари → fast-path без чтения данных
       if (minTs !== null && maxTs !== null && minTs >= start && maxTs <= end && summaries) {
         let slow: string[] = [];
         for (const f of fields) {
@@ -1114,57 +763,26 @@ export class Journal {
           if (s) addSummary(accs[f], s);
           else slow.push(f);
         }
-        if (slow.length > 0) {
-          this._scanAggregate(this._loadClosedSegment(id), start, end, slow, accs);
-        }
+        if (slow.length > 0) this._scanAggregate(this._loadClosedSegment(id), start, end, slow, accs);
         continue;
       }
 
-      // Граничный / нет .meta / нет саммари — скан запрошенных колонок
       const seg = this._loadClosedSegment(id);
       this._scanAggregate(seg, start, end, fields, accs);
     }
 
-    // Активный сегмент — в памяти
     const active = this.activeSegment;
-    if (active && active.rowCount > 0) {
-      this._aggregateActive(active, start, end, fields, accs);
-    }
+    if (active && active.rowCount > 0) this._aggregateActive(active, start, end, fields, accs);
 
     return this._buildResult(exprs, accs);
   }
 
-  /**
-   * Квантили (percentile) поля `field` на [startTs, endTs] (Фаза 5):
-   * p50/p90/p95/p99 и т.п. Точный расчёт по материализованным значениям
-   * (linear interpolation); t-digest по сегментам — оптимизация на будущее
-   * (мин/макс/сумма из саммари квантили не дают).
-   *
-   * ```ts
-   * j.percentile('now-1h', 'now', 'value', [0.5, 0.9, 0.95, 0.99]);
-   * // → { p50: 12.1, p90: 45.0, p95: 60.2, p99: 98.7 }
-   * ```
-   *
-   * `levels` — число (0,1) или массив таких чисел. Берутся конечные числа поля;
-   * null/не-числа и строки вне диапазона ts пропускаются. Ключ — `p`+уровень*100.
-   */
-  percentile(
-    startTs: number | string,
-    endTs: number | string,
-    field: string,
-    levels: number | number[],
-  ): Record<string, number | null> {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
-    if (typeof field !== 'string' || field.length === 0) {
-      throw ErrorManager.make('JRN_PCTL_FIELD');
-    }
+  percentile(startTs: number | string, endTs: number | string, field: string, levels: number | number[]): Record<string, number | null> {
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
+    if (typeof field !== 'string' || field.length === 0) throw ErrorManager.make('JRN_PCTL_FIELD');
     const lv = Array.isArray(levels) ? levels.slice() : [levels];
     for (const q of lv) {
-      if (typeof q !== 'number' || !Number.isFinite(q) || q <= 0 || q >= 1) {
-        throw ErrorManager.make('JRN_PCTL_LEVEL', { level: String(q) });
-      }
+      if (typeof q !== 'number' || !Number.isFinite(q) || q <= 0 || q >= 1) throw ErrorManager.make('JRN_PCTL_LEVEL', { level: String(q) });
     }
     const [start, end] = Interval.period(startTs, endTs);
 
@@ -1177,65 +795,28 @@ export class Journal {
     vals.sort((a, b) => a - b);
 
     const out: Record<string, number | null> = {};
-    for (const q of lv) {
-      out[Percentile.key(q)] = vals.length === 0 ? null : Percentile.of(vals, q);
-    }
+    for (const q of lv) out[Percentile.key(q)] = vals.length === 0 ? null : Percentile.of(vals, q);
     return out;
   }
 
-  /**
-   * Даунсэмплинг [startTs, endTs) (конец не включительно, как в timeline())
-   * на бакеты шириной `bucketMs` (выровнены по эпохе через roundTime) +
-   * агрегаты `field` в каждом бакете. Расширение timeline(): там только count,
-   * здесь — min/max/sum/avg/count.
-   *
-   * ```ts
-   * j.downsample('now-1d', 'now', '15m', 'value', ['avg', 'min', 'max']);
-   * // → [{ start, end, count, hasData, avg, min, max }, …]  (96 бакетов)
-   * ```
-   *
-   * Сегмент, не пересекающий период, не читается (решение по .meta).
-   */
-  downsample(
-    startTs: number | string,
-    endTs: number | string,
-    bucketMs: number | string,
-    field: string,
-    fns: AggFn[],
-  ): DownsampleBucket[] {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
-    if (typeof field !== 'string' || field.length === 0) {
-      throw ErrorManager.make('JRN_DS_FIELD');
-    }
-    if (!Array.isArray(fns) || fns.length === 0) {
-      throw ErrorManager.make('JRN_DS_FNS');
-    }
+  downsample(startTs: number | string, endTs: number | string, bucketMs: number | string, field: string, fns: AggFn[]): DownsampleBucket[] {
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
+    if (typeof field !== 'string' || field.length === 0) throw ErrorManager.make('JRN_DS_FIELD');
+    if (!Array.isArray(fns) || fns.length === 0) throw ErrorManager.make('JRN_DS_FNS');
     for (const fn of fns) {
-      if (!isAggFn(fn)) {
-        throw ErrorManager.make('JRN_DS_FN', { fn: String(fn) });
-      }
+      if (!isAggFn(fn)) throw ErrorManager.make('JRN_DS_FN', { fn: String(fn) });
     }
 
     let bucket: number;
-    if (typeof bucketMs === 'string') {
-      bucket = Interval.parseInterval(bucketMs);
-    } else if (typeof bucketMs !== 'number' || !Number.isFinite(bucketMs)) {
-      throw ErrorManager.make('JRN_DS_BUCKET');
-    } else {
-      bucket = bucketMs;
-    }
-    if (bucket <= 0) {
-      throw ErrorManager.make('JRN_DS_BUCKET_POS');
-    }
+    if (typeof bucketMs === 'string') bucket = Interval.parseInterval(bucketMs);
+    else if (typeof bucketMs !== 'number' || !Number.isFinite(bucketMs)) throw ErrorManager.make('JRN_DS_BUCKET');
+    else bucket = bucketMs;
+    if (bucket <= 0) throw ErrorManager.make('JRN_DS_BUCKET_POS');
 
     const [start, end] = Interval.period(startTs, endTs);
     if (end === start) return [];
 
-    // Бакеты выровнены по эпохе (roundTime) — границы детерминированы,
-    // что нужно для идемпотентного rollup (Фаза 4).
-    const first = Interval.roundTime(start, bucket); // <= start, кратен bucket
+    const first = Interval.roundTime(start, bucket);
     const n = Math.max(1, Math.ceil((end - first) / bucket));
     const accs: AggAcc[] = new Array(n);
     for (let i = 0; i < n; i++) accs[i] = newAcc();
@@ -1248,9 +829,7 @@ export class Journal {
     };
 
     const processSegment = (seg: Segment): void => {
-      if (seg.minTs !== null && seg.maxTs !== null && (seg.maxTs < start || seg.minTs >= end)) {
-        return; // не пересекает период
-      }
+      if (seg.minTs !== null && seg.maxTs !== null && (seg.maxTs < start || seg.minTs >= end)) return;
       for (let i = 0; i < seg.rowCount; i++) {
         const ts = seg.get('ts', i);
         if (typeof ts !== 'number' || ts < start || ts >= end) continue;
@@ -1261,12 +840,8 @@ export class Journal {
     };
 
     for (const id of this._sortedClosedIds()) {
-      // Пропускаем по .meta без чтения файла
       const meta = this.segmentMeta.get(id);
-      if (meta && meta.minTs !== null && meta.maxTs !== null &&
-        (meta.maxTs < start || meta.minTs >= end)) {
-        continue;
-      }
+      if (meta && meta.minTs !== null && meta.maxTs !== null && (meta.maxTs < start || meta.minTs >= end)) continue;
       processSegment(this._loadClosedSegment(id));
     }
 
@@ -1277,12 +852,7 @@ export class Journal {
     for (let i = 0; i < n; i++) {
       const acc = accs[i];
       const bStart = first + i * bucket;
-      const bucketObj: Record<string, unknown> = {
-        start: Math.max(bStart, start),
-        end: Math.min(bStart + bucket, end),
-        count: acc.count,
-        hasData: acc.count > 0
-      };
+      const bucketObj: Record<string, unknown> = { start: Math.max(bStart, start), end: Math.min(bStart + bucket, end), count: acc.count, hasData: acc.count > 0 };
       for (const fn of fns) {
         let value: number | null;
         switch (fn) {
@@ -1299,52 +869,16 @@ export class Journal {
     return buckets;
   }
 
-  // --------------------------------------------------
-  // Векторный скан (Фаза 3)
-  // --------------------------------------------------
+  // --- Vectorized Scan (Phase 3) ---
 
-  /**
-   * Векторный скан: select/where/groupBy/agg/order/limit — без материализации
-   * строк. Читаются только запрошенные колонки (каждая один раз, наружу из
-   * цикла), фильтр — плотный цикл с early-exit, агрегаты — накопители min/max/
-   * sum/count, groupBy — hashmap с частичными агрегатами на сегмент.
-   *
-   * Два режима:
-   *  - с `agg`: агрегированные строки — по одной на группу (или одна без groupBy).
-   *    Ключ агрегата — `поле_функция` (value_avg, ts_count, …). `order` — по
-   *    первому ключу агрегата; `limit` — top-k (по умолчанию desc).
-   *  - без `agg`: материализованные строки только по `select` (по умолчанию —
-   *    все поля схемы), отфильтрованные, отсортированные, offset/limit.
-   *
-   * ```ts
-   * j.scan({
-   *   start: 'now-1h', end: 'now',
-   *   where:   [{ field: 'value', op: 'gt', value: 90 }],
-   *   groupBy: 'host',
-   *   agg:     { value: ['avg', 'min', 'max'], ts: ['count'] },
-   *   order:   'desc', limit: 20,
-   * });
-   * // → [{ host: 'web-1', value_avg: 73.2, value_min: …, ts_count: 1420 }, …]
-   * ```
-   *
-   * Память: O(выбранные колонки × размер сегмента) + O(группы), а не
-   * O(строки × поля) как в allRows(). Сегмент вне [start, end] не читается
-   * с диска (решение по сайдкар'у .meta).
-   */
   scan(opts: ScanOptions): Row[] {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     const plan = this._compileScan(opts);
 
-    // Аккумуляция:
-    //  - agg-режим: groups — Map<ключ, {row, accs}> (одна группа '' без groupBy);
-    //  - raw-режим: rawRows — массив строк (только select-колонки).
     const groups = new Map<string, { row: Row; accs: Record<string, AggAcc> }>();
     let rawRows: Row[] | null = null;
     if (!plan.agg) rawRows = [];
 
-    // Сколько строк реально нужно в raw-режиме (для early-exit при order=asc).
     const rawNeed = plan.limit !== null ? plan.offset + plan.limit : Infinity;
     const canEarlyStop = !plan.agg && plan.order === 1;
 
@@ -1360,19 +894,9 @@ export class Journal {
     };
 
     const processSegment = (seg: Segment): void => {
-      // Вне диапазона — не читаем вообще
-      if (plan.start !== null && plan.end !== null &&
-          seg.minTs !== null && seg.maxTs !== null &&
-          (seg.maxTs < plan.start || seg.minTs > plan.end)) {
-        return;
-      }
+      if (plan.start !== null && plan.end !== null && seg.minTs !== null && seg.maxTs !== null && (seg.maxTs < plan.start || seg.minTs > plan.end)) return;
 
-      // fast-path (как в aggregate()): сегмент целиком в диапазоне, нет where
-      // и нет groupBy — саммари колонки дают min/max/sum/count без чтения данных.
-      if (plan.agg && plan.where.length === 0 && plan.groupBy.length === 0 &&
-          plan.start !== null && plan.end !== null &&
-          seg.minTs !== null && seg.maxTs !== null &&
-          seg.minTs >= plan.start && seg.maxTs <= plan.end) {
+      if (plan.agg && plan.where.length === 0 && plan.groupBy.length === 0 && plan.start !== null && plan.end !== null && seg.minTs !== null && seg.maxTs !== null && seg.minTs >= plan.start && seg.maxTs <= plan.end) {
         let slow: string[] = [];
         for (const spec of plan.aggSpec) {
           const s = seg.summaries[spec.field];
@@ -1389,8 +913,6 @@ export class Journal {
 
       const rowMap = seg.rowMap;
       const n = seg.rowCount;
-
-      // Колонки, которые реально читаем — одна ссылка на колонку, наружу из цикла.
       const cols: Record<string, Column | undefined> = {};
       const fieldsNeeded = new Set<string>();
       if (plan.hasTsFilter) fieldsNeeded.add('ts');
@@ -1415,16 +937,12 @@ export class Journal {
         const spec = plan.aggSpec;
         for (let li = 0; li < n; li++) {
           const pi = rowMap[li];
-
-          // Диапазон ts (обе границы включительно; отсутствующая граница не фильтрует)
           if (tsCol) {
             const ts = tsCol.get(pi);
             if (typeof ts !== 'number') continue;
             if (start !== null && ts < start) continue;
             if (end !== null && ts > end) continue;
           }
-
-          // where — early-exit
           let pass = true;
           for (let ci = 0; ci < nc; ci++) {
             const c = conds[ci];
@@ -1434,7 +952,6 @@ export class Journal {
           }
           if (!pass) continue;
 
-          // Ключ группы
           let key: string;
           let grow: Row = {};
           if (ngb === 0) {
@@ -1465,12 +982,10 @@ export class Journal {
           }
         }
       } else {
-        // raw-режим: материализуем только select-колонки
         const sel = plan.select;
         const nsel = sel.length;
         for (let li = 0; li < n; li++) {
           const pi = rowMap[li];
-
           if (tsCol) {
             const ts = tsCol.get(pi);
             if (typeof ts !== 'number') continue;
@@ -1498,39 +1013,28 @@ export class Journal {
       }
     };
 
-    // Гарантируем, что в agg-режиме существует группа '' (без groupBy).
     if (plan.agg && plan.groupBy.length === 0) getGroup('', {});
 
     for (const id of this._sortedClosedIds()) {
       const meta = this.segmentMeta.get(id);
-      if (meta && meta.minTs !== null && meta.maxTs !== null &&
-          plan.start !== null && plan.end !== null &&
-          (meta.maxTs < plan.start || meta.minTs > plan.end)) {
-        continue; // не пересекает диапазон
-      }
+      if (meta && meta.minTs !== null && meta.maxTs !== null && plan.start !== null && plan.end !== null && (meta.maxTs < plan.start || meta.minTs > plan.end)) continue;
       processSegment(this._loadClosedSegment(id));
       if (canEarlyStop && rawRows!.length >= rawNeed) break;
     }
 
     const active = this.activeSegment;
-    if (active && active.rowCount > 0) {
-      processSegment(active);
-    }
+    if (active && active.rowCount > 0) processSegment(active);
 
-    // Собираем результат
     if (plan.agg) {
       const out: Row[] = [];
       for (const g of groups.values()) {
         const row: Row = { ...g.row };
         for (const spec of plan.aggSpec) {
           const acc = g.accs[spec.field];
-          for (const fn of spec.fns) {
-            row[`${spec.field}_${fn}`] = aggValue(acc, fn);
-          }
+          for (const fn of spec.fns) row[`${spec.field}_${fn}`] = aggValue(acc, fn);
         }
         out.push(row);
       }
-      // Сортировка по первому ключу агрегата
       if (out.length > 1) {
         const key = plan.aggKeys[0];
         out.sort((a, b) => {
@@ -1546,7 +1050,6 @@ export class Journal {
       return out.slice(from, to);
     }
 
-    // raw-режим
     if (rawRows!.length > 1) {
       const key = plan.sortKey;
       rawRows!.sort((a, b) => {
@@ -1562,32 +1065,13 @@ export class Journal {
     return rawRows!.slice(from, to);
   }
 
-  /**
-   * SQL-lite поверх scan() (Фаза 5): тонкий парсер компилирует SQL-подобный
-   * запрос в опции scan() и выполняет его. Не диалект — только нужное подмножество:
-   *
-   *   SELECT avg(value), host WHERE value > 90 GROUP BY host ORDER BY value_avg DESC LIMIT 20
-   *   SELECT host, value WHERE ts BETWEEN 'now-1h' AND 'now' AND host = 'web-1' LIMIT 10
-   *   SELECT * WHERE level IN ('error','warn') ORDER BY ts DESC LIMIT 50
-   *   INSERT INTO m (ts, value, host) VALUES (1700000000000, 4.5, 'web-1')
-   *
-   * SELECT возвращает Row[] (результат scan()). INSERT INTO пишет строки в
-   * этот журнал и возвращает число записанных строк; имя журнала в запросе
-   * должно совпадать с именем открытого журнала.
-   *
-    * Детали и синтаксис — см. Sql.ts. Бросает ошибку (код JRN_ или SQL_) при ошибке синтаксиса.
-   */
   sql(query: string): Row[] | number {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     const head = query.trimStart();
     const firstWord = head.split(/\s+/, 1)[0].toUpperCase();
     if (firstWord === 'INSERT') {
       const ins = Sql.parseInsert(query);
-      if (ins.name !== this.name) {
-        throw ErrorManager.make('JRN_INSERT_NAME', { name: ins.name, journal: this.name });
-      }
+      if (ins.name !== this.name) throw ErrorManager.make('JRN_INSERT_NAME', { name: ins.name, journal: this.name });
       for (const row of ins.rows) this.append(row);
       return ins.rows.length;
     }
@@ -1599,120 +1083,75 @@ export class Journal {
     return this.scan(opts);
   }
 
-  /** Компиляция опций скана в план (валидация + предвычисление). */
   private _compileScan(opts: ScanOptions): ScanPlan {
     const start = opts.start !== undefined ? Interval.resolve(opts.start) : null;
     const end = opts.end !== undefined ? Interval.resolve(opts.end) : null;
-    if (start !== null && end !== null && end < start) {
-      throw ErrorManager.make('JRN_SCAN_RANGE');
-    }
+    if (start !== null && end !== null && end < start) throw ErrorManager.make('JRN_SCAN_RANGE');
 
-    // where
-    const where: { field: string; op: ScanOp; value: JsonValue }[] = [];
+       const where: { field: string; op: ScanOp; value: JsonValue }[] = [];
     if (opts.where) {
       for (const w of opts.where) {
-        if (!w || typeof w.field !== 'string' || w.field.length === 0) {
-          throw ErrorManager.make('JRN_SCAN_WHERE_FIELD');
-        }
-        if (!isScanOp(w.op)) {
-          throw ErrorManager.make('JRN_SCAN_WHERE_OP', { op: String(w.op), allowed: SCAN_OPS.join('|') });
-        }
-        if (w.op === 'in' || w.op === 'nin') {
-          if (!Array.isArray(w.value)) {
-            throw ErrorManager.make('JRN_SCAN_WHERE_IN');
-          }
-        }
+        if (!w || typeof w.field !== 'string' || w.field.length === 0) throw ErrorManager.make('JRN_SCAN_WHERE_FIELD');
+        if (!isScanOp(w.op)) throw ErrorManager.make('JRN_SCAN_WHERE_OP', { op: String(w.op), allowed: SCAN_OPS.join('|') });
+        if ((w.op === 'in' || w.op === 'nin') && !Array.isArray(w.value)) throw ErrorManager.make('JRN_SCAN_WHERE_IN');
         where.push({ field: w.field, op: w.op, value: w.value ?? null });
       }
     }
 
-    // agg
     const agg: boolean = opts.agg !== undefined && Object.keys(opts.agg).length > 0;
     const aggSpec: { field: string; fns: AggFn[] }[] = [];
     const aggKeys: string[] = [];
     if (agg) {
       for (const [field, fns] of Object.entries(opts.agg!)) {
-        if (typeof field !== 'string' || field.length === 0) {
-          throw ErrorManager.make('JRN_SCAN_AGG_FIELD');
-        }
-        if (!Array.isArray(fns) || fns.length === 0) {
-          throw ErrorManager.make('JRN_SCAN_AGG_FNS');
-        }
+        if (typeof field !== 'string' || field.length === 0) throw ErrorManager.make('JRN_SCAN_AGG_FIELD');
+        if (!Array.isArray(fns) || fns.length === 0) throw ErrorManager.make('JRN_SCAN_AGG_FNS');
         for (const fn of fns) {
-          if (!isAggFn(fn)) {
-            throw ErrorManager.make('JRN_SCAN_AGG_FN', { fn: String(fn) });
-          }
+          if (!isAggFn(fn)) throw ErrorManager.make('JRN_SCAN_AGG_FN', { fn: String(fn) });
         }
         aggSpec.push({ field, fns });
         for (const fn of fns) aggKeys.push(`${field}_${fn}`);
       }
     }
 
-    // groupBy (только в agg-режиме)
     let groupBy: string[] = [];
     if (opts.groupBy !== undefined) {
-      if (!agg) {
-        throw ErrorManager.make('JRN_SCAN_GROUPBY_AGG');
-      }
+      if (!agg) throw ErrorManager.make('JRN_SCAN_GROUPBY_AGG');
       const gb = Array.isArray(opts.groupBy) ? opts.groupBy : [opts.groupBy];
       for (const g of gb) {
-        if (typeof g !== 'string' || g.length === 0) {
-          throw ErrorManager.make('JRN_SCAN_GROUPBY');
-        }
+        if (typeof g !== 'string' || g.length === 0) throw ErrorManager.make('JRN_SCAN_GROUPBY');
       }
       groupBy = gb;
     }
 
-    // select (raw-режим) — по умолчанию все поля схемы
     let select: string[];
     if (!agg) {
-      select = opts.select && opts.select.length > 0
-        ? [...opts.select]
-        : (this.schema ? Object.keys(this.schema) : []);
-      if (select.length === 0) {
-        throw ErrorManager.make('JRN_SCAN_SELECT');
-      }
+      select = opts.select && opts.select.length > 0 ? [...opts.select] : (this.schema ? Object.keys(this.schema) : []);
+      if (select.length === 0) throw ErrorManager.make('JRN_SCAN_SELECT');
       for (const f of select) {
-        if (typeof f !== 'string' || f.length === 0) {
-          throw ErrorManager.make('JRN_SCAN_SELECT_FIELD');
-        }
+        if (typeof f !== 'string' || f.length === 0) throw ErrorManager.make('JRN_SCAN_SELECT_FIELD');
       }
     } else {
       select = [];
     }
 
-    // order: agg — desc (top-k), raw — asc (хронология)
     const order = opts.order ?? (agg ? 'desc' : 'asc');
-    if (order !== 'asc' && order !== 'desc') {
-      throw ErrorManager.make('JRN_SCAN_ORDER');
-    }
+    if (order !== 'asc' && order !== 'desc') throw ErrorManager.make('JRN_SCAN_ORDER');
     const orderSign: 1 | -1 = order === 'asc' ? 1 : -1;
 
-    // limit / offset
     let limit: number | null = null;
     if (opts.limit !== undefined) {
-      if (!Number.isInteger(opts.limit) || opts.limit < 0) {
-        throw ErrorManager.make('JRN_SCAN_LIMIT');
-      }
+      if (!Number.isInteger(opts.limit) || opts.limit < 0) throw ErrorManager.make('JRN_SCAN_LIMIT');
       limit = opts.limit;
     }
-    const offset = opts.offset !== undefined
-      ? (Number.isInteger(opts.offset) && opts.offset >= 0 ? opts.offset : (() => { throw ErrorManager.make('JRN_SCAN_OFFSET'); })())
-      : 0;
+    const offset = opts.offset !== undefined ? (Number.isInteger(opts.offset) && opts.offset >= 0 ? opts.offset : (() => { throw ErrorManager.make('JRN_SCAN_OFFSET'); })()) : 0;
 
-    // hasTsFilter — нужен ли диапазон ts в цикле (условия where по 'ts'
-    // проверяются отдельно, через whereOne).
     const hasTsFilter = start !== null || end !== null;
-
-    // sortKey: agg — первый ключ агрегата; raw — 'ts' (если в select), иначе select[0]
     const sortKey = agg ? aggKeys[0] : (select.includes('ts') ? 'ts' : select[0]);
 
     return { start, end, where, hasTsFilter, groupBy, agg, aggSpec, aggKeys, select, order: orderSign, limit, offset, sortKey };
   }
 
-  // --------------------------------------------------
-  // Чтение
-  // --------------------------------------------------
+  // --- Reading ---
 
   getTimeRange(): [number, number] | null {
     let min = Infinity;
@@ -1722,7 +1161,6 @@ export class Journal {
       if (maxTs !== null && maxTs > max) max = maxTs;
     };
 
-    // Если для всех закрытых сегментов есть .meta — считаем без единой загрузки файлов
     const ids = [...this.segmentIndex.keys()];
     if (ids.length === 0 || ids.every(id => this.segmentMeta.has(id))) {
       for (const id of ids) {
@@ -1732,10 +1170,7 @@ export class Journal {
       const active = this.activeSegment;
       if (active && active.rowCount > 0) consider(active.minTs, active.maxTs);
     } else {
-      // Есть сегменты без .meta — грузим их (и кэшируем границы при этом)
-      for (const seg of this.allSegments()) {
-        consider(seg.minTs, seg.maxTs);
-      }
+      for (const seg of this.allSegments()) consider(seg.minTs, seg.maxTs);
     }
 
     if (min === Infinity) return null;
@@ -1744,149 +1179,101 @@ export class Journal {
 
   getMarks(): number[] {
     const marks: number[] = [];
-
     for (const seg of this.allSegments()) {
       const tsCol = seg.columns['ts'];
       if (!tsCol) continue;
-
       for (let i = 0; i < seg.rowCount; i++) {
         const v = seg.get('ts', i);
         if (typeof v === 'number') marks.push(v);
       }
     }
-
     return marks.sort((a, b) => a - b);
   }
 
   query(startTime: number | string, endTime: number | string): Row[] {
-    // Границы: число (мс) или строка «языка интервалов» (VRackDB): 'now-7d', 'now'
     const [start, end] = Interval.period(startTime, endTime);
     const results: Row[] = [];
 
     for (const id of this._sortedClosedIds()) {
-      // Границы из сайдкар'а .meta: сегмент вне диапазона не читается вообще
       const meta = this.segmentMeta.get(id);
       if (meta && meta.minTs !== null && meta.maxTs !== null) {
         if (meta.maxTs < start || meta.minTs > end) continue;
       }
-
       const seg = this._loadClosedSegment(id);
       if (seg.minTs !== null && seg.maxTs !== null) {
-        // Повторная проверка на данных (сайдкар мог отсутствовать/устаревать)
         if (seg.maxTs < start || seg.minTs > end) continue;
       }
-
       for (let i = 0; i < seg.rowCount; i++) {
         const ts = seg.get('ts', i);
-        if (typeof ts === 'number' && ts >= start && ts <= end) {
-          results.push(this._normalizeRow(seg.getRow(i)));
-        }
+        if (typeof ts === 'number' && ts >= start && ts <= end) results.push(this._normalizeRow(seg.getRow(i)));
       }
     }
 
-    // Активный сегмент — в памяти, обрабатываем последним (как раньше)
     const active = this.activeSegment;
     if (active && active.rowCount > 0) {
       for (let i = 0; i < active.rowCount; i++) {
         const ts = active.get('ts', i);
-        if (typeof ts === 'number' && ts >= start && ts <= end) {
-          results.push(this._normalizeRow(active.getRow(i)));
-        }
+        if (typeof ts === 'number' && ts >= start && ts <= end) results.push(this._normalizeRow(active.getRow(i)));
       }
     }
-
     return results;
   }
 
   allRows(): Row[] {
     const results: Row[] = [];
     for (const seg of this.allSegments()) {
-      for (let i = 0; i < seg.rowCount; i++) {
-        results.push(this._normalizeRow(seg.getRow(i)));
-      }
+      for (let i = 0; i < seg.rowCount; i++) results.push(this._normalizeRow(seg.getRow(i)));
     }
     return results;
   }
 
-  /**
-   * Последние `count` строк журнала в хронологическом порядке (старые → новые).
-   * Сегменты обходятся от новых к старым и загружаются лениво — как только
-   * собрано достаточно строк, более старые сегменты не читаются вообще.
-   */
   tail(count: number): Row[] {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     if (count <= 0) return [];
 
     const takeFromSegment = (seg: Segment, n: number): Row[] => {
       const rows: Row[] = [];
-      for (let i = seg.rowCount - n; i < seg.rowCount; i++) {
-        rows.push(this._normalizeRow(seg.getRow(i)));
-      }
-      return rows; // старые → новые внутри сегмента
+      for (let i = seg.rowCount - n; i < seg.rowCount; i++) rows.push(this._normalizeRow(seg.getRow(i)));
+      return rows;
     };
 
     let result: Row[] = [];
-
-    // Активный сегмент — самые свежие строки, уже в памяти
     const active = this.activeSegment;
-    if (active && active.rowCount > 0) {
-      result = takeFromSegment(active, Math.min(count, active.rowCount));
-    }
+    if (active && active.rowCount > 0) result = takeFromSegment(active, Math.min(count, active.rowCount));
 
-    // Закрытые сегменты — от новых к старым, по требованию из кэша или с диска.
-    // Как только собрано достаточно строк — стоп, более старые файлы не читаются.
     if (result.length < count) {
       for (const id of this._sortedClosedIds().reverse()) {
         if (result.length >= count) break;
         const seg = this._loadClosedSegment(id);
         const chunk = takeFromSegment(seg, Math.min(count - result.length, seg.rowCount));
-        result = [...chunk, ...result]; // более старые строки — перед новыми
+        result = [...chunk, ...result];
       }
     }
-
     return result;
   }
 
-  /**
-   * Срез логических строк с пагинацией и порядком — «limit/offset» по журналу.
-   * Строки идут в порядке записи (хронологии):
-   *   - order='asc'  — старые → новые, offset считается от самых старых;
-   *   - order='desc' — новые → старые, offset считается от самых свежих.
-   * Сегменты, целиком лежащие до нужного окна, не читаются с диска: они
-   * пропускаются по счётчикам строк из сайдкар'ов .meta (или кэша).
-   */
   page(limit: number, offset = 0, order: 'asc' | 'desc' = 'asc'): Row[] {
-    if (!this.isOpen) {
-      throw ErrorManager.make('JRN_NOT_OPEN');
-    }
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     if (!Number.isInteger(limit) || limit < 1) return [];
     let skip = Number.isInteger(offset) && offset > 0 ? offset : 0;
 
     const result: Row[] = [];
-    const closedIds = this._sortedClosedIds(); // старые → новые
+    const closedIds = this._sortedClosedIds();
 
-    /** Забирает строки из сегмента, пропуская `skip` с нужного края. */
     const takeFrom = (seg: Segment): void => {
       if (result.length >= limit) return;
       const r = seg.rowCount;
       if (r === 0) return;
       if (skip >= r) {
-        skip -= r; // весь сегмент до окна — пропускаем целиком
+        skip -= r;
         return;
       }
       const k = Math.min(limit - result.length, r - skip);
       if (order === 'asc') {
-        for (let i = skip; i < skip + k; i++) {
-          result.push(this._normalizeRow(seg.getRow(i)));
-        }
+        for (let i = skip; i < skip + k; i++) result.push(this._normalizeRow(seg.getRow(i)));
       } else {
-        // свежие → старые, начиная сразу после пропущенных `skip` с конца сегмента
         const startIdx = r - 1 - skip;
-        for (let i = 0; i < k; i++) {
-          result.push(this._normalizeRow(seg.getRow(startIdx - i)));
-        }
+        for (let i = 0; i < k; i++) result.push(this._normalizeRow(seg.getRow(startIdx - i)));
       }
       skip = 0;
     };
@@ -1895,7 +1282,7 @@ export class Journal {
       for (const id of closedIds) {
         const meta = this.segmentMeta.get(id);
         if (meta && skip >= meta.rowCount) {
-          skip -= meta.rowCount; // сегмент не загружаем вообще
+          skip -= meta.rowCount;
           continue;
         }
         takeFrom(this._loadClosedSegment(id));
@@ -1906,17 +1293,15 @@ export class Journal {
       for (const id of closedIds.reverse()) {
         const meta = this.segmentMeta.get(id);
         if (meta && skip >= meta.rowCount) {
-          skip -= meta.rowCount; // сегмент не загружаем вообще
+          skip -= meta.rowCount;
           continue;
         }
         takeFrom(this._loadClosedSegment(id));
       }
     }
-
     return result;
   }
 
-  /** Поля текущей схемы, которых нет в старом сегменте → null */
   private _normalizeRow(row: Row): Row {
     if (!this.schema) return row;
     for (const f of Object.keys(this.schema)) {
@@ -1929,14 +1314,9 @@ export class Journal {
     return { ...this.metadata };
   }
 
-  // Обновляет метаданные журнала и активного сегмента.
-  // Уже записанные на диск сегменты хранят снимок метаданных
-  // на момент своей записи (сегменты неизменяемы).
   updateMetadata(newMetadata: Metadata): void {
     this.metadata = { ...this.metadata, ...newMetadata };
-    if (this.activeSegment) {
-      this.activeSegment.metadata = { ...this.metadata };
-    }
+    if (this.activeSegment) this.activeSegment.metadata = { ...this.metadata };
   }
 
   stats(): JournalStats {
@@ -1945,7 +1325,6 @@ export class Journal {
     let totalRows = 0;
     let totalPhysical = 0;
 
-    // Если для всех сегментов есть .meta — считаем без загрузки файлов
     if (ids.every(id => this.segmentMeta.has(id))) {
       for (const id of ids) {
         const m = this.segmentMeta.get(id)!;
@@ -1977,9 +1356,7 @@ export class Journal {
     };
   }
 
-  // --------------------------------------------------
-  // Внутренние методы
-  // --------------------------------------------------
+  // --- Internal methods ---
 
   journalPath(): string {
     return path.join(this.journalsDir, this.name!);
@@ -1990,27 +1367,21 @@ export class Journal {
     this.activeSegment = new Segment(id, this.schema!, this.metadata ?? {});
   }
 
-  /** Ленивая загрузка закрытого сегмента из кэша или с диска (v1/v2). */
   private _loadClosedSegment(id: string): Segment {
     const cached = this._segmentCache.get(id);
     if (cached) return cached;
 
     const fileName = this.segmentIndex.get(id);
-    if (!fileName) {
-      throw ErrorManager.make('JRN_SEG_UNKNOWN', { id });
-    }
+    if (!fileName) throw ErrorManager.make('JRN_SEG_UNKNOWN', { id });
 
     let seg: Segment;
     try {
       const buf = fs.readFileSync(path.join(this.journalPath(), fileName));
-      // Прозрачное чтение: v1 (JSON) / v2 (gzip+JSON) / v3 (бинарные блобы)
       seg = SegmentFile.read(buf);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       throw ErrorManager.make('JRN_SEG_READ', { file: fileName, message: String(message) });
     }
-    // Кэшируем границы: для старых файлов без .meta это единственный способ,
-    // и дальше query()/stats() смогут работать по этим данным.
     this.segmentMeta.set(id, {
       minTs: seg.minTs,
       maxTs: seg.maxTs,
@@ -2024,34 +1395,18 @@ export class Journal {
   }
 
   private _loadAllClosed(): Segment[] {
-    // Хронологический порядок (см. _sortedClosedIds) — порядок строк в
-    // allRows()/allSegments() должен совпадать с порядком записи.
     return this._sortedClosedIds().map(id => this._loadClosedSegment(id));
   }
 
   allSegments(): Segment[] {
     const segments = this._loadAllClosed();
-    if (this.activeSegment && this.activeSegment.rowCount > 0) {
-      segments.push(this.activeSegment);
-    }
+    if (this.activeSegment && this.activeSegment.rowCount > 0) segments.push(this.activeSegment);
     return segments;
   }
 
-  // --------------------------------------------------
-  // Агрегации — внутренние
-  // --------------------------------------------------
+  // --- Aggregations (internal) ---
 
-  /**
-   * Скан сегмента по запрошенным колонкам с фильтром ts в [start, end]
-   * (включительно). Числовые значения прибавляются в накопители.
-   */
-  private _scanAggregate(
-    seg: Segment,
-    start: number,
-    end: number,
-    fields: string[],
-    accs: Record<string, AggAcc>,
-  ): void {
+  private _scanAggregate(seg: Segment, start: number, end: number, fields: string[], accs: Record<string, AggAcc>): void {
     if (fields.length === 0) return;
     for (let i = 0; i < seg.rowCount; i++) {
       const ts = seg.get('ts', i);
@@ -2063,14 +1418,7 @@ export class Journal {
     }
   }
 
-  /** Активный сегмент: fast-path по своим саммари, иначе скан. */
-  private _aggregateActive(
-    seg: Segment,
-    start: number,
-    end: number,
-    fields: string[],
-    accs: Record<string, AggAcc>,
-  ): void {
+  private _aggregateActive(seg: Segment, start: number, end: number, fields: string[], accs: Record<string, AggAcc>): void {
     const minTs = seg.minTs;
     const maxTs = seg.maxTs;
     if (minTs !== null && maxTs !== null && (maxTs < start || minTs > end)) return;
@@ -2087,11 +1435,7 @@ export class Journal {
     this._scanAggregate(seg, start, end, fields, accs);
   }
 
-  /** Накопители → результат: ключ = поле_функция (value_avg, ts_count), пустые → null. */
-  private _buildResult(
-    exprs: AggregateExpr[],
-    accs: Record<string, AggAcc>,
-  ): Record<string, number | null> {
+  private _buildResult(exprs: AggregateExpr[], accs: Record<string, AggAcc>): Record<string, number | null> {
     const result: Record<string, number | null> = {};
     for (const e of exprs) {
       const acc = accs[e.field];
@@ -2108,7 +1452,6 @@ export class Journal {
     return result;
   }
 
-  /** Сайдкар <файл>.meta — min/max ts + счётчики для query()/stats() без загрузки файла. */
   private _writeMeta(seg: Segment, fileName: string): void {
     const meta: SegmentMeta = {
       minTs: seg.minTs,
@@ -2121,27 +1464,14 @@ export class Journal {
     this.segmentMeta.set(seg.id, meta);
     const metaPath = path.join(this.journalPath(), `${fileName}${META_SUFFIX}`);
     fs.writeFileSync(`${metaPath}.tmp`, JSON.stringify(meta));
-    fs.renameSync(`${metaPath}.tmp`, metaPath); // атомарно — «сироты» не остаются
+    fs.renameSync(`${metaPath}.tmp`, metaPath);
   }
 
-  /**
-   * id закрытых сегментов в хронологическом порядке.
-   * Формат id: `seg_<tsMs>_<counter>_<nonce>` (nonce — случайный хекс,
-   * защита от коллизий между инстансами). Порядок определяется парой
-   * (tsMs, counter) — порядком создания; nonce — лишь финальный
-   * детерминированный тай-брейкер для id, созданных в одну миллисекунду.
-   * (Сортировка «по последнему числовому суффиксу» не работает: суффикс —
-   * это nonce, и при буквах в нём regex не срабатывает.)
-   */
   private _sortedClosedIds(): string[] {
     const idKey = (id: string): [number, number, string] => {
       const m = id.match(/^seg_(\d+)_(\d+)_(.+)$/);
       return m ? [Number(m[1]), Number(m[2]), m[3]] : [0, 0, id];
     };
-    // Сортируем по ХРОНОЛОГИИ данных (minTs из .meta), а не по порядку создания (ID).
-    // После компактизации слитый сегмент получает новый (более высокий) seq-номер,
-    // но содержит СТАЙШИЕ данные: порядок по ID дал бы неверную хронологию для
-    // ORDER BY / LIMIT. Для обычных журналов (создание в порядке ts) порядок тот же.
     const minTsOf = (id: string): number => {
       const m = this.segmentMeta.get(id);
       return (m && typeof m.minTs === 'number') ? m.minTs : Number.MAX_SAFE_INTEGER;
@@ -2156,20 +1486,15 @@ export class Journal {
     });
   }
 
-  // --------------------------------------------------
-  // WAL — восстановление несфлашенных строк после краха
-  // --------------------------------------------------
+  // --- WAL (recovery of unflushed rows after crash) ---
 
   private _walPath(): string {
     return path.join(this.journalPath(), WAL_FILE);
   }
 
-  /** Сбрасывает накопленные строки WAL на диск одним append'ом. Идемпотентен, если буфер пуст. */
   _walDrain(): void {
     if (this._walBuf.length === 0) return;
     const chunk = this._walBuf.join('');
-    // Буфер очищаем до записи: при сбое I/O строки считаются потерянными,
-    // но не дублируются повторной записью поверх уже наполовину дописанного.
     this._walBuf = [];
     this._walBufBytes = 0;
     fs.appendFileSync(this._walPath(), chunk, 'utf-8');
@@ -2179,27 +1504,21 @@ export class Journal {
     fs.rmSync(this._walPath(), { force: true });
   }
 
-  /** Убирает последнюю строку из WAL-файла (откат отклонённой записи). */
   private _walRollbackLine(line: string): void {
     try {
       const p = this._walPath();
       const size = fs.statSync(p).size;
       const bytes = Buffer.byteLength(line, 'utf-8');
-      if (size >= bytes) {
-        fs.truncateSync(p, size - bytes);
-      }
-    } catch {
-      // WAL мог быть уже усечён (flush) — откат не критичен
-    }
+      if (size >= bytes) fs.truncateSync(p, size - bytes);
+    } catch { /* WAL might have already been truncated */ }
   }
 
-  /** Проигрывает строки из WAL в активный сегмент. */
   private _replayWAL(): void {
     let content: string;
     try {
       content = fs.readFileSync(this._walPath(), 'utf-8');
     } catch {
-      return; // WAL нет — обычное открытие
+      return;
     }
 
     const lines = content.split('\n').filter(l => l.length > 0);
@@ -2218,23 +1537,17 @@ export class Journal {
   private _appendInMemory(row: Row): void {
     const seg = this.activeSegment!;
     seg.append(row);
-    if (seg.rowCount >= this.rowsPerSegment) {
-      // flush() усечёт WAL — безопасно: строки уже прочитаны в память
-      this.flush();
-    }
+    if (seg.rowCount >= this.rowsPerSegment) this.flush();
   }
 
-  // --------------------------------------------------
-  // Блокировка журнала одним владельцем
-  // --------------------------------------------------
+  // --- Single-owner journal locking ---
 
   private _lockPath(): string {
     return path.join(this.journalPath(), LOCK_FILE);
   }
 
-  /** Захватывает блокировку; устаревшую (мёртвый PID) забирает себе. */
   private _acquireLock(): void {
-    if (this.lockMode === 'off') return; // координация владельцев — на стороне приложения
+    if (this.lockMode === 'off') return;
     const lockPath = this._lockPath();
     try {
       fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, ts: Date.now() }), { flag: 'wx' });
@@ -2243,32 +1556,22 @@ export class Journal {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
     }
 
-    // Блокировка существует — проверяем живость владельца
     let holderPid = -1;
     try {
       const info = JSON.parse(fs.readFileSync(lockPath, 'utf-8')) as { pid?: number };
       if (typeof info.pid === 'number') holderPid = info.pid;
-    } catch {
-      // Повреждённый lockfile — считаем устаревшим
-    }
+    } catch { /* Corrupted lockfile — consider stale */ }
 
-    if (this._pidAlive(holderPid)) {
-      throw ErrorManager.make('JRN_LOCKED', { pid: holderPid, lockPath });
-    }
-
+    if (this._pidAlive(holderPid)) throw ErrorManager.make('JRN_LOCKED', { pid: holderPid, lockPath });
     fs.writeFileSync(lockPath, JSON.stringify({ pid: process.pid, ts: Date.now() }));
   }
 
   private _releaseLock(): void {
-    if (this.lockMode === 'off') return; // блокировки не было — снимать нечего
+    if (this.lockMode === 'off') return;
     try {
       const info = JSON.parse(fs.readFileSync(this._lockPath(), 'utf-8')) as { pid?: number };
-      if (info.pid === process.pid) {
-        fs.rmSync(this._lockPath(), { force: true });
-      }
-    } catch {
-      // Блокировки уже нет — делать нечего
-    }
+      if (info.pid === process.pid) fs.rmSync(this._lockPath(), { force: true });
+    } catch { /* Lock already gone */ }
   }
 
   private _pidAlive(pid: number): boolean {
@@ -2277,7 +1580,6 @@ export class Journal {
       process.kill(pid, 0);
       return true;
     } catch (e) {
-      // EPERM — процесс существует, но не наш
       return (e as NodeJS.ErrnoException).code === 'EPERM';
     }
   }

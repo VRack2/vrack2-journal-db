@@ -65,7 +65,7 @@ class CoreError extends Error{
      * Imports an error that came over the network as a JSON object
      * Uses objectify for the incoming object just in case
      *
-     * @returns {CoreError} this после модификации
+     * @returns {CoreError} this, after modification
      */
     import(error: any) : this {
         const objectifyError = CoreError.objectify(error)

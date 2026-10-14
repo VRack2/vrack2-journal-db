@@ -1,17 +1,14 @@
-// ============================================================
-// compaction/Upsert.ts — upsert (ReplacingMergeTree)
+// compaction/Upsert.ts — upsert (ReplacingMergeTree).
 //
-// По identity-ключу desc.key оставляет строку с max(version); при равенстве
-// version побеждает более поздняя по порядку записи. Результат сортируется по
-// version (хронологически), чтобы compact не перемешивал порядок.
+// By the identity key desc.key keeps the row with max(version); on ties the
+// later write order wins. The result is sorted by version (chronologically)
+// so compact doesn't shuffle the order.
 //
-// Типичный случай: состояние-метрика, где по (host, metric) важна последняя
-// версия:
+// Typical case: a stateful metric where the latest version matters per (host, metric):
 //   new Upsert({ key:['host','metric'], version:'ts' })
 //   append { host:'web-1', metric:'cpu', ts:10, value:42 }
-//   append { host:'web-1', metric:'cpu', ts:20, value:55 }  // ← эта побеждает
-//   compact() → одна строка { host:'web-1', metric:'cpu', ts:20, value:55 }
-// ============================================================
+//   append { host:'web-1', metric:'cpu', ts:20, value:55 }  // ← this one wins
+//   compact() → one row { host:'web-1', metric:'cpu', ts:20, value:55 }
 
 import type { Row } from './types.ts';
 import type { Descriptor } from './Descriptor.ts';
@@ -19,7 +16,7 @@ import { Engine } from './Engine.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('Upsert', [
-  { short: 'DEF_UPSERT_VERSION', description: 'upsert: требуется version (колонка «новизны»)' },
+  { short: 'DEF_UPSERT_VERSION', description: 'upsert: version is required (the "newness" column)' },
 ]);
 
 export class Upsert extends Engine {
@@ -36,7 +33,7 @@ export class Upsert extends Engine {
       const k = this.keyOf(row);
       const v = this.versionOf(row);
       const cur = best.get(k);
-      // max(version); при равенстве — более поздний порядок записи
+      // max(version); on ties — the later write order
       if (cur === undefined || v > cur.v || (v === cur.v && order > cur.order)) {
         best.set(k, { row, v, order });
       }

@@ -1,13 +1,11 @@
-// ============================================================
-// numcodecs/types.ts — Базовый интерфейс числового кодека
-// ============================================================
+// numcodecs/types.ts — Base interface for numeric codecs
 
-/** Базовый интерфейс числового кодека (Фаза 2). */
+/** Base interface for numeric codecs (Phase 2). */
 export interface NumCodec {
-  /** Имя кодека (для схемы v3 и авто-выбора). */
+  /** Codec name (for the v3 schema and auto-picking). */
   readonly name: string;
-  /** Кодит массив чисел в байты (без null — их хранит маска в v3). */
+  /** Encode an array of numbers to bytes (no nulls — those go in the v3 mask). */
   encode(values: ArrayLike<number>): Buffer;
-  /** Раскодирует первые `n` значений из буфера. */
+  /** Decode the first `n` values from the buffer. */
   decode(buf: Buffer, n: number): Float64Array | Int32Array;
 }

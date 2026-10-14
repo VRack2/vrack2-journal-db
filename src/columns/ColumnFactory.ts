@@ -1,6 +1,4 @@
-// ============================================================
-// columns/ColumnFactory.ts — Реестр типов колонок и фабрика
-// ============================================================
+// columns/ColumnFactory.ts — Registry of column types and factory
 
 import { RawColumn } from './RawColumn.ts';
 import { DictionaryColumn } from './DictionaryColumn.ts';
@@ -17,7 +15,7 @@ ErrorManager.registerMany('ColumnFactory', [
 ]);
 
 export class ColumnFactory {
-  /** Реестр: имя типа → класс. */
+  /** Registry: type name → class. */
   static readonly types: Record<ColumnType, new () => Column> = {
     raw: RawColumn,
     dictionary: DictionaryColumn,
@@ -27,7 +25,7 @@ export class ColumnFactory {
     catchall: CatchAllColumn
   };
 
-  /** Создаёт колонку по имени типа. */
+  /** Create a column by type name. */
   static create(type: ColumnType): Column {
     const C = this.types[type];
     if (!C) throw ErrorManager.make('COL_TYPE_UNKNOWN', { type: String(type) });

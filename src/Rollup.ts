@@ -1,32 +1,32 @@
-// Rollup.ts — rollup: агрегация строк тонкого тира в строки грубого разрешения.
+// Rollup.ts — rollup: aggregating rows of a fine tier into rows of a coarser resolution.
 //
-// Чистые функции (без IO): группировка по (бакет грубого разрешения, размеры
-// dims) + agg по числам. Запись результата в журнал делает Table.
-// Класс-обёртка: файл = один класс (RULES.md §8).
+// Pure functions (no IO): grouping by (coarse-resolution bucket, dims) +
+// agg over numbers. Table writes the result into the journal.
+// Wrapper class: one file = one class (RULES.md §8).
 
 import { Interval } from './Interval.ts';
 import type { AggFn, JsonValue, Row } from './types.ts';
 
-/**
- * Явная конфигурация rollup: как агрегировать тонкий тир в целевой (res).
- * `agg` — поля-агрегаты, `dims` — размеры (group-by), `res` — целевое
- * разрешение (мс), определяет бакеты.
- */
+  /**
+   * Explicit rollup configuration: how to aggregate a fine tier into the target (res).
+   * `agg` — aggregate fields, `dims` — dimensions (group-by), `res` — the target
+   * resolution (ms), defines the buckets.
+   */
 export interface RollupConfig {
   agg: Record<string, AggFn>;
   dims: string[];
-  /** Целевое разрешение тира, в который идёт rollup (мс). */
+  /** Target tier resolution the rollup goes into (ms). */
   res: number;
 }
 
-/**
- * Rollup: чистая агрегация строк в бакеты более грубого разрешения.
- *
- *   Rollup.applyAgg('avg', [1, 2, 3])
- *   Rollup.promote(rows, { agg: { value: 'avg' }, dims: ['host'], res: 15_000 })
- */
+  /**
+   * Rollup: pure aggregation of rows into buckets of a coarser resolution.
+   *
+   *   Rollup.applyAgg('avg', [1, 2, 3])
+   *   Rollup.promote(rows, { agg: { value: 'avg' }, dims: ['host'], res: 15_000 })
+   */
 export class Rollup {
-  /** Примени агрегационную функцию к списку чисел. */
+  /** Apply an aggregation function to a list of numbers. */
   static applyAgg(fn: AggFn, vals: number[]): number {
     switch (fn) {
       case 'count':
@@ -43,15 +43,15 @@ export class Rollup {
   }
 
   /**
-   * Агрегирует `rows` (из тонкого тира) в строки разрешения `toResMs` (грубый
-   * тир). Группировка по (бакет toResMs, dims); для каждого agg-поля —
-   * applyAgg по собранным числам; строки без чисел по полю дают null.
+   * Aggregates `rows` (from a fine tier) into rows of resolution `toResMs`
+   * (coarse tier). Grouping by (toResMs bucket, dims); for each agg field —
+   * applyAgg over the collected numbers; rows without numbers for a field give null.
    *
-   * Порядок вывода — порядок первой встречи группы (стабильно для теста).
-   * Чистая функция: журнал не трогает.
+   * Output order — first-encounter order of the group (stable for tests).
+   * Pure function: does not touch the journal.
    *
-   * Две формы вызова:
-   *   Rollup.promote(rows, agg, dims, toResMs) — явные параметры
+   * Two call forms:
+   *   Rollup.promote(rows, agg, dims, toResMs) — explicit parameters
    *   Rollup.promote(rows, cfg)                 — cfg: { agg, dims, res }
    */
   static promote(

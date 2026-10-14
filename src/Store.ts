@@ -1,16 +1,14 @@
-// ============================================================
-// Store.ts — Хранилище таблиц: каталог, кэш журналов, ленивая загрузка
+// Store.ts — Table storage: catalog, journal cache, lazy loading
 //
-// Единственные публичные входы в таблицы:
-//   store.create(def) → Table   // создать (или вернуть открытую) таблицу
-//   store.open(name)  → Table   // переоткрыть по манифесту _store.json
+// The only public entry points to tables:
+//   store.create(def) → Table   // create a table (or return the open one)
+//   store.open(name)  → Table   // reopen from the _store.json manifest
 //
-// Журналы — внутренняя механика: Table открывает N журналов
-// (по одному на тир) через store._openJournal(). Манифест
-// `_store.json` — самодостаточный артефакт хранилища: его можно
-// отдать коллеге/AI-агенту. Старые журналы (без записи в манифесте)
-// переоткрываются с fallback-схемой из сегмента (log-таблица).
-// ============================================================
+// Journals are internal machinery: Table opens N journals
+// (one per tier) via store._openJournal(). The
+// `_store.json` manifest is a self-contained storage artifact: it can be
+// handed to a colleague/an AI agent. Old journals (not listed in the manifest)
+// are reopened with a fallback schema from a segment (log table).
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -44,9 +42,9 @@ const idFromFile = (f: string): string =>
   f.endsWith('.seg') ? f.slice(0, -4) : f.endsWith('.json') ? f.slice(0, -5) : f;
 
 ErrorManager.registerMany('Store', [
-  { short: 'STO_LOCK', description: "Store: lock должно быть 'pid' или 'off'", rules: { lock: 'string' } },
-  { short: 'STO_JOURNAL_NOT_FOUND', description: 'Store: журнал не найден в открытой сессии', rules: { name: 'string' } },
-  { short: 'STO_TABLE_NOT_FOUND', description: 'Store: таблица не найдена (нет ни в манифесте, ни сегментов на диске)', rules: { name: 'string' } },
+  { short: 'STO_LOCK', description: "Store: lock must be 'pid' or 'off'", rules: { lock: 'string' } },
+  { short: 'STO_JOURNAL_NOT_FOUND', description: 'Store: journal not found in the open session', rules: { name: 'string' } },
+  { short: 'STO_TABLE_NOT_FOUND', description: 'Store: table not found (not in the manifest and no segments on disk)', rules: { name: 'string' } },
 ]);
 
 export class Store {
@@ -61,13 +59,13 @@ export class Store {
   readonly autoCompact: boolean;
   readonly compactMinSegments: number;
 
-  /** Открытые журналы по имени (внутреннее; используется Table и тестами). */
+  /** Open journals by name (internal; used by Table and tests). */
   openJournals = new Map<string, Journal>();
 
-  /** Открытые таблицы по имени (внутренний реестр; closeAll() закрывает их). */
+  /** Open tables by name (internal registry; closeAll() closes them). */
   openTables = new Map<string, Table>();
 
-  /** Ключ «journal:segmentId» → Segment (LRU). */
+  /** Key "journal:segmentId" → Segment (LRU). */
   segmentCache: LRUCache<string, Segment>;
 
   constructor(baseDir: string, opts: StoreOptions = {}) {
@@ -81,7 +79,7 @@ export class Store {
     }
     this.lockMode = lock;
     this.format = opts.format ?? 'v2';
-    // zstd по умолчанию при Node >= 23.8; явный opts.compression — выше.
+    // zstd by default on Node >= 23.8; an explicit opts.compression wins.
     this.compression = opts.compression ?? Compression.default();
     this.codecs = opts.codecs && typeof opts.codecs === 'object' ? { ...opts.codecs } : {};
     this.autoCompact = opts.autoCompact ?? true;
@@ -89,12 +87,12 @@ export class Store {
     this.segmentCache = new LRUCache<string, Segment>(this.maxCacheSize);
   }
 
-  /** Каталог хранилища (абсолютный). */
+  /** Storage directory (absolute). */
   path(): string {
     return this.baseDir;
   }
 
-  /** Создать каталог журнала (no-op при повторном вызове); убрать осиротевшие tmp от упавших процессов. */
+  /** Create the journals directory (no-op on repeated call); remove orphaned tmp files from crashed processes. */
   init(): void {
     fs.mkdirSync(this.journalsDir, { recursive: true });
     const dir = path.dirname(this._manifestPath());
@@ -108,10 +106,10 @@ export class Store {
   }
 
   // --------------------------------------------------
-  // Журналы — внутренняя механика (Table, тесты)
+  // Journals — internal machinery (Table, tests)
   // --------------------------------------------------
 
-  /** Открыть журнал (кэшировать по имени). Внутреннее — используйте create/open. */
+  /** Open a journal (cached by name). Internal — use create/open. */
   _openJournal(
     name: string,
     schema: Schema,
@@ -140,7 +138,7 @@ export class Store {
     return journal;
   }
 
-  /** Закрыть журнал. Внутреннее. */
+  /** Close a journal. Internal. */
   _closeJournal(name: string): void {
     const journal = this.openJournals.get(name);
     if (!journal) {
@@ -150,7 +148,7 @@ export class Store {
     this.openJournals.delete(name);
   }
 
-  /** Закрыть все таблицы (и их тиры-журналы), затем прочие журналы. */
+  /** Close all tables (and their tier journals), then the other journals. */
   closeAll(): void {
     for (const [name, t] of [...this.openTables]) {
       t.close();
@@ -162,13 +160,13 @@ export class Store {
   }
 
   // --------------------------------------------------
-  // Таблицы — единственные публичные входы
+  // Tables — the only public entry points
   // --------------------------------------------------
 
   /**
-   * Создать таблицу по описанию (define*Table): движок (def.kind) +
-   * опциональные retention-тиры. Идемпотентно: открытая таблица с тем же
-   * именем возвращается. Описывается в манифест `_store.json`.
+    * Create a table from a description (define*Table): engine (def.kind) +
+    * optional retention tiers. Idempotent: an open table with the same
+    * name is returned. Described in the `_store.json` manifest.
    */
   create(def: AnyTableDef): Table {
     const existing = this.openTables.get(def.name);
@@ -182,8 +180,8 @@ export class Store {
   }
 
   /**
-   * Переоткрыть таблицу по имени (из манифеста `_store.json`).
-   * Без записи в манифесте — fallback: log-таблица со схемой из сегмента.
+    * Reopen a table by name (from the `_store.json` manifest).
+    * Not in the manifest — fallback: a log table with the schema from a segment.
    */
   open(name: string): Table {
     const existing = this.openTables.get(name);
@@ -197,8 +195,8 @@ export class Store {
   }
 
   /**
-   * Читаемое описание всех таблиц: определение (из манифеста) +
-   * рантайм-статистика (строки/сегменты/размер с диска).
+    * A readable description of all tables: definition (from the manifest) +
+    * runtime stats (rows/segments/size from disk).
    */
   describe(): TableDescription[] {
     const manifest = this._readManifest();
@@ -209,19 +207,19 @@ export class Store {
     return out.sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  /** Имена таблиц (из манифеста `_store.json`). */
+  /** Table names (from the `_store.json` manifest). */
   tables(): string[] {
     return Object.keys(this._readManifest().tables).sort();
   }
 
-  /** Движок таблицы (из манифеста); undefined, если таблица не описана там. */
+  /** Table engine (from the manifest); undefined if the table is not described there. */
   engineOf(name: string): EngineKind | undefined {
     const def = this._readManifest().tables[name];
     return def ? def.kind : undefined;
   }
 
   // --------------------------------------------------
-  // Манифест `_store.json` — самодостаточный артефакт хранилища
+  // Manifest `_store.json` — a self-contained storage artifact
   // --------------------------------------------------
 
   private _manifestPath(): string {
@@ -256,8 +254,8 @@ export class Store {
   }
 
   /**
-   * Fallback-описание для журнала без записи в манифесте (старые данные):
-   * log-таблица со схемой, восстановленной из первого сегмента.
+    * Fallback description for a journal not in the manifest (old data):
+    * a log table with the schema recovered from the first segment.
    */
   private _defFromDisk(name: string): LogTableDef {
     const dir = path.join(this.journalsDir, name);
@@ -285,13 +283,13 @@ export class Store {
     return 'auto';
   }
 
-  /** Рантайм-статистика каталогов журнала (включая тиры `<name>/r*`). */
+  /** Runtime stats of the journal directories (including tiers `<name>/r*`). */
   private _tableRuntimeStats(name: string): TableRuntime {
     let rows = 0;
     let bytes = 0;
     let segments = 0;
     const dirs = new Set<string>([path.join(this.journalsDir, name)]);
-    // тиры таблицы: <name>/r* (каталог верхнего уровня с подкаталогами)
+    // table tiers: <name>/r* (top-level directory with subdirectories)
     try {
       const tableDir = path.join(this.journalsDir, name);
       for (const d of fs.readdirSync(tableDir, { withFileTypes: true })) {
@@ -300,7 +298,7 @@ export class Store {
         }
       }
     } catch {
-      // верхнего каталога нет — смотрим только <name>
+      // no top-level directory — look at <name> only
     }
     for (const dir of dirs) {
       try {
@@ -312,18 +310,18 @@ export class Store {
           try {
             rows += SegmentFile.read(fs.readFileSync(full)).rowCount;
           } catch {
-            // повреждённый/нечитаемый сегмент — не ломаем статистику
+            // corrupt/unreadable segment — do not break the stats
           }
         }
       } catch {
-        // каталог отсутствует — статистика нулевая
+        // directory missing — stats are zero
       }
     }
     return { rows, segments, sizeBytes: bytes };
   }
 
   // --------------------------------------------------
-  // Интроспекция журналов
+  // Journal introspection
   // --------------------------------------------------
 
   listJournals(): string[] {
@@ -348,7 +346,7 @@ export class Store {
   }
 
   // --------------------------------------------------
-  // Ленивая загрузка сегментов
+  // Lazy segment loading
   // --------------------------------------------------
 
   loadSegment(journalName: string, segmentId: string): Segment | null {
@@ -356,7 +354,7 @@ export class Store {
     if (this.segmentCache.has(cacheKey)) {
       return this.segmentCache.get(cacheKey)!;
     }
-    // Файл может быть .seg (v3) или .json (v1/v2) — пробуем оба
+    // The file may be .seg (v3) or .json (v1/v2) — try both
     const dir = path.join(this.journalsDir, journalName);
     for (const ext of ['.seg', '.json']) {
       const segPath = path.join(dir, `${segmentId}${ext}`);
@@ -403,5 +401,5 @@ export class Store {
   }
 }
 
-// Реэкспорт — чтобы Store мог быть использован в типах Table без циклического импорта.
+// Re-export — so Store can be used in Table types without a circular import.
 export { ENGINE_META_KEY };

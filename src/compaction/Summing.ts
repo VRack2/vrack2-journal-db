@@ -1,17 +1,15 @@
-// ============================================================
-// compaction/Summing.ts — summing (SummingMergeTree)
+// compaction/Summing.ts — summing (SummingMergeTree).
 //
-// По identity-ключу desc.key суммирует числовые колонки из desc.sum (не-числа
-// игнорируются, как 0). Остальные поля (ключ и описательные) берутся из
-// строки с max(version) группы; если version не задан — из последней по порядку.
+// By the identity key desc.key sums the numeric columns from desc.sum
+// (non-numbers are ignored, as 0). The remaining fields (key and descriptive)
+// come from the row with max(version) in the group; if version is unset — from the last one by order.
 //
-// Типичный случай: счётчики/показания, которые нужно просуммировать по
-// (host, metric) за период:
+// Typical case: counters/readings to be summed over a period
+// for (host, metric):
 //   new Summing({ key:['host','metric'], sum:['value'] })
 //   append { host:'web-1', metric:'req', ts:1, value:100 }
 //   append { host:'web-1', metric:'req', ts:2, value:200 }
 //   compact() → { host:'web-1', metric:'req', ts:2, value:300 }
-// ============================================================
 
 import type { Row } from './types.ts';
 import type { Descriptor } from './Descriptor.ts';

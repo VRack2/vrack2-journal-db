@@ -1,15 +1,12 @@
-// ============================================================
-// numcodecs/NumCodecs.ts — Реестр числовых кодексов + авто-выбор
+// numcodecs/NumCodecs.ts — Numeric codec registry + auto-picking.
 //
-// Все кодексы — без потери точности (lossless): полный double /
-// целое восстанавливается точно. Ценность кодексов — в плотности
-// битов, которую потом «дожимает» сжатие (gzip/zstd).
+// All codecs are lossless: a full double / integer is restored exactly.
+// Their value is in bit density, which compression (gzip/zstd) then squeezes.
 //
-//   f64          — 8 байт на значение (базовая линия)
-//   doubleDelta  — вторые разности (время, счётчики: почти все нули)
-//   gorilla      — XOR соседних double (осциллирующие метрики)
-//   rle          — run-length для целых (коды, счётчики)
-// ============================================================
+//   f64          — 8 bytes per value (baseline)
+//   doubleDelta  — second differences (time, counters: mostly zeros)
+//   gorilla      — XOR of adjacent doubles (oscillating metrics)
+//   rle          — run-length for integers (codes, counters)
 
 import { F64Codec } from './F64Codec.ts';
 import { DoubleDeltaCodec } from './DoubleDeltaCodec.ts';
@@ -19,11 +16,11 @@ import type { NumCodec } from './types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('NumCodecs', [
-  { short: 'NC_CODEC_UNKNOWN', description: 'Неизвестный числовой кодек', rules: { name: 'string' } },
+  { short: 'NC_CODEC_UNKNOWN', description: 'Unknown numeric codec', rules: { name: 'string' } },
 ]);
 
 export class NumCodecs {
-  /** Реестр: имя кодека → экземпляр. */
+  /** Registry: codec name → instance. */
   static readonly registry: Record<string, NumCodec> = {
     f64: new F64Codec(),
     doubleDelta: new DoubleDeltaCodec(),
@@ -31,7 +28,7 @@ export class NumCodecs {
     rle: new RleCodec()
   };
 
-  /** Кодек по имени (NC_CODEC_UNKNOWN на неизвестном). */
+  /** Codec by name (NC_CODEC_UNKNOWN when unknown). */
   static get(name: string): NumCodec {
     const c = this.registry[name];
     if (!c) throw ErrorManager.make('NC_CODEC_UNKNOWN', { name, available: Object.keys(this.registry).join(', ') });
@@ -39,10 +36,10 @@ export class NumCodecs {
   }
 
   /**
-   * Выбирает числовой кодек по значениям. Всегда lossless:
-   *  - целые с низкой кардинальностью → rle;
-   *  - регулярные (тихие вторые разности) → doubleDelta;
-   *  - осциллирующие float → gorilla;
+   * Pick a numeric codec by the values. Always lossless:
+   *  - integers with low cardinality → rle;
+   *  - regular (quiet second differences) → doubleDelta;
+   *  - oscillating floats → gorilla;
    *  - fallback → f64.
    */
   static autoPick(values: ArrayLike<number>): string {
@@ -56,10 +53,10 @@ export class NumCodecs {
       if (typeof v !== 'number' || !Number.isFinite(v)) { allNum = false; break; }
       if (!Number.isInteger(v)) allInt = false;
     }
-    if (!allNum) return 'f64'; // не-числа обрабатывает v3 как dict/raw
+    if (!allNum) return 'f64'; // non-numbers are handled by v3 as dict/raw
 
-    // rle — только для длинных «пробегов» (средняя длина run > 3):
-    // низкая кардинальность без пробега (0,1,2,3,4,0,1,…) rle'ом хуже, чем gorilla.
+    // rle — only for long "runs" (average run length > 3):
+    // low cardinality without runs (0,1,2,3,4,0,1,…) is worse with rle than gorilla.
     const rs = Math.min(n, 512);
     if (allInt && rs >= 4) {
       let runs = 1;
@@ -67,7 +64,7 @@ export class NumCodecs {
       if (runs / rs < 0.33) return 'rle';
     }
 
-    // Тихие вторые разности (регулярный ряд) → doubleDelta
+    // Quiet second differences (regular series) → doubleDelta
     const s = Math.min(n, 512);
     if (s >= 3) {
       let quiet = 0;

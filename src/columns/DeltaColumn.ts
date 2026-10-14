@@ -1,16 +1,14 @@
-// ============================================================
-// columns/DeltaColumn.ts — Дельта-кодирование для чисел
-// На диске: baseValue + массив приращений.
-// В памяти: один массив значений (O(1) доступ, дельты
-// вычисляются при сериализации).
-// ============================================================
+// columns/DeltaColumn.ts — Delta encoding for numbers.
+// On disk: baseValue + delta array.
+// In memory: a single value array (O(1) access; deltas
+// are computed at serialization time).
 
 import { Column } from './Column.ts';
 import type { DeltaColumnData, JsonValue, SerializedColumn } from '../types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('DeltaColumn', [
-  { short: 'COL_DELTA_TYPE', description: 'DeltaColumn.append: ожидается число', rules: { value: 'string' } },
+  { short: 'COL_DELTA_TYPE', description: 'DeltaColumn.append: a number is expected', rules: { value: 'string' } },
 ]);
 
 export class DeltaColumn extends Column {

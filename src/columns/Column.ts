@@ -1,12 +1,8 @@
-// ============================================================
-// columns/Column.ts — Базовый абстрактный класс колонки
-// ============================================================
+// columns/Column.ts — Base abstract column class
 
 import type { JsonValue, SerializedColumn } from '../types.ts';
 
-/**
- * Базовый класс колонки.
- */
+/** Base column class. */
 export abstract class Column {
   protected _length = 0;
 

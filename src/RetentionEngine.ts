@@ -1,25 +1,23 @@
-// ============================================================
-// RetentionEngine.ts — Тир'ы retention (Фаза 4)
+// RetentionEngine.ts — retention tiers
 //
-// Закрытые сегменты Journals живут в тир'ах по возрасту данных:
-//   0–7d   f64 + raw        (1h блок)
-//   7–30d  doubleDelta + raw (1h блок)
-//   30–365d gorilla + raw   (1d блок)
-//   365d+  rle + gzip + tsDelta (1d блок)
+// Closed Journal segments live in tiers by data age:
+//   0-7d    f64 + raw        (1h block)
+//   7-30d   doubleDelta + raw (1h block)
+//   30-365d gorilla + raw   (1d block)
+//   365d+   rle + gzip + tsDelta (1d block)
 //
-// Движок:
-//   - status()      — сколько сегментов/байт/строк в каждом тир'е;
-//   - plan()        — что перекодировать/слить (dry-run);
-//   - apply()       — перекодирует сегменты в тир'ы и сливает блоки
-//                     (1h → 1d) без потери данных (дедупликация на границах);
-//   - compactTier() — только слияние блоков в одном тир'е.
+// Engine:
+//   - status()      — how many segments/bytes/rows are in each tier;
+//   - plan()        — what to re-encode/merge (dry-run);
+//   - apply()       — re-encodes segments into tiers and merges blocks
+//                     (1h → 1d) without data loss (dedup at boundaries);
+//   - compactTier() — block merging in a single tier only.
 //
-// Конвертация без потери данных: данные читаются из сегмента и переписываются
-// в новый файл целиком; дедупликация (segment.append) работает как при compact.
+// Lossless conversion: data is read from the segment and rewritten
+// into a new file in full; dedup (segment.append) works as in compact.
 //
-// Цикл Journal.ts ↔ RetentionEngine.ts исключён интерфейсом RetentionHost:
-// Journal структурно реализует его, класс Journal не импортируется.
-// ============================================================
+// The Journal.ts ↔ RetentionEngine.ts cycle is excluded via the RetentionHost interface:
+// Journal implements it structurally, the Journal class is not imported.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -40,46 +38,46 @@ const HOUR = 3_600_000;
 const DAY = 86_400_000;
 
 ErrorManager.registerMany('RetentionEngine', [
-  { short: 'RET_HOST', description: 'RetentionEngine: host (journal) обязателен' },
-  { short: 'RET_TIER_UNKNOWN', description: 'Неизвестный тир', rules: { tierId: 'string' } },
+  { short: 'RET_HOST', description: 'RetentionEngine: host (journal) is required' },
+  { short: 'RET_TIER_UNKNOWN', description: 'Unknown tier', rules: { tierId: 'string' } },
 ]);
 
 /**
- * Часть Journal, с которой работает RetentionEngine.
- * Journal реализует её структурно (duck typing), поэтому RetentionEngine
-// не импортирует класс Journal (зависимость только «вниз» — без цикла).
+  * The part of a Journal that RetentionEngine works with.
+  * Journal implements it structurally (duck typing), so RetentionEngine
+// does not import the Journal class (dependency only "downward" — no cycle).
  */
 export interface RetentionHost {
-  /** Каталог журнала на диске. */
+  /** Journal directory on disk. */
   journalPath(): string;
-  /** ID закрытых сегментов в хронологическом порядке. */
+  /** IDs of closed segments in chronological order. */
   closedSegmentIds(): string[];
-  /** Границы + счётчики сегмента — null, если неизвестно. */
+  /** Segment bounds + counters — null if unknown. */
   closedSegmentInfo(id: string): {
     minTs: number | null; maxTs: number | null;
     rowCount: number | null; physicalRowCount: number | null; bytes: number | null;
   } | null;
-  /** Имя файла сегмента на диске — null, если неизвестно. */
+  /** Name of the segment file on disk — null if unknown. */
   closedSegmentFile(id: string): string | null;
-  /** Закрытый сегмент из кэша/диска. */
+  /** Closed segment from cache/disk. */
   getClosedSegment(id: string): Segment;
-  /** Сливает закрытые сегменты (дедупликация на границах). */
+  /** Merges closed segments (dedup at boundaries). */
   mergeClosedSegments(ids: string[], encode: (seg: Segment) => Buffer): string;
-  /** Перекодирует закрытый сегмент (те же данные, новый кодек/сжатие). */
+  /** Re-encodes a closed segment (same data, new codec/compression). */
   reencodeClosedSegment(id: string, encode: (seg: Segment) => Buffer): string;
 }
 
 const NOT_V3: SegmentEncoding = { v3: false, compression: '', codecs: {} };
 
 /**
- * Движок retention: перекодирование закрытых сегментов в тир'ы по возрасту
- * данных и слияние блоков (1h → 1d). Не трогает активный сегмент.
- *
- *   const eng = journal.retention;          // тир'ы по умолчанию
- *   eng.status();                           // статус тир'ов
- *   eng.plan();                             // dry-run
- *   eng.apply();                            // применить
- *   eng.compactTier('archive');             // только слияние в тир'е
+  * Retention engine: re-encodes closed segments into tiers by data age
+  * and merges blocks (1h → 1d). Does not touch the active segment.
+  *
+  *   const eng = journal.retention;          // default tiers
+  *   eng.status();                           // tier status
+  *   eng.plan();                             // dry-run
+  *   eng.apply();                            // apply
+  *   eng.compactTier('archive');             // merging only in a tier
  */
 export class RetentionEngine {
   private readonly host: RetentionHost;
@@ -97,9 +95,9 @@ export class RetentionEngine {
   }
 
   /**
-   * Тир'ы по умолчанию (см. docs/metrics-engine-plan.md, Фаза 4):
-   * 0–7d f64+raw; 7–30d doubleDelta+raw; 30–365d gorilla+raw; 365d+ rle+gzip+tsDelta.
-   * Блоки: 1h для свежих, 1d для старых (1h → 1d).
+    * Default tiers (see docs/metrics-engine-plan.md, phase 4):
+    * 0-7d f64+raw; 7-30d doubleDelta+raw; 30-365d gorilla+raw; 365d+ rle+gzip+tsDelta.
+    * Blocks: 1h for fresh data, 1d for old data (1h → 1d).
    */
   static defaultTiers(): RetentionTier[] {
     return [
@@ -110,27 +108,27 @@ export class RetentionEngine {
     ];
   }
 
-  /** Текущее время (для расчёта возраста). */
+  /** Current time (for computing age). */
   now(): number {
     return this.nowProvider();
   }
 
-  /** Тир для возраста (мс). */
+  /** Tier for an age (ms). */
   tierForAge(ageMs: number): RetentionTier {
     for (const t of this.tiers) {
       if (ageMs >= t.from && ageMs < t.to) return t;
     }
-    return this.tiers[this.tiers.length - 1]; // самый старый
+    return this.tiers[this.tiers.length - 1]; // the oldest
   }
 
-  /** Тир для временной метки данных. */
+  /** Tier for a data timestamp. */
   tierForTs(ts: number): RetentionTier {
     return this.tierForAge(Math.max(0, this.now() - ts));
   }
 
   /**
-   * Текущее кодирование закрытого сегмента (из v3-заголовка): формат,
-   * сжатие, числовые кодек'и. null, если сегмент/файл неизвестен.
+    * Current encoding of a closed segment (from the v3 header): format,
+    * compression, numeric codecs. null if the segment/file is unknown.
    */
   encodingOf(segId: string): SegmentEncoding | null {
     const file = this.host.closedSegmentFile(segId);
@@ -143,7 +141,7 @@ export class RetentionEngine {
     return ins;
   }
 
-  /** Статус тир'ов: сегменты/байты/строки/диапазон ts. */
+  /** Tier status: segments/bytes/rows/ts range. */
   status(now?: number): TierStatus[] {
     const t = now ?? this.now();
     const out = new Map<string, TierStatus>();
@@ -168,7 +166,7 @@ export class RetentionEngine {
     return [...out.values()];
   }
 
-  /** Пункт плана для одного сегмента. */
+  /** Plan item for a single segment. */
   private planOne(id: string, t: number, tier: RetentionTier): { action: 'none' | 'reencode'; ins: SegmentEncoding } {
     const file = this.host.closedSegmentFile(id);
     let ins = this.encCache.get(id);
@@ -182,8 +180,8 @@ export class RetentionEngine {
   }
 
   /**
-   * План (dry-run): для каждой группы блоков тир'а — 'merge' (если группа ≥ 2),
-   * иначе 'reencode' (если кодирование не совпадает с тир'ом), иначе 'none'.
+    * Plan (dry-run): for each block group of a tier — 'merge' (if group ≥ 2),
+    * otherwise 'reencode' (if the encoding does not match the tier), otherwise 'none'.
    */
   plan(now?: number): ConversionPlan[] {
     const t = now ?? this.now();
@@ -206,7 +204,7 @@ export class RetentionEngine {
     return plans;
   }
 
-  /** Применяет retention: перекодирование в тир'ы + слияние блоков (1h → 1d). */
+  /** Applies retention: re-encoding into tiers + block merging (1h → 1d). */
   apply(now?: number): ApplyReport {
     const t = now ?? this.now();
     const groups = this.groupByTier(t);
@@ -216,7 +214,7 @@ export class RetentionEngine {
 
     for (const g of groups) {
       if (g.ids.length >= 2) {
-        // Слияние блоков тир'а: дедупликация на границах + кодек/сжатие тир'а
+        // Merging the tier's blocks: dedup at boundaries + the tier's codec/compression
         this.host.mergeClosedSegments(g.ids, seg => this.encodeForTier(g.tier, seg));
         merged++;
       } else {
@@ -237,7 +235,7 @@ export class RetentionEngine {
     return { reencoded, merged, skipped, beforeSegments, afterSegments, beforeBytes, afterBytes };
   }
 
-  /** Компактизация одного тир'а: только слияние блоков (без перекодирования одиночных). */
+  /** Compacting a single tier: block merging only (no re-encoding of singletons). */
   compactTier(tierId: string, now?: number): CompactTierReport {
     const t = now ?? this.now();
     const tier = this.tiers.find(x => x.id === tierId);
@@ -257,10 +255,10 @@ export class RetentionEngine {
   }
 
   // --------------------------------------------------
-  // Внутреннее
+  // Internal
   // --------------------------------------------------
 
-  /** Группирует закрытые сегменты по (тир, блок) — для слияния 1h → 1d. */
+  /** Groups closed segments by (tier, block) — for 1h → 1d merging. */
   private groupByTier(t: number): { tier: RetentionTier; blockKey: number; ids: string[] }[] {
     const groups = new Map<string, { tier: RetentionTier; blockKey: number; ids: string[] }>();
     for (const id of this.host.closedSegmentIds()) {
@@ -276,7 +274,7 @@ export class RetentionEngine {
     return [...groups.values()];
   }
 
-  /** Кодирует сегмент по тир'у: кодек значений + (опц.) дельта ts + сжатие. */
+  /** Encodes a segment for a tier: value codec + (opt.) ts delta + compression. */
   private encodeForTier(tier: RetentionTier, segment: Segment): Buffer {
     return SegmentFileV3.encode(segment, {
       compression: tier.compress as CompressionKind,
@@ -293,10 +291,10 @@ export class RetentionEngine {
   }
 
   // --------------------------------------------------
-  // Вспомогательное: поля данных и кодек'и тира
+  // Helpers: data fields and tier codecs
   // --------------------------------------------------
 
-  /** Определяет колонку ts и колонку значений (первая числовая, не ts). */
+  /** Determines the ts column and the value column (the first numeric one that is not ts). */
   private static pickFields(segment: Segment): { tsField: string | null; valueField: string | null } {
     const fields = Object.keys(segment.schema);
     const tsField = fields.includes('ts') ? 'ts' : null;
@@ -317,7 +315,7 @@ export class RetentionEngine {
     return { tsField, valueField };
   }
 
-  /** Кодек'и для сегмента по тир'у: значение → tier.codec, ts → doubleDelta (если tsDelta). */
+  /** Codecs for a segment per tier: value → tier.codec, ts → doubleDelta (if tsDelta). */
   private static buildCodecs(segment: Segment, tier: RetentionTier): Record<string, string> {
     const { tsField, valueField } = RetentionEngine.pickFields(segment);
     const codecs: Record<string, string> = {};
@@ -327,10 +325,10 @@ export class RetentionEngine {
   }
 
   // --------------------------------------------------
-  // Вспомогательное: текущее кодирование файла сегмента
+  // Helpers: current encoding of the segment file
   // --------------------------------------------------
 
-  /** Читает v3-заголовок файла (магия + headerLen + header) без загрузки блобов. */
+  /** Reads the v3 file header (magic + headerLen + header) without loading the blobs. */
   private static inspectSegFile(filePath: string): SegmentEncoding {
     let fd: number | null = null;
     try {
@@ -362,7 +360,7 @@ export class RetentionEngine {
     }
   }
 
-  /** Совпадает ли текущее кодирование с тир'ом? */
+  /** Does the current encoding match the tier? */
   private static matchesTier(ins: SegmentEncoding, tier: RetentionTier, segment: Segment): boolean {
     if (!ins.v3) return false;
     if (ins.compression !== tier.compress) return false;

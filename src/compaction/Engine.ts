@@ -1,18 +1,16 @@
-// ============================================================
-// compaction/Engine.ts — Базовый класс движков компактизации
+// compaction/Engine.ts — Base class for the compaction engines.
 //
-// Общее для всех движков: дескриптор (параметры слияния) и типовая логика —
-// числовое значение поля, группировка по identity-ключу, выбор «свежей»
-// строки в группе. Конкретика — abstract merge() — у каждого наследника.
+// Shared by all engines: the descriptor (merge parameters) and the common logic —
+// numeric value of a field, grouping by the identity key, picking the "freshest"
+// row in a group. The specifics — abstract merge() — live in each subclass.
 //
-// Новый движок = класс, наследующий Engine и реализующий merge() (Log/Upsert/
-// Summing/Collapsing — примеры). Маршрутизация kind→класс — в journal.ts.
-// ============================================================
+// A new engine = a class extending Engine and implementing merge() (Log/Upsert/
+// Summing/Collapsing are examples). kind→class routing is in Journal.ts.
 
 import type { Row, EngineKind } from './types.ts';
 import type { Descriptor } from './Descriptor.ts';
 
-/** Все виды движков (для ошибок/документации). */
+  /** All engine kinds (for errors/docs). */
 export const ENGINE_KINDS: readonly EngineKind[] = ['log', 'upsert', 'summing', 'collapsing'];
 
 export abstract class Engine {
@@ -24,31 +22,31 @@ export abstract class Engine {
     this.desc = desc;
   }
 
-  /** Применяет стратегию к строкам (в порядке записи) и возвращает строки для слитого сегмента. */
+  /** Apply the strategy to the rows (in write order) and return the rows for the merged segment. */
   abstract merge(rows: Row[]): Row[];
 
-  // --- общее (ранее engines/util.ts) --------------------------------------
+  // --- shared (formerly engines/util.ts) --------------------------------------
 
-  /** Числовое значение поля; не-число/NaN → 0. */
+  /** Numeric value of a field; non-number/NaN → 0. */
   protected num(row: Row, field: string): number {
     const v = row[field];
     const n = typeof v === 'number' ? v : Number(v);
     return Number.isFinite(n) ? n : 0;
   }
 
-  /** Числовое значение «новизны»; без версии → 0. */
+  /** Numeric "newness" value; no version → 0. */
   protected versionOf(row: Row): number {
     return this.desc.version ? this.num(row, this.desc.version) : 0;
   }
 
-  /** Стабильная строка-ключ из полей desc.key (различает типы и вложенные значения). */
+  /** Stable key string from the desc.key fields (distinguishes types and nested values). */
   protected keyOf(row: Row): string {
     const key = this.desc.key ?? [];
     if (key.length === 0) return '';
     return key.map(f => JSON.stringify(row[f] ?? null)).join('\u0000');
   }
 
-  /** Сгруппировать строки по identity-ключу (порядкосохраняющие группы). */
+  /** Group rows by the identity key (order-preserving groups). */
   protected groupByKey(rows: Row[]): Map<string, Row[]> {
     const groups = new Map<string, Row[]>();
     for (const row of rows) {
@@ -60,7 +58,7 @@ export abstract class Engine {
     return groups;
   }
 
-  /** Строка-«база» в группе: max(version), либо последняя по порядку (если версии нет). */
+  /** The "base" row in a group: max(version), or the last by order (if there is no version). */
   protected baseRow(group: Row[]): Row | undefined {
     if (group.length === 0) return undefined;
     if (!this.desc.version) return group[group.length - 1];

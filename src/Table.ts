@@ -1,16 +1,9 @@
-// ============================================================
-// Table.ts — Table: единый класс «таблица» для тайм-серий (фаза 6)
+// Table.ts — one table class for time series.
 //
-// Одна таблица — одна сущность с двумя физическими режимами:
-//   - без retention — один журнал <name>;
-//   - с retention   — журналы <name>/r<res> (тиры разрешения), rollup
-//                     переносит состарившееся на грубые тиры (TTL чистит).
+// No retention — one journal <name>. With retention — journals <name>/r<res>
+// (resolution tiers): rollup moves aged-out data to coarser tiers, TTL purges.
 //
-// Движок компактизации — из def.kind: 'log' (нет), 'upsert', 'summing',
-// 'collapsing' (ClickHouse-семантика). Дескриптор пишется в метаданные
-// журнала и применяется при compact(). Для тир-таблиц эффективный ключ =
-// ['ts', …key без ts] — время часть ключа, чтобы compact не «схлопывал»
-// разные моменты времени.
+// Compaction engine from def.kind: 'log' | 'upsert' | 'summing' | 'collapsing'.
 //
 //   const t = store.open('cpu', {
 //     columns: { ts: 'delta', value: 'auto', host: 'dictionary' },
@@ -18,21 +11,8 @@
 //     agg: { value: 'avg' },
 //   });
 //   t.append({ ts: now, value: 42.3, host: 'web-1' });
-//   t.query('now-30d', 'now');   // сам собирает ответ из нужных тиров
-//   t.rollup();                  // переносит состарившееся на грубые тиры
-//   t.stats();                   // { tier, resMs, ttlMs, rows, bytes, … }
-//
-//   const u = store.open('users', {
-//     kind: 'upsert', key: ['host', 'metric'],
-//     columns: { ts: 'auto', host: 'dictionary', metric: 'auto', value: 'auto' },
-//   });
-//   u.append({ ts: now, host: 'web-1', metric: 'cpu', value: 42 });
-//   u.compact();                 // дедупликация по (host, metric): остаётся последняя
-//
-// Rollup идемпотентен по чекпоинту (последний перенесённый maxTs на пару
-// тиров, пишется атомарно ДО purge мелкого тира) — повторный вызов того же
-// окна ничего не дублирует (границы бакетов детерминированы через roundTime).
-// ============================================================
+//   t.query('now-30d', 'now');
+//   t.rollup();
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -65,57 +45,56 @@ import { Sql } from './Sql.ts';
 import ErrorManager from './errors/ErrorManager.ts';
 
 ErrorManager.registerMany('Table', [
-  { short: 'TBL_SCAN_AGG', description: 'Table: scan — agg/groupBy в тир-режиме: используйте aggregate()/sql()' },
-  { short: 'TBL_INSERT_NAME', description: 'INSERT INTO — не эта таблица', rules: { name: 'string', table: 'string' } },
-  { short: 'TBL_TABLE_NAME', description: 'таблица запроса не совпадает с таблицей', rules: { table: 'string', name: 'string' } },
-  { short: 'TBL_GROUP_BY_TIER', description: 'GROUP BY в тир-режиме — пока не поддерживается' },
-  { short: 'TBL_WHERE_AGG_TIER', description: 'WHERE + агрегации в тир-режиме — пока не поддерживаются' },
-  { short: 'TBL_WHERE_OP', description: 'where — неизвестный оператор', rules: { op: 'string' } },
-  { short: 'TBL_RETENTION_STRING', description: 'Table: retention — непустая строка, например "5s:1d,15s:1w,1m:1mon"' },
-  { short: 'TBL_RETENTION_EMPTY', description: 'Table: retention — хотя бы один тир вида "res:ttl"' },
-  { short: 'TBL_RETENTION_TIER_FORMAT', description: 'Table: retention — тир в формате "res:ttl"', rules: { part: 'string' } },
-  { short: 'TBL_RETENTION_RES', description: 'Table: retention — разрешение', rules: { res: 'string', message: 'string' } },
+  { short: 'TBL_SCAN_AGG', description: 'Table: scan — agg/groupBy in tier mode: use aggregate()/sql()' },
+  { short: 'TBL_INSERT_NAME', description: 'INSERT INTO — not this table', rules: { name: 'string', table: 'string' } },
+  { short: 'TBL_TABLE_NAME', description: 'query table does not match the table', rules: { table: 'string', name: 'string' } },
+  { short: 'TBL_GROUP_BY_TIER', description: 'GROUP BY in tier mode — not yet supported' },
+  { short: 'TBL_WHERE_AGG_TIER', description: 'WHERE + aggregation in tier mode — not yet supported' },
+  { short: 'TBL_WHERE_OP', description: 'where — unknown operator', rules: { op: 'string' } },
+  { short: 'TBL_RETENTION_STRING', description: 'Table: retention — non-empty string, e.g. "5s:1d,15s:1w,1m:1mon"' },
+  { short: 'TBL_RETENTION_EMPTY', description: 'Table: retention — at least one tier in "res:ttl" form' },
+  { short: 'TBL_RETENTION_TIER_FORMAT', description: 'Table: retention — tier in "res:ttl" format', rules: { part: 'string' } },
+  { short: 'TBL_RETENTION_RES', description: 'Table: retention — resolution', rules: { res: 'string', message: 'string' } },
   { short: 'TBL_RETENTION_TTL', description: 'Table: retention — ttl', rules: { ttl: 'string', message: 'string' } },
-  { short: 'TBL_RETENTION_RES_POS', description: 'Table: retention — res должно быть > 0', rules: { part: 'string' } },
-  { short: 'TBL_RETENTION_TTL_POS', description: 'Table: retention — ttl должно быть > 0', rules: { part: 'string' } },
-  { short: 'TBL_RETENTION_RES_ASC', description: 'Table: retention — разрешения должны неубывать слева направо (тонкий → грубый)' },
-  { short: 'TBL_RETENTION_TTL_ASC', description: 'Table: retention — ttl должны неубывать слева направо' },
-  { short: 'TBL_NAME_EMPTY', description: 'Table: name — непустая строка' },
-  { short: 'TBL_NAME_SLASH', description: 'Table: name не должно содержать "/" (тиры создаются как <name>/r<res>)' },
-  { short: 'TBL_DEF_REQUIRED', description: 'Table: def обязателен ({ columns: { … } })' },
-  { short: 'TBL_NAME_MISMATCH', description: 'Table: name не совпадает с def.name', rules: { name: 'string', defName: 'string' } },
-  { short: 'TBL_COLUMNS_EMPTY', description: 'Table: def.columns — непустая схема { поле: тип }' },
-  { short: 'TBL_KEY_EMPTY', description: 'Table: def.key: непустой массив полей ключа', rules: { kind: 'string' } },
-  { short: 'TBL_KEY_NOT_IN_SCHEMA', description: 'Table: ключ не в схеме', rules: { kind: 'string', field: 'string' } },
-  { short: 'TBL_AGG_FIELD', description: 'Table: agg — поле не найдено в columns', rules: { field: 'string' } },
+  { short: 'TBL_RETENTION_RES_POS', description: 'Table: retention — res must be > 0', rules: { part: 'string' } },
+  { short: 'TBL_RETENTION_TTL_POS', description: 'Table: retention — ttl must be > 0', rules: { part: 'string' } },
+  { short: 'TBL_RETENTION_RES_ASC', description: 'Table: retention — resolutions must be non-decreasing left to right (fine → coarse)' },
+  { short: 'TBL_RETENTION_TTL_ASC', description: 'Table: retention — ttl must be non-decreasing left to right' },
+  { short: 'TBL_NAME_EMPTY', description: 'Table: name — non-empty string' },
+  { short: 'TBL_NAME_SLASH', description: 'Table: name must not contain "/" (tiers are created as <name>/r<res>)' },
+  { short: 'TBL_DEF_REQUIRED', description: 'Table: def is required ({ columns: { … } })' },
+  { short: 'TBL_NAME_MISMATCH', description: 'Table: name does not match def.name', rules: { name: 'string', defName: 'string' } },
+  { short: 'TBL_COLUMNS_EMPTY', description: 'Table: def.columns — non-empty schema { field: type }' },
+  { short: 'TBL_KEY_EMPTY', description: 'Table: def.key: non-empty array of key fields', rules: { kind: 'string' } },
+  { short: 'TBL_KEY_NOT_IN_SCHEMA', description: 'Table: key not in schema', rules: { kind: 'string', field: 'string' } },
+  { short: 'TBL_AGG_FIELD', description: 'Table: agg — field not found in columns', rules: { field: 'string' } },
   { short: 'TBL_AGG_FN', description: 'Table: agg — fn min|max|sum|avg|count', rules: { field: 'string', fn: 'string' } },
-  { short: 'TBL_DIMS_FIELD', description: 'Table: dims — поле не найдено в columns', rules: { field: 'string' } },
-  { short: 'TBL_MAINT_MIN_INTERVAL', description: 'Table: maintenanceMinIntervalMs — число >= 0' },
-  { short: 'TBL_AGG_NEED_FIELDS', description: 'Table: нужны не-ts поля для агрегации', rules: { kind: 'string' } },
-  { short: 'TBL_ROLLUP_NEED_FIELDS', description: 'Table: схема должна содержать хотя бы одну не-ts колонку для rollup' },
-  { short: 'TBL_TIERS_EMPTY', description: 'Table: tiers — непустой массив' },
-  { short: 'TBL_TIERS_RES_POS', description: 'Table: tiers — resMs должно быть > 0' },
-  { short: 'TBL_TIERS_TTL_POS', description: 'Table: tiers — ttlMs должно быть > 0' },
-  { short: 'TBL_TIERS_RES_ASC', description: 'Table: tiers — разрешения должны неубывать (тонкий → грубый)' },
-  { short: 'TBL_TIERS_TTL_ASC', description: 'Table: tiers — ttl должны неубывать (по возрастанию возраста)' },
-  { short: 'TBL_JOURNAL_INDEX', description: 'Table: нет журнала', rules: { index: 'number' } },
-  { short: 'TBL_NOT_OPEN', description: 'Table: не открыта (вызван close())' },
+  { short: 'TBL_DIMS_FIELD', description: 'Table: dims — field not found in columns', rules: { field: 'string' } },
+  { short: 'TBL_MAINT_MIN_INTERVAL', description: 'Table: maintenanceMinIntervalMs — a number >= 0' },
+  { short: 'TBL_AGG_NEED_FIELDS', description: 'Table: non-ts fields are required for aggregation', rules: { kind: 'string' } },
+  { short: 'TBL_ROLLUP_NEED_FIELDS', description: 'Table: schema must contain at least one non-ts column for rollup' },
+  { short: 'TBL_TIERS_EMPTY', description: 'Table: tiers — non-empty array' },
+  { short: 'TBL_TIERS_RES_POS', description: 'Table: tiers — resMs must be > 0' },
+  { short: 'TBL_TIERS_TTL_POS', description: 'Table: tiers — ttlMs must be > 0' },
+  { short: 'TBL_TIERS_RES_ASC', description: 'Table: tiers — resolutions must be non-decreasing (fine → coarse)' },
+  { short: 'TBL_TIERS_TTL_ASC', description: 'Table: tiers — ttl must be non-decreasing (by increasing age)' },
+  { short: 'TBL_JOURNAL_INDEX', description: 'Table: no journal', rules: { index: 'number' } },
+  { short: 'TBL_NOT_OPEN', description: 'Table: not open (close() was called)' },
   { short: 'TBL_TAIL_COUNT', description: 'Table: tail — count >= 0' },
-  { short: 'TBL_TL_INTERVAL', description: 'Table: timeline — интервал: число мс > 0 или строка вида "15m"' },
-  { short: 'TBL_AGG_EXPRS', description: 'Table: aggregate() — exprs: непустой массив { field, fn }' },
-  { short: 'TBL_AGG_FIELD_EMPTY', description: 'Table: aggregate() — expr.field: непустое имя поля' },
+  { short: 'TBL_TL_INTERVAL', description: 'Table: timeline — interval: a number in ms > 0 or a string like "15m"' },
+  { short: 'TBL_AGG_EXPRS', description: 'Table: aggregate() — exprs: non-empty array { field, fn }' },
+  { short: 'TBL_AGG_FIELD_EMPTY', description: 'Table: aggregate() — expr.field: non-empty field name' },
   { short: 'TBL_AGG_EXPR_FN', description: 'Table: aggregate() — expr.fn: min|max|sum|avg|count', rules: { fn: 'string' } },
-  { short: 'TBL_PCTL_LEVEL', description: 'Table: percentile() — level: число в (0, 1)', rules: { level: 'string' } },
-  { short: 'TBL_ROLLUP_NO_TIERS', description: 'Table: rollup() — таблица без retention (нет тиров)' },
-  { short: 'TBL_ROLLUP_NOW', description: 'Table: rollup(now) — now: конечное число (мс)' },
-  { short: 'TBL_ROLLUP_ONE_NO_TIERS', description: 'Table: rollupOne() — таблица без retention (нет тиров)' },
-  { short: 'TBL_ROLLUP_ONE_NOW', description: 'Table: rollupOne(now) — now: конечное число (мс)' },
-  { short: 'TBL_ROLLUP_ONE_RES', description: 'Table: rollupOne() — res не совпадает с тиром (или тир 0)', rules: { res: 'number' } },
-  { short: 'TBL_NO_STORAGE', description: 'Table: def.storage не задан (нет retention-тиров кодирования)' },
+  { short: 'TBL_PCTL_LEVEL', description: 'Table: percentile() — level: a number in (0, 1)', rules: { level: 'string' } },
+  { short: 'TBL_ROLLUP_NO_TIERS', description: 'Table: rollup() — table without retention (no tiers)' },
+  { short: 'TBL_ROLLUP_NOW', description: 'Table: rollup(now) — now: a finite number (ms)' },
+  { short: 'TBL_ROLLUP_ONE_NO_TIERS', description: 'Table: rollupOne() — table without retention (no tiers)' },
+  { short: 'TBL_ROLLUP_ONE_NOW', description: 'Table: rollupOne(now) — now: a finite number (ms)' },
+  { short: 'TBL_ROLLUP_ONE_RES', description: 'Table: rollupOne() — res does not match a tier (or tier 0)', rules: { res: 'number' } },
+  { short: 'TBL_NO_STORAGE', description: 'Table: def.storage is not set (no storage retention tiers)' },
 ]);
 
-// Минимальный структурный интерфейс хранилища (Store из store.ts подходит
-// без импорта — исключает циклическую зависимость store.ts ↔ table.ts).
+// Minimal structural storage interface — avoids a circular import with Store.
 export interface TableStore {
   readonly baseDir: string;
   openJournals: Map<string, Journal>;
@@ -131,34 +110,19 @@ export interface TableStore {
 const AGG_FNS: ReadonlySet<string> = new Set(['min', 'max', 'sum', 'avg', 'count']);
 const isAggFn = (fn: unknown): fn is AggFn => AGG_FNS.has(String(fn));
 
-/**
- * Троттлинг авто-ролапа/авто-purge: не чаще, чем раз в 30 секунд. Дешёвая
- * проверка «пора ли» выполняется на каждый append, но сама работа (rollup/purge
- * перекодирует данные) не чаще, чем раз в этот интервал — чтобы горячий цикл
- * записей не дёргал диск на каждую строку. 0 выключает троттлинг (тесты).
- */
+// Throttling for auto-rollup/auto-purge: at most once per interval (0 disables).
 export const DEFAULT_MAINTENANCE_INTERVAL_MS = 30_000;
 
-/** Отчёт rollupOne: один перенос (тонкий тир → целевой тир разрешения res). */
 export interface RollupOneReport {
-  /** Индекс целевого тира (по порядку разрешения). */
   tierIndex: number;
-  /** Разрешение целевого тира (мс). */
   resMs: number;
-  /** Откуда начиналось окно переноса (мс). */
   fromMs: number;
-  /** Докуда закончилось окно переноса (мс). */
   toMs: number;
-  /** Сколько строк прочитано из тонкого тира. */
   sourceRows: number;
-  /** Сколько строк записано в целевой тир. */
   promotedRows: number;
 }
 
-/**
- * Парсит retention-политику '5s:1d,15s:1w,1m:1mon' в массив тиров
- * (от тонких к грубым). Валидирует: res/ttl > 0, разрешения и ttl неубывающие.
- */
+/** Parses a retention string '5s:1d,15s:1w' into tiers (fine → coarse). */
 export function parseRetention(retention: string): ResolutionTier[] {
   const s = String(retention).trim();
   if (!s) {
@@ -205,22 +169,15 @@ export function parseRetention(retention: string): ResolutionTier[] {
   return tiers;
 }
 
-/**
- * Table: одна «таблица» — единый класс для двух режимов (см. шапку файла).
- */
 export class Table {
   readonly name: string;
   readonly store: TableStore;
-  /** Описание таблицы (def) из манифеста/создания. */
   readonly def: AnyTableDef;
   readonly schema: Schema;
-  /** Движок компактизации: 'log' | 'upsert' | 'summing' | 'collapsing'. */
   readonly kind: 'log' | 'upsert' | 'summing' | 'collapsing';
-  /** Тиры разрешения (null — одиночный журнал, без retention). */
+  /** null — single journal, no retention. */
   readonly tiers: ResolutionTier[] | null;
-  /** Поля, агрегируемые при rollup (поле → fn). Остальные не-ts поля — размеры. */
   readonly agg: Record<string, AggFn>;
-  /** Поля-размеры (group-by при rollup): схема минус ts и минус agg-поля. */
   readonly dims: string[];
 
   private readonly nowProvider: () => number;
@@ -230,14 +187,9 @@ export class Table {
   private readonly cpPath: string;
   private readonly engines: RetentionEngine[];
 
-  // --- авто-обслуживание (включено по умолчанию, только тир-режим) --------
-  /** Авто-ролап при append (по умолчанию true). */
   readonly autoRollup: boolean;
-  /** Авто-purge (TTL грубейшего тира) при append (по умолчанию true). */
   readonly autoPurge: boolean;
-  /** Троттлинг авто-ролапа/авто-purge (по умолчанию 30 000 мс; 0 — каждый append). */
   readonly maintenanceMinIntervalMs: number;
-  /** Время последнего авто-обслуживания (в единицах nowProvider). */
   private _lastMaintain = 0;
 
   constructor(store: TableStore, name: string, def: AnyTableDef) {
@@ -261,12 +213,10 @@ export class Table {
     this.name = name;
     this.def = def;
 
-    // --- схема -----------------------------------------------------------
     const schema: Schema = { ...columns };
     if (!schema['ts']) schema['ts'] = 'delta';
     this.schema = schema;
 
-    // --- движок -----------------------------------------------------------
     this.kind = def.kind ?? 'log';
     if (this.kind !== 'log') {
       const key = (def as { key?: string[] }).key;
@@ -278,7 +228,6 @@ export class Table {
       }
     }
 
-    // --- агрегация rollup ------------------------------------------------
     let agg = def.agg;
     if (!agg || Object.keys(agg).length === 0) {
       agg = Table._defaultAgg(this.kind, schema, def);
@@ -291,7 +240,6 @@ export class Table {
     }
     this.agg = agg;
 
-    // --- размеры rollup ----------------------------------------------------
     if (def.dims && def.dims.length > 0) {
       for (const f of def.dims) {
         if (!(f in schema)) throw ErrorManager.make('TBL_DIMS_FIELD', { field: f });
@@ -301,7 +249,6 @@ export class Table {
       this.dims = Object.keys(schema).filter(f => f !== 'ts' && !(f in agg));
     }
 
-    // --- тиры или одиночный журнал ----------------------------------------
     this.tiers = def.tiers && def.tiers.length > 0
       ? (() => { Table.validateTiers(def.tiers!); return def.tiers!.slice(); })()
       : def.retention
@@ -310,7 +257,6 @@ export class Table {
 
     this.nowProvider = def.nowProvider ?? Date.now;
 
-    // --- авто-обслуживание ------------------------------------------------
     this.autoRollup = def.autoRollup ?? true;
     this.autoPurge = def.autoPurge ?? true;
     const minInterval = def.maintenanceMinIntervalMs ?? DEFAULT_MAINTENANCE_INTERVAL_MS;
@@ -318,11 +264,9 @@ export class Table {
       throw ErrorManager.make('TBL_MAINT_MIN_INTERVAL');
     }
     this.maintenanceMinIntervalMs = minInterval;
-    // Первое авто-обслуживание не раньше, чем через maintenanceMinIntervalMs
-    // после создания — иначе бы сработало на самом первом append.
+    // Start the throttling window at creation — no maintenance on the first append.
     this._lastMaintain = this.nowProvider();
 
-    // --- дескриптор движка (в метаданные журнала; compact() применяет) ----
     let descriptor: Descriptor | null = null;
     if (this.kind !== 'log') {
       const d = def as {
@@ -332,7 +276,7 @@ export class Table {
         sign?: string;
       };
       const baseKey = d.key.filter(f => f !== 'ts');
-      // Тир-режим: время — часть ключа (compact не схлопывает разные бакеты).
+      // Tier mode: time is part of the key — compact must not collapse different buckets.
       const key = this.tiers ? ['ts', ...baseKey] : d.key;
       descriptor = new Descriptor({
         kind: this.kind,
@@ -343,11 +287,10 @@ export class Table {
       });
     }
 
-    // --- открываем журнал(и) ----------------------------------------------
     const opts: OpenJournalOptions = {};
     if (def.rowsPerSegment !== undefined) opts.rowsPerSegment = def.rowsPerSegment;
     Object.assign(opts, def.opts ?? {});
-    // Rollup-строки содержат null — agg-поля в тир-режиме пишутся как 'auto'.
+    // Rollup rows may carry null — agg fields in tier mode are written as 'auto'.
     const tierSchema = this.tiers ? Table._tierSchema(schema, this.agg) : schema;
 
     if (this.tiers) {
@@ -383,24 +326,17 @@ export class Table {
       this.checkpoints = {};
     }
 
-    // --- движок retention-кодирования (Фаза 4), если задан def.storage ----
     this.engines = def.storage
       ? this.journals.map(j => new RetentionEngine(j, def.storage?.tiers))
       : [];
   }
 
-  /** Схема тира: agg-поля — 'auto' (rollup-строки могут нести null). */
   private static _tierSchema(schema: Schema, agg: Record<string, AggFn>): Schema {
     const out = { ...schema };
     for (const f of Object.keys(agg)) out[f] = 'auto';
     return out;
   }
 
-  /**
-   * Дефолтная агрегация rollup при отсутствии def.agg:
-   * - log/upsert — первое не-ts не-agg поле → 'avg';
-   * - summing/collapsing — поля sum/sign (или первое не-ts поле) → 'sum'.
-   */
   private static _defaultAgg(
     kind: string,
     schema: Schema,
@@ -425,7 +361,6 @@ export class Table {
     return { [first]: 'avg' };
   }
 
-  /** Валидирует явный массив тиров (res/ttl > 0, неубывающие). */
   static validateTiers(tiers: ResolutionTier[]): void {
     if (!tiers || tiers.length === 0) throw ErrorManager.make('TBL_TIERS_EMPTY');
     for (const t of tiers) {
@@ -446,11 +381,6 @@ export class Table {
     }
   }
 
-  // --------------------------------------------------
-  // Базовое
-  // --------------------------------------------------
-
-  /** «Текущее время» таблицы (через nowProvider). */
   now(): number {
     return this.nowProvider();
   }
@@ -459,32 +389,24 @@ export class Table {
     return this.journals.every(j => j.isOpen);
   }
 
-  /** Имя журнала тира (для отладки): одиночный режим — <name>, тир — <name>/r<resMs>. */
+  /** Journal name of a tier (debug helper). */
   journalName(i: number): string {
     if (i < 0 || i >= this.journals.length) throw ErrorManager.make('TBL_JOURNAL_INDEX', { index: i });
     return this.journalNames[i];
   }
 
-  /** Открытый журнал под индексом (0 — самый тонкий/единственный). */
   journal(i: number): Journal {
     if (i < 0 || i >= this.journals.length) throw ErrorManager.make('TBL_JOURNAL_INDEX', { index: i });
     return this.journals[i];
   }
 
-  /** Запись строки в самый тонкий журнал (0). После записи — авто-обслуживание
-   *  (ролап + purge), если включено, тир-режим и не троттлинговано. */
   append(row: Row): void {
     this._assertOpen();
     this.journals[0].append(row);
     if (this.tiers) this._maybeMaintain();
   }
 
-  /**
-   * Авто-обслуживание (тир-режим): перенос состарившихся строк между тирами
-   * (rollup) и удаление из грубейшего тира данных старше его TTL (purge).
-   * Идемпотентно (rollup чекпоинтит, purge фильтрует по ts) и троттлинговано
-   * maintenanceMinIntervalMs. Ошибки обслуживания не роняют запись.
-   */
+  /** Auto-rollup + auto-purge, throttled by maintenanceMinIntervalMs; errors do not break append. */
   private _maybeMaintain(): void {
     if (!this.tiers) return;
     if (!this.autoRollup && !this.autoPurge) return;
@@ -496,7 +418,7 @@ export class Table {
       try {
         this.rollup(now);
       } catch (e) {
-        console.error(`Table ${this.name}: авто-ролап не сработал:`, e);
+        console.error(`Table ${this.name}: auto-rollup failed:`, e);
       }
     }
     if (this.autoPurge) {
@@ -504,18 +426,16 @@ export class Table {
       try {
         this.journals[i].purge(now - this.tiers[i].ttlMs);
       } catch (e) {
-        console.error(`Table ${this.name}: авто-purge тира ${i} не сработал:`, e);
+        console.error(`Table ${this.name}: tier ${i} auto-purge failed:`, e);
       }
     }
   }
 
-  /** Слить активные сегменты всех журналов на диск (WAL срезается). */
   flush(): void {
     this._assertOpen();
     for (const j of this.journals) j.flush();
   }
 
-  /** Закрыть все журналы таблицы. */
   close(): void {
     for (const n of this.journalNames) {
       if (this.store.openJournals.has(n)) this.store._closeJournal(n);
@@ -526,20 +446,12 @@ export class Table {
     if (!this.isOpen) throw ErrorManager.make('TBL_NOT_OPEN');
   }
 
-  // --------------------------------------------------
-  // Чтение
-  // --------------------------------------------------
-
   /**
-   * Чтение [start, end] (обе границы включительно).
-   *
-   * Одиночный режим — делегирует журналу (скан с pruning по .meta).
-   * Тир-режим — диапазон разбивается по «возрасту» на окна тиров
-   * (now−ttl0:now → тир0, now−ttl1:now−ttl0 → тир1, …); самый тонкий тир —
-   * «источник» на всём диапазоне (в нём лежит и свежее, и ещё не перенесённое;
-   * перенесённое уже purged из него, поэтому дублей нет). Ответ — по ts ↑.
+   * Read [start, end] (inclusive), by ts ↑.
+   * Tier mode: split the range by age into per-tier windows; the finest tier is
+   * the source over the whole range (moved data is already purged from it — no dups).
    */
-   query(start: number | string, end: number | string): Row[] {
+  query(start: number | string, end: number | string): Row[] {
     this._assertOpen();
     const [startTs, endTs] = Interval.period(start, end, this.now());
 
@@ -568,7 +480,6 @@ export class Table {
     return out;
   }
 
-  /** Все строки таблицы (по ts ↑). Одиночный журнал — прямая делегация. */
   allRows(): Row[] {
     this._assertOpen();
     if (!this.tiers) return this.journals[0].allRows();
@@ -577,7 +488,6 @@ export class Table {
     return rows;
   }
 
-  /** Последние `count` строк (по ts). Одиночный журнал — прямая делегация. */
   tail(count: number): Row[] {
     this._assertOpen();
     if (count < 0) throw ErrorManager.make('TBL_TAIL_COUNT');
@@ -585,11 +495,6 @@ export class Table {
     return this.allRows().slice(-count);
   }
 
-  /**
-   * Скан по опциям (select/where/order/limit/offset/start/end).
-   * Одиночный журнал — прямая делегация Journal.scan. Тир-режим —
-   * материализация через query() + применение опций по строкам.
-   */
   scan(opts: ScanOptions): Row[] {
     this._assertOpen();
     if (!this.tiers) return this.journals[0].scan(opts);
@@ -610,11 +515,7 @@ export class Table {
     return rows;
   }
 
-  /**
-   * SQL-скан: одиночный режим — делегирует журналу (включая INSERT);
-   * тир-режим — разбор SELECT через Sql.parse + скан через query().
-   */
-   sql(query: string): Row[] | number | Record<string, number | null> {
+  sql(query: string): Row[] | number | Record<string, number | null> {
     this._assertOpen();
     const head = query.trimStart().split(/\s+/, 1)[0]?.toUpperCase();
     if (head === 'INSERT') {
@@ -634,7 +535,7 @@ export class Table {
     const now = this.now();
     const [start, end] = Interval.period(opts.start ?? 0, opts.end ?? now, now);
 
-    // Агрегации (без GROUP BY) — через aggregate().
+    // Aggregations (without GROUP BY) — via aggregate().
     if (opts.agg) {
       if (opts.groupBy) {
         throw ErrorManager.make('TBL_GROUP_BY_TIER');
@@ -659,7 +560,6 @@ export class Table {
     return Table._applyScanOptions(rows, opts);
   }
 
-  /** select/limit/offset по готовым строкам (тир-режим sql()). */
   private static _applyScanOptions(rows: Row[], opts: ScanOptions): Row[] {
     let out = rows;
     const select = opts.select;
@@ -675,7 +575,6 @@ export class Table {
     return out;
   }
 
-  /** Оценит одно условие where() для строки (тир-режим sql()). */
   private static _matchWhere(row: Row, w: ScanWhere): boolean {
     const v = row[w.field];
     switch (w.op) {
@@ -693,11 +592,7 @@ export class Table {
     throw ErrorManager.make('TBL_WHERE_OP', { op: String(w.op) });
   }
 
-  /**
-   * Таймлайн: плотный ряд бакетов [start, end] (каждый interval) со счётчиком
-   * строк. Одиночный режим — делегирует журналу; тир-режим — материализует
-   * строки через query() и складывает в бакеты.
-   */
+  /** Dense buckets [start, end] (one per interval) with row counters. */
   timeline(
     interval: number | string,
     start: number | string,
@@ -736,10 +631,6 @@ export class Table {
     return out;
   }
 
-  /**
-   * Агрегация min/max/sum/avg/count по диапазону (сквозь все тиры).
-   * Материализует строки через query() и агрегирует по запрошенным полям.
-   */
   aggregate(
     start: number | string,
     end: number | string,
@@ -776,10 +667,7 @@ export class Table {
     return out;
   }
 
-  /**
-   * Квантили (percentile) значения `value` в [start, end]: p50/p90/p95/p99.
-   * Материализует строки через query() и считает линейной интерполяцией.
-   */
+  /** Percentiles of `value` in [start, end] (linear interpolation). */
   percentile(
     start: number | string,
     end: number | string,
@@ -805,18 +693,9 @@ export class Table {
     return out;
   }
 
-  // --------------------------------------------------
-  // Rollup (fine → coarse) + TTL purge
-  // --------------------------------------------------
-
   /**
-   * Переносит состарившееся из каждого мелкого тира в следующий более грубый
-   * (downsample до разрешения грубого + агрегация `agg`), затем чистит мелкий
-   * тир (TTL). Идемпотентен по чекпоинту. `now` — явное «текущее время»
-   * (по умолчанию nowProvider).
-   *
-   * Только тир-режим; одиночная таблица не имеет грубых тиров.
-   * Возвращает отчёт { pairs, rolledRows, purgedRows }.
+   * Move aged-out data from each fine tier to the next coarser one (downsample +
+   * agg), then purge the fine tier. Idempotent by checkpoint. Tier mode only.
    */
   rollup(now?: number): RollupReport {
     this._assertOpen();
@@ -835,12 +714,11 @@ export class Table {
       const coarse = this.journals[i + 1];
       const fineTtl = this.tiers[i].ttlMs;
       const coarseRes = this.tiers[i + 1].resMs;
-      const maxRollable = nowTs - fineTtl; // всё, что «возрастом» старше fineTtl
+      const maxRollable = nowTs - fineTtl;
       const cpKey = `${i}->${i + 1}`;
       const cp = this.checkpoints[cpKey] ?? 0;
-      if (maxRollable <= cp) continue; // уже всё перенесено — идемпотентно
+      if (maxRollable <= cp) continue;
 
-      // Читаем строки мелкого тира в (cp, maxRollable].
       let rows: Row[];
       try {
         rows = fine.scan({ start: cp, end: maxRollable });
@@ -852,17 +730,14 @@ export class Table {
         return typeof ts === 'number' && Number.isFinite(ts) && ts > cp && ts <= maxRollable;
       });
 
-      // Группируем по (бакет грубого разрешения, размеры dims) + agg — в
-      // чистой функции Rollup.promote().
       const promoted = Rollup.promote(rows, this.agg, this.dims, coarseRes);
       for (const outRow of promoted) coarse.append(outRow);
       if (promoted.length > 0) coarse.flush();
 
-      // Чекпоинт — атомарно ДО purge. Повторный rollup того же окна идемпотентен.
+      // Checkpoint before purge — makes a repeat rollup idempotent.
       this.checkpoints[cpKey] = maxRollable;
       Table.writeJson(this.cpPath, this.checkpoints);
 
-      // Чистим мелкий тир: всё с ts <= maxRollable уже в грубом.
       const purged = fine.purge(maxRollable + 1);
       purgedRows += purged.removedRows ?? 0;
       pairs++;
@@ -872,13 +747,7 @@ export class Table {
     return { pairs, rolledRows, purgedRows };
   }
 
-  /**
-   * Rollup в один целевой тир (явный, по разрешению res): переносит строки из
-   * тонких тиров (res < cfg.res) в тир с cfg.res, агрегируя до бакетов cfg.res.
-   * Чекпоинтит на паре (тонкий → целевой) — идемпотентно.
-   *
-   * Только тир-режим. Возвращает отчёт { tierIndex, resMs, … }.
-   */
+  /** Rollup into one target tier (by resolution res). Tier mode only. */
   rollupOne(cfgOrNow: RollupConfig | number, now?: number): RollupOneReport {
     this._assertOpen();
     if (!this.tiers) {
@@ -945,10 +814,7 @@ export class Table {
     };
   }
 
-  /**
-   * Удалить строки до границы (обе границы: остаются ts >= until) из всех
-   * журналов таблицы (одиночный режим — из единственного).
-   */
+  /** Delete rows up to the bound (inclusive) from all journals. */
   purge(until: number | string): PurgeResult {
     this._assertOpen();
     let removedRows = 0;
@@ -963,19 +829,7 @@ export class Table {
     return { removedRows, removedSegments, rewrittenSegments };
   }
 
-  /**
-   * Полностью очищает таблицу: все строки удаляются из памяти и с диска —
-   * сегменты, их сайдкар'ы .meta, WAL и остатки .tmp во всех тирах.
-   * В отличие от purge(until), исключений нет: удаляются и строки без ts,
-   * и свежие. Rollup-чекпоинты сбрасываются, чтобы новые данные (вплоть до
-   * ts ниже прежнего максимума) снова попадали в rollup. Таблица остаётся
-   * открытой: сразу можно продолжать append() — это чистая таблица
-   * с прежней схемой.
-   *
-   * ```ts
-   * t.truncate(); // → { removedRows: 123 }
-   * ```
-   */
+  /** Clears the table completely (all tiers). Unlike purge, also removes rows without ts. */
   truncate(): TruncateResult {
     this._assertOpen();
     let removedRows = 0;
@@ -983,9 +837,7 @@ export class Table {
 
     for (const j of this.journals) j.clear();
 
-    // Чекпоинты rollup сбрасываем: иначе условие maxRollable <= cp в rollup
-    // навсегда блокировало бы перенос новых строк с ts ниже прежнего максимума
-    // (чекпоинт монотонен по времени записи, а не по ts данных).
+    // Reset rollup checkpoints — otherwise new rows with ts below the previous max would be skipped.
     this.checkpoints = {};
     if (this.cpPath) {
       fs.rmSync(this.cpPath, { force: true });
@@ -994,11 +846,6 @@ export class Table {
     return { removedRows };
   }
 
-  /**
-   * Компактизация (дедупликация) всех журналов таблицы. Для движков
-   * upsert/summing/collapsing — применение семантики по ключу (см. def.kind).
-   * Возвращает суммарный отчёт.
-   */
   compact(): CompactResult {
     this._assertOpen();
     let mergedSegments = 0;
@@ -1017,28 +864,20 @@ export class Table {
     return { mergedSegments, logicalRows, physicalBefore, physicalAfter, collapsedRows };
   }
 
-  /** Примени fn к списку чисел (делегация в Rollup.applyAgg). */
   static applyAgg(fn: AggFn, vals: number[]): number {
     return Rollup.applyAgg(fn, vals);
   }
 
-  // --------------------------------------------------
-  // Retention-кодирование (Фаза 4) — делегирование RetentionEngine
-  // --------------------------------------------------
-
-  /** Есть ли настроенный движок retention-кодирования (def.storage). */
   get hasStorage(): boolean {
     return this.engines.length > 0;
   }
 
-  /** Статус retention-тиров кодирования (по первому журналу). */
   storageStatus(now?: number): TierStatus[] {
     this._assertOpen();
     if (!this.hasStorage) throw ErrorManager.make('TBL_NO_STORAGE');
     return this.engines[0].status(now);
   }
 
-  /** План retention-кодирования (dry-run) по всем журналам. */
   storagePlan(now?: number): ConversionPlan[] {
     this._assertOpen();
     if (!this.hasStorage) throw ErrorManager.make('TBL_NO_STORAGE');
@@ -1047,7 +886,6 @@ export class Table {
     return out;
   }
 
-  /** Применить retention-кодирование (перекодирование + слияние блоков). */
   storageApply(now?: number): ApplyReport {
     this._assertOpen();
     if (!this.hasStorage) throw ErrorManager.make('TBL_NO_STORAGE');
@@ -1071,7 +909,6 @@ export class Table {
     return { reencoded, merged, skipped, beforeSegments, afterSegments, beforeBytes, afterBytes };
   }
 
-  /** Слияние блоков в одном тире кодирования (id из RetentionEngine.defaultTiers()). */
   storageCompactTier(tierId: string, now?: number) {
     this._assertOpen();
     if (!this.hasStorage) throw ErrorManager.make('TBL_NO_STORAGE');
@@ -1087,14 +924,6 @@ export class Table {
     return { mergedGroups, beforeSegments, afterSegments };
   }
 
-  // --------------------------------------------------
-  // Статистика
-  // --------------------------------------------------
-
-  /**
-   * Статус журналов: одиночный режим — одна запись (tier 0, resMs/ttlMs = 0);
-   * тир-режим — по тирам: rows/bytes/minTs/maxTs.
-   */
   stats(): TableTierStat[] {
     this._assertOpen();
     return this.journals.map((j, i) => {
@@ -1127,10 +956,6 @@ export class Table {
     });
   }
 
-  // --------------------------------------------------
-  // Вспомогательные
-  // --------------------------------------------------
-
   private static tsOf(row: Row): number | null {
     const v = row['ts'];
     return typeof v === 'number' && Number.isFinite(v) ? v : null;
@@ -1147,7 +972,7 @@ export class Table {
         return out;
       }
     } catch {
-      /* файла нет или повреждён — считаем, что чекпоинтов нет */
+      /* missing or corrupt — no checkpoints */
     }
     return {};
   }

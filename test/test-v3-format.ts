@@ -13,6 +13,7 @@ import { SegmentFileV2 } from '../src/SegmentFileV2.ts';
 import { SegmentFileV3 } from '../src/SegmentFileV3.ts';
 import { Compression } from '../src/Compression.ts';
 import { NumCodecs } from '../src/numcodecs/NumCodecs.ts';
+import ErrorManager from '../src/errors/ErrorManager.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -253,7 +254,7 @@ fs.rmSync(baseDir, { recursive: true, force: true });
     j2.close();
   } catch (e) {
     threw = true;
-    assert(/контрольная сумма|повреждён/i.test(String(e)), 'ошибка упоминает контрольную сумму/повреждение');
+    assert(ErrorManager.isCode(e, 'JRN_SEG_READ'), 'ошибка упоминает контрольную сумму/повреждение');
   }
   assert(threw, 'чтение повреждённого v3-сегмента бросает ошибку');
 }

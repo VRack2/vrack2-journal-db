@@ -1,13 +1,11 @@
-// ============================================================
-// numcodecs/RleCodec.ts — run-length для целых (lossless, i64 + u32)
+// numcodecs/RleCodec.ts — Run-length for integers (lossless, i64 + u32).
 // [runsCount u32] [value i64][count u32] ...
-// ============================================================
 
 import type { NumCodec } from './types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('RleCodec', [
-  { short: 'NC_RLE_NOT_INT', description: 'RleCodec: значение не целое — rle только для целых', rules: { value: 'number' } },
+  { short: 'NC_RLE_NOT_INT', description: 'RleCodec: value is not an integer — rle is for integers only', rules: { value: 'number' } },
 ]);
 
 export class RleCodec implements NumCodec {

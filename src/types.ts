@@ -1,15 +1,15 @@
 // ============================================================
-// types.ts — Общие типы и формат сериализации
+// types.ts — Common types and serialization format
 // ============================================================
 
 export type ColumnType = 'raw' | 'dictionary' | 'delta' | 'rle' | 'auto' | 'catchall';
 
-/** Схема журнала: поле → тип колонки */
+/** Journal schema: field → column type */
 export interface Schema {
   [field: string]: ColumnType;
 }
 
-// JSON-совместимые значения (то, что может лежать в строке)
+// JSON-compatible values (what can sit in a row)
 export type JsonPrimitive = string | number | boolean | null;
 export interface JsonObject {
   [key: string]: JsonValue;
@@ -17,14 +17,14 @@ export interface JsonObject {
 export type JsonArray = JsonValue[];
 export type JsonValue = JsonPrimitive | JsonObject | JsonArray;
 
-/** Строка журнала */
+/** Journal row */
 export type Row = Record<string, JsonValue>;
 
-/** Метаданные журнала/сегмента */
+/** Journal/segment metadata */
 export type Metadata = JsonObject;
 
 // --------------------------------------------------
-// Формат сериализованных колонок (на диске) — дискриминированный union
+// Serialized column format (on disk) — discriminated union
 // --------------------------------------------------
 export interface RawColumnData {
   type: 'raw';
@@ -65,48 +65,48 @@ export type SerializedColumn =
   | AutoColumnData;
 
 // --------------------------------------------------
-// Формат сериализованного сегмента (JSON-файл)
+// Serialized segment format (JSON file)
 // --------------------------------------------------
 export interface SerializedSegment {
-  /** Версия формата payload'а. Отсутствует в файлах v1 (JS-реализация) */
+  /** Payload format version. Absent in v1 files (JS implementation) */
   formatVersion?: number;
   id: string;
   schema: Schema;
   metadata: Metadata;
   rowCount: number;
   physicalRowCount: number;
-  /** Сколько строк несёт числовой ts (строки без ts не учитываются).
-   *  Опционально: отсутствует в файлах до этой версии поля. */
+  /** How many rows carry a numeric ts (rows without ts are not counted).
+   *  Optional: absent in files before this field version. */
   tsCount?: number;
   minTs: number | null;
   maxTs: number | null;
   rowMap: number[];
   columns: Record<string, SerializedColumn>;
-  /** Сегментные саммари числовых колонок (min/max/sum/count по непустым
-   *  числовым значениям). Опционально: отсутствует в старых файлах —
-   *  Segment.deserialize() пересчитывает на лету. */
+  /** Per-segment summaries of numeric columns (min/max/sum/count over non-empty
+   *  numeric values). Optional: absent in older files —
+   *  Segment.deserialize() recomputes them on the fly. */
   summaries?: Record<string, ColumnSummary>;
 }
 
 // --------------------------------------------------
-// Агрегации (Фаза 1) — min/max/sum/avg/count по диапазону
+// Aggregations — min/max/sum/avg/count over a range
 // --------------------------------------------------
 
-/** Поддерживаемые агрегационные функции. */
+/** Supported aggregate functions. */
 export type AggFn = 'min' | 'max' | 'sum' | 'avg' | 'count';
 
-/** Выражение агрегации: поле + функция. */
+/** Aggregation expression: field + function. */
 export interface AggregateExpr {
   field: string;
   fn: AggFn;
 }
 
-/** Оператор сравнения в условии where() скана. */
+/** Comparison operator in a scan where() condition. */
 export type ScanOp = 'eq' | 'ne' | 'lt' | 'le' | 'gt' | 'ge' | 'in' | 'nin' | 'isNull' | 'isNotNull';
 
-/** Одно условие фильтра scan(): поле + оператор + значение.
- *  Условия соединяются И (AND). Для in/nin значение — массив;
- *  для isNull/isNotNull значение не требуется. */
+/** One scan() filter condition: field + operator + value.
+ *  Conditions are joined with AND. For in/nin the value is an array;
+ *  for isNull/isNotNull no value is required. */
 export interface ScanWhere {
   field: string;
   op: ScanOp;
@@ -114,62 +114,61 @@ export interface ScanWhere {
 }
 
 /**
- * Опции векторного скана Journal.scan().
+ * Options for the vector scan Journal.scan().
  *
- * Два режима:
- *  - с `agg` (Фаза 3): возвращает агрегированные строки — по одной на группу
- *    (или одну строку без groupBy). Ключ агрегата — `поле_функция`;
- *    `count` — число числовых значений поля.
- *  - без `agg`: возвращает материализованные строки только по колонкам `select`
- *    (по умолчанию — все поля схемы), отфильтрованные, отсортированные,
- *    с offset/limit.
+ * Two modes:
+ *  - with `agg`: returns aggregated rows — one per group (or a single row
+ *    without groupBy). Aggregate key — `field_fn`; `count` — the number of
+ *    numeric values of the field.
+ *  - without `agg`: returns materialized rows only for the `select` columns
+ *    (by default — all schema fields), filtered, sorted, with offset/limit.
  *
- * Сегмент, не пересекающий [start, end], не читается с диска (решение по .meta).
+ * A segment that does not intersect [start, end] is not read from disk (decided by .meta).
  */
 export interface ScanOptions {
-  /** Диапазон ts [start, end] (обе границы включительно). Числа (мс) или строки вида 'now-1h'. */
+  /** ts range [start, end] (both bounds inclusive). Numbers (ms) or strings like 'now-1h'. */
   start?: number | string;
   end?: number | string;
-  /** Колонки для выборки (режим без agg). По умолчанию — все поля схемы. */
+  /** Columns to project (non-agg mode). Default — all schema fields. */
   select?: string[];
-  /** Фильтр: условия, соединённые И (AND). */
+  /** Filter: conditions joined with AND. */
   where?: ScanWhere[];
-  /** Поле группировки (одно или несколько). Требует `agg`. */
+  /** Group-by field (one or several). Requires `agg`. */
   groupBy?: string | string[];
-  /** Агрегаты: поле → список функций. Наличие включает режим агрегации. */
+  /** Aggregates: field → list of functions. Presence enables aggregate mode. */
   agg?: Record<string, AggFn[]>;
-  /** Порядок результата: 'asc' | 'desc'.
-   *  - с agg — по первому ключу агрегата (поле_функция);
-   *  - без agg — по первой колонке select (или 'ts', если в ней есть числовые). */
+  /** Result order: 'asc' | 'desc'.
+   *  - with agg — by the first aggregate key (field_fn);
+   *  - without agg — by the first select column (or 'ts' if it has numeric values). */
   order?: 'asc' | 'desc';
-  /** Ограничение числа строк результата (после сортировки, после offset). */
+  /** Cap on the number of result rows (after sorting, after offset). */
   limit?: number;
-  /** Пропустить первые N строк (после сортировки, перед limit). */
+  /** Skip the first N rows (after sorting, before limit). */
   offset?: number;
-  /** Имя таблицы/журнала (из FROM). Для SELECT — проверка, что запрос идёт по этому журналу. */
+  /** Table/journal name (from FROM). For SELECT — checks that the query runs against this journal. */
   table?: string;
 }
 
-/** Саммари числовой колонки на сегмент: min/max/sum/count по непустым
- *  числовым значениям (null/не-числа не считаются). */
+/** Per-segment summary of a numeric column: min/max/sum/count over non-empty
+ *  numeric values (null/non-numerics are not counted). */
 export interface ColumnSummary {
   min: number;
   max: number;
   sum: number;
-  /** Сколько числовых значений учтено (0 — в сегменте их нет). */
+  /** How many numeric values were counted (0 — none in the segment). */
   count: number;
 }
 
-/** Бакет даунсэмплинга: границы + агрегаты `field` в бакете.
- *  Присутствуют только запрошенные функции (и всегда `count`). */
+/** Downsampling bucket: bounds + `field` aggregates in the bucket.
+ *  Only the requested functions are present (and always `count`). */
 export interface DownsampleBucket {
-  /** Начало бакета (ms, включительно). */
+  /** Bucket start (ms, inclusive). */
   start: number;
-  /** Конец бакета (ms, не включительно; у последнего = период.end). */
+  /** Bucket end (ms, exclusive; for the last one = period.end). */
   end: number;
-  /** Сколько числовых значений `field` в бакете (0 — пустой). */
+  /** How many numeric values of `field` in the bucket (0 — empty). */
   count: number;
-  /** Есть ли данные в бакете (count > 0). */
+  /** Whether the bucket has data (count > 0). */
   hasData: boolean;
   min?: number | null;
   max?: number | null;
@@ -177,93 +176,93 @@ export interface DownsampleBucket {
   avg?: number | null;
 }
 
-/** Результат компактизации журнала */
+/** Result of journal compaction */
 export interface CompactResult {
   mergedSegments: number;
   logicalRows: number;
   physicalBefore: number;
   physicalAfter: number;
-  /** Сколько строк свело движок (upsert/summing/collapsing); 0 для log. */
+  /** How many rows the engine collapsed (upsert/summing/collapsing); 0 for log. */
   collapsedRows: number;
 }
 
 export interface PurgeResult {
-  /** Сколько строк удалено из журнала. */
+  /** How many rows were removed from the journal. */
   removedRows: number;
-  /** Сколько сегментов удалено целиком (старше границы, без чтения файлов). */
+  /** How many segments were removed wholesale (older than the bound, without reading files). */
   removedSegments: number;
-  /** Сколько сегментов перекодировано без старых строк (пересекали границу). */
+  /** How many segments were re-encoded without the old rows (they crossed the bound). */
   rewrittenSegments: number;
 }
 
-/** Результат полной очистки таблицы/журнала (truncate). */
+/** Result of fully clearing a table/journal (truncate). */
 export interface TruncateResult {
-  /** Сколько строк удалено. */
+  /** How many rows were removed. */
   removedRows: number;
 }
 
-/** Один бакет таймлайна: интервал времени и сколько строк в нём. */
+/** One timeline bucket: a time interval and how many rows in it. */
 export interface TimelineBucket {
-  /** Начало бакета (ms, включительно). */
+  /** Bucket start (ms, inclusive). */
   start: number;
-  /** Конец бакета (ms, не включительно; у последнего = period.end). */
+  /** Bucket end (ms, exclusive; for the last one = period.end). */
   end: number;
-  /** Сколько строк с ts в [start, end). Строки без ts не считаются. */
+  /** How many rows have ts in [start, end). Rows without ts are not counted. */
   count: number;
-  /** Есть ли данные в бакете (count > 0). */
+  /** Whether the bucket has data (count > 0). */
   hasData: boolean;
 }
 
 // --------------------------------------------------
-// Опции и статистика
+// Options and stats
 // --------------------------------------------------
-/** Стратегия блокировки журнала одним владельцем. */
+/** Strategy for locking a journal by a single owner. */
 export type LockMode = 'pid' | 'off';
 
-/** Формат файлов сегментов: v1/v2 (gzip+JSON) или v3 (бинарные блобы колонок).
- *  Чтение прозрачное — любой формат читается; запись идёт в выбранном формате. */
+/** Segment file format: v1/v2 (gzip+JSON) or v3 (binary column blobs).
+ *  Reading is transparent — any format can be read; writing goes into the chosen format. */
 export type SegmentFormat = 'v2' | 'v3';
 
-/** Способ сжатия блобов в v3: 'zstd' (по умолчанию при Node ≥ 23.8) или
- *  'gzip' (старые Node / явный выбор; zstd при отсутствии — откат на gzip). */
+/** Blob compression in v3: 'zstd' (default on Node ≥ 23.8) or
+ *  'gzip' (older Node / explicit choice; if zstd is absent — falls back to gzip). */
 export type CompressionMode = 'gzip' | 'zstd';
 
-/** Способ сжатия блоба: 'none' (без сжатия), 'gzip', 'zstd'. */
+/** Blob compression kind: 'none' (no compression), 'gzip', 'zstd'. */
 export type CompressionKind = 'none' | 'gzip' | 'zstd';
 
 // --------------------------------------------------
-// Retention (Фаза 4) — тир'ы и отчётность движка
+// Retention — tiers and engine reporting
 // --------------------------------------------------
 
-/** Тир хранения: данные заданного возраста перекодируются по нему. */
+/** Storage tier: data of a given age is re-encoded according to it. */
 export interface RetentionTier {
-  /** Идентификатор тира ('hot'|'warm'|'cold'|'archive' или свой). */
+  /** Tier identifier ('hot'|'warm'|'cold'|'archive' or custom). */
   id: string;
-  /** Минимальный возраст данных (мс, включительно). 0 — самые свежие. */
+  /** Minimum data age (ms, inclusive). 0 — the freshest. */
   from: number;
-  /** Максимальный возраст (мс, исключительно). Infinity — самые старые. */
+  /** Maximum age (ms, exclusive). Infinity — the oldest. */
   to: number;
-  /** Числовой кодек колонки значений ('f64'|'doubleDelta'|'gorilla'|'rle'). */
+  /** Numeric codec of the values column ('f64'|'doubleDelta'|'gorilla'|'rle'). */
   codec: string;
-  /** Целевой размер блока (мс) при слиянии (1h → 1d). */
+  /** Target block size (ms) when merging (1h → 1d). */
   block: number;
-  /** Сжатие: 'none' (raw), 'gzip', 'zstd'. */
+  /** Compression: 'none' (raw), 'gzip', 'zstd'. */
   compress: 'none' | 'gzip' | 'zstd';
-  /** Минимальный интервал ts (мс) для даунсэмплинга; 0 — без потерь данных. */
+  /** Minimum ts interval (ms) for downsampling; 0 — no data loss. */
   minInterval: number;
-  /** Дельта-кодировать колонку ts (doubleDelta). */
+  /** Delta-encode the ts column (doubleDelta). */
   tsDelta: boolean;
 }
 
-/** Текущее кодирование файла сегмента (из v3-заголовка). */
+/** Current encoding of a segment file (from the v3 header). */
 export interface SegmentEncoding {
   v3: boolean;
   compression: string;
-  /** Числовые кодек'и: поле → имя кодека. */
+  /** Numeric codecs: field → codec name. */
   codecs: Record<string, string>;
 }
 
-/** Статус тира: сколько сегментов/байт/строк и диапазон ts. */
+/** Tier status: how many segments/bytes/rows and the ts range. */
 export interface TierStatus {
   id: string;
   from: number;
@@ -275,7 +274,7 @@ export interface TierStatus {
   newestTs: number | null;
 }
 
-/** Пункт плана: что сделать с сегментом (reencode / merge / ничего). */
+/** Plan item: what to do with a segment (reencode / merge / nothing). */
 export interface ConversionPlan {
   segId: string;
   tier: string;
@@ -285,7 +284,7 @@ export interface ConversionPlan {
   groupSize: number;
 }
 
-/** Отчёт применения retention: что перекодировано/слито, до/после. */
+/** Retention-apply report: what was re-encoded/merged, before/after. */
 export interface ApplyReport {
   reencoded: number;
   merged: number;
@@ -296,7 +295,7 @@ export interface ApplyReport {
   afterBytes: number;
 }
 
-/** Отчёт компактизации одного тира (слияние блоков). */
+/** Compaction report of one tier (block merging). */
 export interface CompactTierReport {
   tier: string;
   mergedGroups: number;
@@ -305,121 +304,121 @@ export interface CompactTierReport {
 }
 
 // --------------------------------------------------
-// Table (Фаза 4) — мультитирная таблица (GraphiteMergeTree)
+// Table — multi-tier table (GraphiteMergeTree)
 //
-// Один метрик → одна таблица = несколько тиров разрешения (каждый —
-// отдельный журнал): свежие данные на тонком разрешении, старые — на
-// грубом (rollup по возрасту + TTL). Размер предсказуем:
-// Σ(разрешение × ttl). Чтение разбивает диапазон по «возрасту» на окна
-// тиров и склеивает ответ в хронологическом порядке.
+// One metric → one table = several resolution tiers (each —
+// a separate journal): fresh data at a fine resolution, old data at a
+// coarse one (rollup by age + TTL). The size is predictable:
+// Σ(resolution × ttl). Reading splits a range by "age" into tier windows
+// and stitches the response in chronological order.
 // --------------------------------------------------
 
-/** Тир разрешения: данные хранятся на шаге `resMs`, пока не «возрастут» до
- *  `ttlMs` (после чего rollup переносит их на более грубый тир).
- *  Тир'ы идут от тонких (0) к грубым; разрешение и ttl неубывающие. */
+/** Resolution tier: data is stored at step `resMs` until it "ages" to
+ *  `ttlMs` (after which rollup moves it to a coarser tier).
+ *  Tiers go from fine (0) to coarse; resolution and ttl are non-decreasing. */
 export interface ResolutionTier {
-  /** Шаг отсчёта на тире (мс): 5s = 5000, 15s = 15000, 1m = 60000. */
+  /** Sampling step on the tier (ms): 5s = 5000, 15s = 15000, 1m = 60000. */
   resMs: number;
-  /** Сколько данные живут на тире (мс): 1d = 86400000. Дальше — rollup. */
+  /** How long data lives on the tier (ms): 1d = 86400000. Beyond that — rollup. */
   ttlMs: number;
 }
 
-/** Статус одного тира таблицы. */
+/** Status of one table tier. */
 export interface TableTierStat {
-  /** Индекс тира (0 — самый тонкий). */
+  /** Tier index (0 — the finest). */
   tier: number;
-  /** Разрешение тира (мс). */
+  /** Tier resolution (ms). */
   resMs: number;
-  /** TTL тира (мс). */
+  /** Tier TTL (ms). */
   ttlMs: number;
-  /** Строк на тире (закрытые сегменты + активный). */
+  /** Rows on the tier (closed segments + active). */
   rows: number;
-  /** Размер на диске (закрытые сегменты, байты). */
+  /** Size on disk (closed segments, bytes). */
   bytes: number;
-  /** Диапазон ts на тире (null, если пусто). */
+  /** ts range on the tier (null if empty). */
   minTs: number | null;
   maxTs: number | null;
 }
 
-/** Отчёт rollup за один вызов. */
+/** Rollup report for one invocation. */
 export interface RollupReport {
-  /** Сколько пар тиров (fine→coarse) обработано. */
+  /** How many tier pairs (fine→coarse) were processed. */
   pairs: number;
-  /** Сколько строк прочитано из мелких тиров и перекодировано в грубые. */
+  /** How many rows were read from fine tiers and re-encoded into coarse ones. */
   rolledRows: number;
-  /** Сколько строк удалено из мелких тиров (purge после переноса). */
+  /** How many rows were removed from fine tiers (purge after the move). */
   purgedRows: number;
 }
 
 export interface JournalOptions {
-  /** Сколько строк в одном файле сегмента до flush'а (по умолчанию 10 000).
-   *  Меньше — больше файлов (удобно для тестов и точной дедупликации);
-   *  больше — меньше операций ФС и износа SSD, но крупнее перекодирование
-   *  «пересекающего» сегмента при purge/compact. */
+  /** How many rows in one segment file before flush (default 10 000).
+   *  Smaller — more files (convenient for tests and exact deduplication);
+   *  larger — fewer FS operations and less SSD wear, but a bigger re-encoding
+   *  of the "crossing" segment during purge/compact. */
   rowsPerSegment?: number;
   maxCachedSegments?: number;
-  /** Размер пачки WAL: сколько строк накапливать в памяти перед записью на диск.
-   *  1 — писать каждую строку сразу (максимальная устойчивость к краху, медленнее). */
+  /** WAL batch size: how many rows to accumulate in memory before writing to disk.
+   *  1 — write every row immediately (maximum crash resistance, slower). */
   walBatchSize?: number;
-  /** Блокировка журнала одним владельцем (файл `.lock` + PID владельца):
-   * - `'pid'` (по умолчанию) — open() бросает ошибку, если журнал уже открыт
-   *   живым процессом; устаревшую блокировку (мёртвый PID) забирает себе.
-   * - `'off'` — библиотека не создаёт и не проверяет `.lock`: координация
-   *   владельцев целиком на стороне приложения. Нужно, например, когда база
-   *   живёт в worker_threads: воркер может умереть при живом процессе, и
-   *   PID-блокировка будет выглядеть «занятой» навсегда. */
+  /** Locking the journal by a single owner (`.lock` file + owner PID):
+   * - `'pid'` (default) — open() throws if the journal is already open by a
+   *   live process; a stale lock (dead PID) is taken over.
+   * - `'off'` — the library neither creates nor checks `.lock`: owner
+   *   coordination is entirely on the application side. Needed, e.g., when the
+   *   database lives in worker_threads: a worker may die while the process is
+   *   alive, and the PID lock would look "held" forever. */
   lock?: LockMode;
-  /** Формат файлов сегментов (по умолчанию `'v2'`). `'v3'` — бинарные блобы
-   *  колонок (числовые кодек + словарь + сжатие), файлы `.seg`; v1/v2 читаются. */
+  /** Segment file format (default `'v2'`). `'v3'` — binary column blobs
+   *  (numeric codec + dictionary + compression), `.seg` files; v1/v2 are readable. */
   format?: SegmentFormat;
-  /** Сжатие блобов в v3 (по умолчанию `'zstd'` при Node ≥ 23.8, иначе `'gzip'`).
-   *  `compression` игнорируется в v2. */
+  /** Blob compression in v3 (default `'zstd'` on Node ≥ 23.8, otherwise `'gzip'`).
+   *  `compression` is ignored in v2. */
   compression?: CompressionMode;
-  /** Явный выбор числового кодека для колонки в v3: поле → имя кодека
-   *  ('f64' | 'doubleDelta' | 'gorilla' | 'rle'). Пропущенные — авто-выбор. */
+  /** Explicit numeric codec choice for a column in v3: field → codec name
+   *  ('f64' | 'doubleDelta' | 'gorilla' | 'rle'). Omitted — auto-picked. */
   codecs?: Record<string, string>;
-  /** Тир'ы retention (Фаза 4). По умолчанию defaultTiers() — см. retention.ts. */
+  /** Retention tiers. Default: defaultTiers() — see retention.ts. */
   retention?: RetentionTier[];
-  /** Авто-компакт (по умолчанию true): после flush() автоматически сливать
-   *  закрытые сегменты, когда их накопилось >= compactMinSegments. Идемпотентно
-   *  (compact() требует >= 2 сегментов), самоограничивается. Выключить: false. */
+  /** Auto-compact (default true): after flush(), automatically merge
+   *  closed segments once >= compactMinSegments have accumulated. Idempotent
+   *  (compact() requires >= 2 segments), self-limiting. Disable: false. */
   autoCompact?: boolean;
-  /** Сколько закрытых сегментов накопить перед авто-компактом (по умолчанию 4). */
+  /** How many closed segments to accumulate before auto-compaction (default 4). */
   compactMinSegments?: number;
 }
 
 export interface StoreOptions {
   maxCacheSize?: number;
   defaultRowsPerSegment?: number;
-  /** По умолчанию `'pid'` — см. `JournalOptions.lock`. */
+  /** Default `'pid'` — see `JournalOptions.lock`. */
   lock?: LockMode;
-  /** Формат файлов сегментов для всех журналов (по умолчанию `'v2'`). */
+  /** Segment file format for all journals (default `'v2'`). */
   format?: SegmentFormat;
-  /** Сжатие блобов в v3 (по умолчанию `'zstd'` при Node ≥ 23.8, иначе `'gzip'`). */
+  /** Blob compression in v3 (default `'zstd'` on Node ≥ 23.8, otherwise `'gzip'`). */
   compression?: CompressionMode;
-  /** Числовые кодеки v3 по умолчанию: поле → имя кодека. */
+  /** Default v3 numeric codecs: field → codec name. */
   codecs?: Record<string, string>;
-  /** Авто-компакт по умолчанию для всех журналов (по умолчанию true).
-   *  Переопределяется OpenJournalOptions.autoCompact для отдельного журнала. */
+  /** Auto-compact default for all journals (default true).
+   *  Overridden by OpenJournalOptions.autoCompact for an individual journal. */
   autoCompact?: boolean;
-  /** Порог закрытых сегментов для авто-компакта (по умолчанию 4). */
+  /** Threshold of closed segments for auto-compaction (default 4). */
   compactMinSegments?: number;
 }
 
 export interface OpenJournalOptions {
   rowsPerSegment?: number;
   maxCachedSegments?: number;
-  /** Переопределяет `lock` из StoreOptions для этого журнала. */
+  /** Overrides `lock` from StoreOptions for this journal. */
   lock?: LockMode;
-  /** Переопределяет `format` из StoreOptions для этого журнала. */
+  /** Overrides `format` from StoreOptions for this journal. */
   format?: SegmentFormat;
-  /** Переопределяет `compression` из StoreOptions. */
+  /** Overrides `compression` from StoreOptions. */
   compression?: CompressionMode;
-  /** Переопределяет `codecs` из StoreOptions. */
+  /** Overrides `codecs` from StoreOptions. */
   codecs?: Record<string, string>;
-  /** Переопределяет `autoCompact` из StoreOptions. */
+  /** Overrides `autoCompact` from StoreOptions. */
   autoCompact?: boolean;
-  /** Переопределяет `compactMinSegments` из StoreOptions. */
+  /** Overrides `compactMinSegments` from StoreOptions. */
   compactMinSegments?: number;
 }
 

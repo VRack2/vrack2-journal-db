@@ -9,6 +9,7 @@ import { Journal } from '../src/Journal.ts';
 import { Segment } from '../src/Segment.ts';
 import { SegmentFile } from '../src/SegmentFile.ts';
 import { SegmentFileV2 } from '../src/SegmentFileV2.ts';
+import ErrorManager from '../src/errors/ErrorManager.ts';
 import type { Schema } from '../src/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -141,7 +142,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
     j2.close();
   } catch (e) {
     threw = true;
-    assert(/контрольная сумма|повреждён/i.test(String(e)), 'ошибка упоминает контрольную сумму/повреждение');
+    assert(ErrorManager.isCode(e, 'JRN_SEG_READ'), 'ошибка упоминает контрольную сумму/повреждение');
   }
   assert(threw, 'чтение повреждённого сегмента бросает ошибку');
 }

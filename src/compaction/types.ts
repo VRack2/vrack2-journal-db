@@ -1,14 +1,12 @@
-// ============================================================
-// compaction/types.ts — Базовые типы движков компактизации
+// compaction/types.ts — Base types for the compaction engines.
 //
-// Движок = стратегия того, КАК compact() объединяет строки из нескольких
-// сегментов при слиянии (см. Engine.ts). Это файл — только типы, которыми
-// пользуются файлы внутри compaction/. Поведение здесь отсутствует.
-// ============================================================
+// Engine = the strategy of HOW compact() merges rows from multiple
+// segments on merge (see Engine.ts). This file is types only, used by
+// files inside compaction/. No behavior here.
 
-// Row — базовый тип строки журнала; ре-экспортируем, чтобы API compaction/
-// (Engine.merge и т.п.) был самодостаточным.
+// Row — the base journal row type; re-exported so the compaction/ API
+// (Engine.merge, etc.) is self-contained.
 export type { Row } from '../types.ts';
 
-/** Идентификаторы движков компактизации. */
+/** Compaction engine identifiers. */
 export type EngineKind = 'log' | 'upsert' | 'summing' | 'collapsing';

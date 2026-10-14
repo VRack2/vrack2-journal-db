@@ -1,8 +1,6 @@
-// ============================================================
-// columns/AutoColumn.ts — Автоматически выбирает стратегию по сэмплу
-// Порядок эвристик: константа → RLE, неубывающие числа → Delta,
-// доля уникальных < 50% → Dictionary, иначе Raw.
-// ============================================================
+// columns/AutoColumn.ts — Picks a strategy automatically from a sample.
+// Heuristic order: constant → RLE, non-decreasing numbers → Delta,
+// < 50% unique → Dictionary, otherwise Raw.
 
 import { Column } from './Column.ts';
 import { RawColumn } from './RawColumn.ts';
@@ -60,7 +58,7 @@ export class AutoColumn extends Column {
       delegate.append(v);
     }
     this.samples = [];
-    // _length не меняется: сэмпл уже учтён при append()
+    // _length is unchanged: the sample was already counted in append()
     this.decided = true;
   }
 
