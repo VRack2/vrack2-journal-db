@@ -18,7 +18,6 @@ import { SegmentFile } from './SegmentFile.ts';
 import { Compression } from './Compression.ts';
 import { Interval } from './Interval.ts';
 import { RetentionEngine } from './RetentionEngine.ts';
-import { Sql } from './Sql.ts';
 import ErrorManager from './errors/ErrorManager.ts';
 
 ErrorManager.registerMany('Journal', [
@@ -43,8 +42,6 @@ ErrorManager.registerMany('Journal', [
   { short: 'JRN_DS_FN', description: 'downsample(): fn must be min|max|sum|avg|count', rules: { fn: 'string' } },
   { short: 'JRN_DS_BUCKET', description: 'downsample(): bucketMs must be a number (ms) or string like "15m/1h"' },
   { short: 'JRN_DS_BUCKET_POS', description: 'downsample(): bucketMs must be > 0 (ms)' },
-  { short: 'JRN_INSERT_NAME', description: 'INSERT INTO: journal opened under a different name', rules: { name: 'string', journal: 'string' } },
-  { short: 'JRN_FROM_NAME', description: 'SELECT FROM: journal opened under a different name', rules: { table: 'string', journal: 'string' } },
   { short: 'JRN_SCAN_RANGE', description: 'scan(): start must be <= end' },
   { short: 'JRN_SCAN_WHERE_FIELD', description: 'scan(): where[].field must be a non-empty string' },
   { short: 'JRN_SCAN_WHERE_OP', description: 'scan(): where[].op must be a valid operator', rules: { op: 'string', allowed: 'string' } },
@@ -1063,24 +1060,6 @@ export class Journal {
     const from = plan.offset;
     const to = plan.limit !== null ? from + plan.limit : rawRows!.length;
     return rawRows!.slice(from, to);
-  }
-
-  sql(query: string): Row[] | number {
-    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
-    const head = query.trimStart();
-    const firstWord = head.split(/\s+/, 1)[0].toUpperCase();
-    if (firstWord === 'INSERT') {
-      const ins = Sql.parseInsert(query);
-      if (ins.name !== this.name) throw ErrorManager.make('JRN_INSERT_NAME', { name: ins.name, journal: this.name });
-      for (const row of ins.rows) this.append(row);
-      return ins.rows.length;
-    }
-    const opts = Sql.parse(query);
-    const journalName = this.name ?? '';
-    if (opts.table !== undefined && journalName !== opts.table && !journalName.startsWith(opts.table + '.')) {
-      throw ErrorManager.make('JRN_FROM_NAME', { table: opts.table, journal: journalName });
-    }
-    return this.scan(opts);
   }
 
   private _compileScan(opts: ScanOptions): ScanPlan {

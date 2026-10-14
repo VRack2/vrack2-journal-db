@@ -145,8 +145,6 @@ export interface ScanOptions {
   limit?: number;
   /** Skip the first N rows (after sorting, before limit). */
   offset?: number;
-  /** Table/journal name (from FROM). For SELECT — checks that the query runs against this journal. */
-  table?: string;
 }
 
 /** Per-segment summary of a numeric column: min/max/sum/count over non-empty

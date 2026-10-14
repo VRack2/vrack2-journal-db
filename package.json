@@ -1,7 +1,7 @@
 {
   "name": "vrack2-journal-db",
-  "version": "2.5.0",
-  "description": "Append-only columnar journal DB for Node.js: gzip/zstd, dictionary/delta/RLE/numeric-codec columns, WAL with crash-safe flush, time-range queries that skip whole files via .meta sidecars, plus a metric engine: summaries, aggregate/timeline, vector scan, SQL-lite (SELECT + INSERT INTO), quantiles, and retention tiers with rollup and auto-maintenance (auto-compact, auto-rollup, auto-purge).",
+  "version": "3.0.0",
+  "description": "Append-only columnar journal DB for Node.js: gzip/zstd, dictionary/delta/RLE/numeric-codec columns, WAL with crash-safe flush, time-range queries that skip whole files via .meta sidecars, plus a metric engine: summaries, aggregate/timeline, vector scan, quantiles, and retention tiers with rollup and auto-maintenance (auto-compact, auto-rollup, auto-purge).",
   "keywords": [
     "database",
     "journal",
@@ -16,7 +16,6 @@
     "time-series",
     "metrics",
     "scan",
-    "sql",
     "quantile",
     "retention"
   ],
@@ -42,7 +41,7 @@
   ],
   "scripts": {
     "build": "rm -rf lib && tsc -p tsconfig.build.json",
-    "test": "node test/test-basic.ts && node test/test-optimization.ts && node test/test-querying.ts && node test/test-compression.ts && node test/test-flexschema.ts && node test/test-compaction.ts && node test/test-engines.ts && node test/test-purge.ts && node test/test-timeline.ts && node test/test-aggregate.ts && node test/test-scan.ts && node test/test-interval.ts && node test/test-durability.ts && node test/test-locking.ts && node test/test-v3-format.ts && node test/test-retention.ts && node test/test-table.ts && node test/test-migration.ts && node test/test-sql.ts",
+    "test": "node test/test-basic.ts && node test/test-optimization.ts && node test/test-querying.ts && node test/test-compression.ts && node test/test-flexschema.ts && node test/test-compaction.ts && node test/test-engines.ts && node test/test-purge.ts && node test/test-timeline.ts && node test/test-aggregate.ts && node test/test-scan.ts && node test/test-interval.ts && node test/test-durability.ts && node test/test-locking.ts && node test/test-v3-format.ts && node test/test-retention.ts && node test/test-table.ts && node test/test-migration.ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build && npm test"
   },

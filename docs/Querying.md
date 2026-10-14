@@ -1,6 +1,6 @@
 # Запросы и агрегации
 
-Метрический движок поверх журнала: таймлайн, агрегации, векторный скан, SQL-lite,
+Метрический движок поверх журнала: таймлайн, агрегации, векторный скан,
 квантили и гибкая схема. Все операции принимают границы как мс (число) так и строку
 «языка интервалов» VRackDB (`'now-1h'`, `'now-7d:now'` — см. `src/interval.ts`).
 
@@ -105,27 +105,6 @@ const rows = j.scan({ start: 'now-5m', end: 'now', select: ['ts', 'value'] });
 (min/max/sum/avg/count), `order` (asc/desc), `limit`, `offset`. top-k — это `order`
 + `limit`. 10M точек (where + groupBy 50 групп + top-4) — ~700 мс против ~1.5 с у
 `allRows() + reduce` (`test/test-scan.ts`).
-
-## SQL-lite
-
-`sql()` — тонкий парсер над `scan()`: не SQL-диалект, а подмножество
-(`SELECT … [WHERE …] [GROUP BY …] [ORDER BY …] [LIMIT/OFFSET]`), которое
-компилируется в опции `scan()` и исполняется тем же векторным движком:
-
-```ts
-const r = j.sql(`
-  SELECT host, avg(value), count(value)
-  WHERE value > 90 AND ts BETWEEN 'now-1h' AND 'now'
-  GROUP BY host
-  ORDER BY value_avg DESC
-  LIMIT 10
-`);
-// ключи агрегатов — «поле_функция»: value_avg, value_count (без AS-алиасов)
-```
-
-Поддерживается: `SELECT <поля | fn(поле)>`, `WHERE` (=, >, >=, <, <=, IN, BETWEEN,
-IS [NOT] NULL, AND), `GROUP BY`, `ORDER BY … [ASC|DESC]`, `LIMIT`, `OFFSET`.
-Агрегаты — `min/max/sum/avg/count`.
 
 ## Квантили (percentile)
 

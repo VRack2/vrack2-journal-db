@@ -14,7 +14,7 @@
   - [Запись данных](#запись-данных)
   - [Чтение данных](#чтение-данных)
   - [Агрегация](#агрегация)
-  - [Скан и SQL](#скан-и-sql)
+  - [Скан](#скан)
   - [Движки](#движки)
   - [Retention и тиры](#retention-и-тиры)
   - [CLI](#cli)
@@ -45,7 +45,7 @@ PostgreSQL и нативные зависимости не нужны. Данн�
 - **Быстрый разбор по времени.** Запрос на период не читает файлы, целиком вне
   этого периода, — их границы лежат в маленьком файле `.meta` рядом.
 - **Агрегация и запросы.** min/max/sum/avg/count, таймлайны, квантили, векторный
-  скан (select/where/groupBy) и небольшой SQL.
+   скан (select/where/groupBy).
 - **Retention с предсказуемым размером.** Свежие данные — в высоком разрешении,
   старые — сгущаются и удаляются по TTL.
 
@@ -98,7 +98,7 @@ npm install vrack2-journal-db
 Два уровня:
 
 - **Store** — каталог таблиц, привязанный к каталогу на диске.
-- **Table** — таблица: `append` / `query` / `aggregate` / `scan` / `sql` / `compact` / `purge` / `truncate`.
+- **Table** — таблица: `append` / `query` / `aggregate` / `scan` / `compact` / `purge` / `truncate`.
 
 Таблицу создаёте через `store.create(def)`. Описание `def` собирает `defineLogTable()`,
 `defineUpsertTable()`, `defineSummingTable()` или `defineCollapsingTable()` — разница
@@ -274,7 +274,7 @@ cpu.percentile('now-1h', 'now', [0.5, 0.95, 0.99]);
 // → { p50: 12.1, p95: 60.2, p99: 98.7 }
 ```
 
-## Скан и SQL
+## Скан
 
 `scan()` — векторный разбор: выбрать колонки, отфильтровать, сгруппировать,
 отсортировать, ограничить. Читаются только запрошенные колонки.
@@ -293,14 +293,6 @@ cpu.scan({
 
 Операторы `where`: `eq`, `ne`, `lt`, `le`, `gt`, `ge`, `in`, `nin`, `isNull`,
 `isNotNull`.
-
-`sql()` — небольшой SQL, который компилируется в `scan()`. Поддерживается и
-`INSERT INTO`:
-
-```ts
-cpu.sql("SELECT host, AVG(value) AS value_avg FROM cpu WHERE ts > now-1h GROUP BY host");
-cpu.sql("INSERT INTO cpu (ts, host, value) VALUES (1700000000, 'web-1', 42)");
-```
 
 ## Движки
 

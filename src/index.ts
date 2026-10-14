@@ -2,7 +2,7 @@
 //
 // One face (ClickHouse model): Store — the catalog of tables,
 // Table — a table, define*Table — a description (engine + tiers).
-// The internal machinery (journals, segments, codecs, the SQL parser)
+// The internal machinery (journals, segments, codecs)
 // is not exported — see RULES.md §5.
 
 // --- values -------------------------------------------------

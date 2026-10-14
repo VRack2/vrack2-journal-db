@@ -1,5 +1,19 @@
 # CHANGELOG
 
+## 3.0.0
+
+### Удалён SQL-lite (breaking)
+
+- Удалён `src/Sql.ts` (класс `Sql`, `Sql.parse()`, `Sql.parseInsert()`,
+  `InsertQuery`, токенизатор/парсер) и все коды ошибок `SQL_*`.
+- Удалены методы `Journal.sql()` и `Table.sql()` вместе с кодами ошибок
+  `JRN_INSERT_NAME`, `JRN_FROM_NAME`, `TBL_INSERT_NAME`, `TBL_TABLE_NAME`,
+  `TBL_GROUP_BY_TIER`, `TBL_WHERE_AGG_TIER`.
+- Удалено поле `ScanOptions.table` (использовалось только SQL-путём).
+- Удалён `test/test-sql.ts` и его вызов из скрипта `test`.
+- Функционал SQL покрывается обычным API: `SELECT` → `scan()`, агрегации →
+  `aggregate()`, `INSERT` → `append()`.
+
 ## 2.5.0
 
 ### Единый менеджер ошибок (`ErrorManager`)

@@ -41,15 +41,10 @@ import type { AnyTableDef, TableRuntime } from './compaction/define.ts';
 import { Descriptor, ENGINE_META_KEY } from './compaction/Descriptor.ts';
 import { RetentionEngine } from './RetentionEngine.ts';
 import type { ApplyReport, ConversionPlan, ScanWhere, TierStatus } from './types.ts';
-import { Sql } from './Sql.ts';
 import ErrorManager from './errors/ErrorManager.ts';
 
 ErrorManager.registerMany('Table', [
-  { short: 'TBL_SCAN_AGG', description: 'Table: scan — agg/groupBy in tier mode: use aggregate()/sql()' },
-  { short: 'TBL_INSERT_NAME', description: 'INSERT INTO — not this table', rules: { name: 'string', table: 'string' } },
-  { short: 'TBL_TABLE_NAME', description: 'query table does not match the table', rules: { table: 'string', name: 'string' } },
-  { short: 'TBL_GROUP_BY_TIER', description: 'GROUP BY in tier mode — not yet supported' },
-  { short: 'TBL_WHERE_AGG_TIER', description: 'WHERE + aggregation in tier mode — not yet supported' },
+  { short: 'TBL_SCAN_AGG', description: 'Table: scan — agg/groupBy in tier mode: use aggregate()' },
   { short: 'TBL_WHERE_OP', description: 'where — unknown operator', rules: { op: 'string' } },
   { short: 'TBL_RETENTION_STRING', description: 'Table: retention — non-empty string, e.g. "5s:1d,15s:1w,1m:1mon"' },
   { short: 'TBL_RETENTION_EMPTY', description: 'Table: retention — at least one tier in "res:ttl" form' },
@@ -513,51 +508,6 @@ export class Table {
       rows = rows.sort((a, b) => (Table.tsOf(b) ?? 0) - (Table.tsOf(a) ?? 0));
     }
     return rows;
-  }
-
-  sql(query: string): Row[] | number | Record<string, number | null> {
-    this._assertOpen();
-    const head = query.trimStart().split(/\s+/, 1)[0]?.toUpperCase();
-    if (head === 'INSERT') {
-      const ins = Sql.parseInsert(query);
-      if (ins.name !== this.name && !ins.name.startsWith(`${this.name}/`)) {
-        throw ErrorManager.make('TBL_INSERT_NAME', { name: ins.name, table: this.name });
-      }
-      for (const row of ins.rows) this.append(row);
-      return ins.rows.length;
-    }
-    const opts = Sql.parse(query);
-    if (opts.table !== undefined && opts.table !== this.name) {
-      throw ErrorManager.make('TBL_TABLE_NAME', { table: opts.table, name: this.name });
-    }
-    if (!this.tiers) return this.journals[0].scan(opts);
-
-    const now = this.now();
-    const [start, end] = Interval.period(opts.start ?? 0, opts.end ?? now, now);
-
-    // Aggregations (without GROUP BY) — via aggregate().
-    if (opts.agg) {
-      if (opts.groupBy) {
-        throw ErrorManager.make('TBL_GROUP_BY_TIER');
-      }
-      const exprs: AggregateExpr[] = [];
-      for (const [f, fns] of Object.entries(opts.agg)) {
-        for (const fn of fns) exprs.push({ field: f, fn });
-      }
-      if (opts.where && opts.where.length > 0) {
-        throw ErrorManager.make('TBL_WHERE_AGG_TIER');
-      }
-      return this.aggregate(start, end, exprs);
-    }
-    if (opts.groupBy) {
-      throw ErrorManager.make('TBL_GROUP_BY_TIER');
-    }
-
-    let rows = this.query(start, end);
-    if (opts.where && opts.where.length > 0) {
-      rows = rows.filter(r => opts.where!.every(w => Table._matchWhere(r, w)));
-    }
-    return Table._applyScanOptions(rows, opts);
   }
 
   private static _applyScanOptions(rows: Row[], opts: ScanOptions): Row[] {

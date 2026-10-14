@@ -102,7 +102,6 @@ const cpu2 = store.open('cpu');  // → Table (та же таблица)
 | `aggregate(from, to, exprs)` | min / max / sum / avg / count за период | `{ value_avg: 42.3, value_max: 99.9, ts_count: 7184 }` |
 | `timeline(interval, from, to)` | сколько строк в каждом интервале | `[{ start, end, count, hasData }, …]` |
 | `scan({ select, where, groupBy, order, limit })` | выбрать колонки, отфильтровать, сгруппировать | `[{ … }, …]`; со `groupBy` — по строке на группу |
-| `sql('SELECT … WHERE …')` | небольшой SQL, компилируется в `scan()` | `[{ … }, …]`; `INSERT` — число записанных строк |
 | `percentile(from, to, [0.5, 0.95])` | квантили p50 / p95 / … (колонка `value`) | `{ p50: 38.2, p95: 91.4 }` |
 
 Чтение по времени дешёвое: файлы, целиком вне диапазона, **не читаются** — их
@@ -227,5 +226,5 @@ npm run typecheck # tsc --noEmit (strict)
 | `Formats.md` | типы колонок, форматы файлов (v1/v2/v3), кодексы, сжатие |
 | `Reliability.md` | WAL, атомарная запись, восстановление, блокировка |
 | `Maintenance.md` | дедупликация, кэш, compact, purge |
-| `Querying.md` | query / aggregate / scan / sql / percentile |
+| `Querying.md` | query / aggregate / scan / percentile |
 | `Retention.md` | retention-тиры, rollup, размер |
