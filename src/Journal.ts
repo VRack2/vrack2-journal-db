@@ -273,6 +273,19 @@ export class Journal {
   /** segment id → min/max ts + counts from the .meta sidecar (no file load). */
   private segmentMeta = new Map<string, SegmentMeta>();
 
+  // --- Automatic compaction (background, self-limiting, no client involvement) ---
+  // append() only *arms* a pass; the work runs in bounded batches off the hot
+  // path so the heap never holds the whole table at once.
+  private _compactArmed = false;   // a pass is scheduled (de-duplicates scheduling)
+  private _compacting = false;     // a pass is running (reentrancy guard)
+  private _v3Migrated = false;     // one-time v2→v3 migration done for this open
+  /** Adaptive rows-per-pass budget (the point-2 memory bound). */
+  private _compactRowsPerPass = 200_000;
+  /** Target wall-time for one pass; drives _adapt(). */
+  private readonly _passTimeBudgetMs = 25;
+  private readonly _minRowsPerPass = 20_000;
+  private readonly _maxRowsPerPass = 500_000;
+
   constructor(baseDir: string, opts: JournalOptions = {}) {
     this.baseDir = baseDir;
     this.journalsDir = path.join(baseDir, 'journals');
@@ -371,6 +384,8 @@ export class Journal {
     this.flush();
     this.activeSegment = null;
     this.isOpen = false;
+    this._compactArmed = false;
+    this._compacting = false;
     activeJournals.delete(this);
     this._releaseLock();
   }
@@ -404,7 +419,9 @@ export class Journal {
     if (seg.rowCount >= this.rowsPerSegment) {
       this.flush();
       if (this.autoCompact && this._sortedClosedIds().length >= this.compactMinSegments) {
-        this.compact();
+        // Do NOT merge the whole table here: run one bounded pass (memory-safe)
+        // and let it self-chain in the background. See _tickAutoCompact().
+        this._tickAutoCompact();
       }
     }
   }
@@ -449,10 +466,32 @@ export class Journal {
 
   compact(): CompactResult {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
-    this.migrateToV3();
-
+    // Migrate any legacy v2 segments first, even when there is nothing to
+    // merge: compacting a lone old segment is exactly how it gets re-encoded
+    // to v3 (test-migration relies on this).
+    if (!this._v3Migrated) {
+      this.migrateToV3();
+      this._v3Migrated = true;
+    }
     const ids = this._sortedClosedIds();
     if (ids.length < 2) return { mergedSegments: 0, logicalRows: 0, physicalBefore: 0, physicalAfter: 0, collapsedRows: 0 };
+    // Explicit call = "merge everything now". Keeps the synchronous, whole-table
+    // contract the tests rely on. The automatic path uses bounded _compactBatch
+    // passes instead so it never holds the entire table in memory at once.
+    return this._compactBatch(ids);
+  }
+
+  /**
+   * Merges exactly the given closed segment ids (>= 2) into one new segment.
+   * The unit of work for both the explicit compact() and the bounded automatic
+   * passes; callers bound the id set to keep peak memory proportional to the
+   * batch, not to the whole table.
+   */
+  private _compactBatch(ids: string[]): CompactResult {
+    if (!this._v3Migrated) {
+      this.migrateToV3();
+      this._v3Migrated = true;
+    }
 
     let logicalRows = 0;
     let physicalBefore = 0;
@@ -492,6 +531,85 @@ export class Journal {
     this._segmentCache.set(merged.id, merged);
 
     return { mergedSegments: ids.length, logicalRows, physicalBefore, physicalAfter: merged.physicalRowCount, collapsedRows };
+  }
+
+  // --------------------------------------------------
+  // Automatic compaction (background, bounded, self-adaptive)
+  // --------------------------------------------------
+
+  /**
+   * Runs ONE bounded compaction pass, then self-chains while compaction debt
+   * remains. This is the automatic path (triggered by append(), by a cold
+   * reopen, and by the shared maintenance driver). It is memory-safe: a single
+   * pass materializes at most `_compactRowsPerPass` rows, never the whole table.
+   *
+   * Public (underscore) so the module-level driver and append() can call it,
+   * like _walDrain(). No-op when closed: / disabled / no debt / already busy.
+   */
+  _tickAutoCompact(): void {
+    if (!this.isOpen || !this.autoCompact) return;
+    if (this._compactArmed || this._compacting) return;
+    if (this._sortedClosedIds().length < this.compactMinSegments) return;
+
+    this._compactArmed = true;
+    this._compacting = true;
+    let dt = 0;
+    try {
+      const closed = this._sortedClosedIds();
+      if (closed.length >= 2) {
+        const batch = this._pickBatch(closed, this._compactRowsPerPass);
+        const t0 = Date.now();
+        this._compactBatch(batch);
+        dt = Date.now() - t0;
+      }
+    } finally {
+      this._compactArmed = false;
+      this._compacting = false;
+    }
+
+    this._adapt(dt);
+
+    // Drain the remaining debt in the background, yielding to the event loop
+    // (and the GC) between passes so the writer is never blocked on a
+    // full-table merge.
+    if (
+      this.isOpen &&
+      this.autoCompact &&
+      this._sortedClosedIds().length >= this.compactMinSegments
+    ) {
+      setImmediate(() => this._tickAutoCompact());
+    }
+  }
+
+  /**
+   * Chooses the oldest closed segments up to `budgetRows` (point-2 memory
+   * bound). Always returns at least 2 ids (a merge needs >= 2) and never more
+   * than the budget, so peak memory tracks the budget, not the table size.
+   */
+  private _pickBatch(closed: string[], budgetRows: number): string[] {
+    if (closed.length < 2) return closed;
+    let rows = 0;
+    const out: string[] = [];
+    for (const id of closed) {
+      out.push(id);
+      rows += this.segmentMeta.get(id)?.rowCount ?? this.rowsPerSegment;
+      if (out.length >= 2 && rows >= budgetRows) break;
+    }
+    return out;
+  }
+
+  /**
+   * Adapts the rows-per-pass budget to the machine's load (point 3). A pass
+   * that took too long shrinks the next batch (more frequent, smaller, gentler
+   * on the writer); one that was fast grows it (fewer passes, less churn).
+   */
+  private _adapt(dt: number): void {
+    if (dt <= 0) return;
+    if (dt >= this._passTimeBudgetMs) {
+      this._compactRowsPerPass = Math.max(this._minRowsPerPass, this._compactRowsPerPass >> 1);
+    } else if (dt <= this._passTimeBudgetMs / 4) {
+      this._compactRowsPerPass = Math.min(this._maxRowsPerPass, Math.floor(this._compactRowsPerPass * 1.5));
+    }
   }
 
   private _detectSegFormat(file: string): 'v1' | 'v2' | 'v3' {
