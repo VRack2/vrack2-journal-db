@@ -669,18 +669,32 @@ export class Table {
       const cp = this.checkpoints[cpKey] ?? 0;
       if (maxRollable <= cp) continue;
 
-      let rows: Row[];
-      try {
-        rows = fine.scan({ start: cp, end: maxRollable });
-      } catch {
-        rows = [];
+      // Read the rollable window page-by-page (each page = one target-resolution
+      // wide) and accumulate incrementally, so peak memory is bounded by the
+      // number of buckets, not by the number of fine-tier rows (no OOM under load).
+      // Pages are (prev, end] with the inclusive scan bounds, so no row is counted
+      // twice and none is missed — identical to the old single-scan window.
+      const acc = Rollup.accumulate({ agg: this.agg, dims: this.dims, res: coarseRes });
+      let rolledIn = 0;
+      let cursor = cp;
+      while (cursor < maxRollable) {
+        const pageEnd = Math.min(cursor + coarseRes, maxRollable);
+        let page: Row[];
+        try {
+          page = fine.scan({ start: cursor, end: pageEnd });
+        } catch {
+          page = [];
+        }
+        for (const r of page) {
+          const ts = r['ts'];
+          if (typeof ts === 'number' && Number.isFinite(ts) && ts > cursor && ts <= pageEnd) {
+            acc.add(r);
+            rolledIn++;
+          }
+        }
+        cursor = pageEnd;
       }
-      rows = rows.filter(r => {
-        const ts = r['ts'];
-        return typeof ts === 'number' && Number.isFinite(ts) && ts > cp && ts <= maxRollable;
-      });
-
-      const promoted = Rollup.promote(rows, this.agg, this.dims, coarseRes);
+      const promoted = acc.finalize();
       for (const outRow of promoted) coarse.append(outRow);
       if (promoted.length > 0) coarse.flush();
 
@@ -691,7 +705,7 @@ export class Table {
       const purged = fine.purge(maxRollable + 1);
       purgedRows += purged.removedRows ?? 0;
       pairs++;
-      rolledRows += rows.length;
+      rolledRows += rolledIn;
     }
 
     return { pairs, rolledRows, purgedRows };
@@ -733,18 +747,29 @@ export class Table {
       };
     }
 
-    let rows: Row[];
-    try {
-      rows = fine.scan({ start: cp, end: maxRollable });
-    } catch {
-      rows = [];
+    // Paged read + incremental accumulate (bounded memory), identical window to
+    // the old single-scan: pages are (prev, end] over the inclusive scan bounds.
+    const acc = Rollup.accumulate({ agg: cfg.agg, dims: cfg.dims, res: cfg.res });
+    let sourceRows = 0;
+    let cursor = cp;
+    while (cursor < maxRollable) {
+      const pageEnd = Math.min(cursor + cfg.res, maxRollable);
+      let page: Row[];
+      try {
+        page = fine.scan({ start: cursor, end: pageEnd });
+      } catch {
+        page = [];
+      }
+      for (const r of page) {
+        const ts = r['ts'];
+        if (typeof ts === 'number' && Number.isFinite(ts) && ts > cursor && ts <= pageEnd) {
+          acc.add(r);
+          sourceRows++;
+        }
+      }
+      cursor = pageEnd;
     }
-    rows = rows.filter(r => {
-      const ts = r['ts'];
-      return typeof ts === 'number' && Number.isFinite(ts) && ts > cp && ts <= maxRollable;
-    });
-
-    const promoted = Rollup.promote(rows, cfg.agg, cfg.dims, cfg.res);
+    const promoted = acc.finalize();
     for (const outRow of promoted) coarse.append(outRow);
     if (promoted.length > 0) coarse.flush();
 
@@ -759,7 +784,7 @@ export class Table {
       resMs: cfg.res,
       fromMs: cp,
       toMs: maxRollable,
-      sourceRows: rows.length,
+      sourceRows,
       promotedRows: promoted.length,
     };
   }
