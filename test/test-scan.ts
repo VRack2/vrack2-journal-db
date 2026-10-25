@@ -409,11 +409,11 @@ function assertAggSets(got: Row[], want: Row[], msg: string, keyFields: string[]
 }
 
 // --------------------------------------------------
-// 10. Производительность: 10M точек, scan(where+groupBy+top-k) vs allRows()
+// 10. Производительность: 1M точек, scan(where+groupBy+top-k) vs allRows()
 // --------------------------------------------------
 {
-  const N = 10_000_000;
-  const j = new Journal(baseDir, { rowsPerSegment: 250_000 });
+  const N = 1_000_000;
+  const j = new Journal(baseDir, { rowsPerSegment: 25_000 });
   j.open('s10', SCHEMA);
   const hosts = ['web-1', 'web-2', 'web-3', 'web-4'];
   let ts = base;

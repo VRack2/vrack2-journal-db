@@ -39,20 +39,21 @@ export class Collapsing extends Engine {
 
       const live: Row[] = [];      // not-yet-reverted "adds"
       const keptNeg: Row[] = [];   // "reverts" with no matching add
+      let head = 0;                // first not-yet-reverted position in live
       for (const row of ordered) {
         const s = this.num(row, sign);
         if (s > 0) {
           for (let i = 0; i < Math.round(s); i++) live.push(row);
         } else if (s < 0) {
           let need = Math.round(-s);
-          while (need > 0 && live.length > 0) {
-            live.shift();
+          while (need > 0 && head < live.length) {
+            head++;
             need--;
           }
           if (need > 0) keptNeg.push(row);
         }
       }
-      out.push(...keptNeg, ...live);
+      out.push(...keptNeg, ...live.slice(head));
     }
     return out;
   }

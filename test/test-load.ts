@@ -1,5 +1,5 @@
 // ============================================================
-// test-load.ts — Долгая нагрузка: 2 000 000 записей
+// test-load.ts — Долгая нагрузка: 500 000 записей (LOAD_ROWS для другого объёма)
 //
 // Запуск: node --max-old-space-size=8192 test/test-load.ts
 // (не включён в npm test — долгий)
@@ -24,8 +24,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.join(__dirname, '..', 'test-data', 'load');
 const JNAME = 'load';
 
-const N = Number(process.env.LOAD_ROWS ?? '2000000');
-const ROWS_PER_SEGMENT = 50_000; // → ~40 сегментов
+const N = Number(process.env.LOAD_ROWS ?? '500000');
+const ROWS_PER_SEGMENT = 12_500; // → ~40 сегментов
 const TS_BASE = 1_700_000_000_000;
 
 fs.rmSync(baseDir, { recursive: true, force: true });

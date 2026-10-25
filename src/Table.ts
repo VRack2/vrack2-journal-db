@@ -106,7 +106,9 @@ const AGG_FNS: ReadonlySet<string> = new Set(['min', 'max', 'sum', 'avg', 'count
 const isAggFn = (fn: unknown): fn is AggFn => AGG_FNS.has(String(fn));
 
 // Throttling for auto-rollup/auto-purge: at most once per interval (0 disables).
-export const DEFAULT_MAINTENANCE_INTERVAL_MS = 30_000;
+// 10 min by default: keeps per-pass file churn (segment/meta/WAL/checkpoint
+// writes) ~20x lower under low-rate ingest while still bounding lag.
+export const DEFAULT_MAINTENANCE_INTERVAL_MS = 600_000;
 
 export interface RollupOneReport {
   tierIndex: number;
@@ -322,7 +324,7 @@ export class Table {
     }
 
     this.engines = def.storage
-      ? this.journals.map(j => new RetentionEngine(j, def.storage?.tiers))
+      ? this.journals.map(j => new RetentionEngine(j.store, () => j.journalPath(), def.storage?.tiers))
       : [];
   }
 
@@ -471,7 +473,7 @@ export class Table {
       const rows = this.journals[i].scan({ start: winStart, end: winEnd });
       for (const r of rows) out.push(r);
     }
-    out.sort((a, b) => (Table.tsOf(a) ?? 0) - (Table.tsOf(b) ?? 0));
+    out.sort(Table._tsCmp);
     return out;
   }
 
@@ -479,7 +481,7 @@ export class Table {
     this._assertOpen();
     if (!this.tiers) return this.journals[0].allRows();
     const rows = this.query(0, this.now());
-    rows.sort((a, b) => (Table.tsOf(a) ?? 0) - (Table.tsOf(b) ?? 0));
+    rows.sort(Table._tsCmp);
     return rows;
   }
 
@@ -503,11 +505,11 @@ export class Table {
     if (opts.where && opts.where.length > 0) {
       rows = rows.filter(r => opts.where!.every(w => Table._matchWhere(r, w)));
     }
-    rows = Table._applyScanOptions(rows, opts);
+    // Sort before offset/limit — same order of operations as Journal.scan.
     if (opts.order === 'desc') {
-      rows = rows.sort((a, b) => (Table.tsOf(b) ?? 0) - (Table.tsOf(a) ?? 0));
+      rows.sort((a, b) => Table._tsCmp(b, a));
     }
-    return rows;
+    return Table._applyScanOptions(rows, opts);
   }
 
   private static _applyScanOptions(rows: Row[], opts: ScanOptions): Row[] {
@@ -669,34 +671,7 @@ export class Table {
       const cp = this.checkpoints[cpKey] ?? 0;
       if (maxRollable <= cp) continue;
 
-      // Read the rollable window page-by-page (each page = one target-resolution
-      // wide) and accumulate incrementally, so peak memory is bounded by the
-      // number of buckets, not by the number of fine-tier rows (no OOM under load).
-      // Pages are (prev, end] with the inclusive scan bounds, so no row is counted
-      // twice and none is missed — identical to the old single-scan window.
-      const acc = Rollup.accumulate({ agg: this.agg, dims: this.dims, res: coarseRes });
-      let rolledIn = 0;
-      let cursor = cp;
-      while (cursor < maxRollable) {
-        const pageEnd = Math.min(cursor + coarseRes, maxRollable);
-        let page: Row[];
-        try {
-          page = fine.scan({ start: cursor, end: pageEnd });
-        } catch {
-          page = [];
-        }
-        for (const r of page) {
-          const ts = r['ts'];
-          if (typeof ts === 'number' && Number.isFinite(ts) && ts > cursor && ts <= pageEnd) {
-            acc.add(r);
-            rolledIn++;
-          }
-        }
-        cursor = pageEnd;
-      }
-      const promoted = acc.finalize();
-      for (const outRow of promoted) coarse.append(outRow);
-      if (promoted.length > 0) coarse.flush();
+      const { sourceRows } = this._rollupWindow(fine, coarse, cp, maxRollable, coarseRes, this.agg, this.dims);
 
       // Checkpoint before purge — makes a repeat rollup idempotent.
       this.checkpoints[cpKey] = maxRollable;
@@ -705,7 +680,7 @@ export class Table {
       const purged = fine.purge(maxRollable + 1);
       purgedRows += purged.removedRows ?? 0;
       pairs++;
-      rolledRows += rolledIn;
+      rolledRows += sourceRows;
     }
 
     return { pairs, rolledRows, purgedRows };
@@ -747,13 +722,42 @@ export class Table {
       };
     }
 
-    // Paged read + incremental accumulate (bounded memory), identical window to
-    // the old single-scan: pages are (prev, end] over the inclusive scan bounds.
-    const acc = Rollup.accumulate({ agg: cfg.agg, dims: cfg.dims, res: cfg.res });
+    const { sourceRows, promotedRows } = this._rollupWindow(fine, coarse, cp, maxRollable, cfg.res, cfg.agg, cfg.dims);
+
+    this.checkpoints[cpKey] = maxRollable;
+    Table.writeJson(this.cpPath, this.checkpoints);
+
+    const purged = fine.purge(maxRollable + 1);
+    void purged;
+
+    return {
+      tierIndex: targetIdx,
+      resMs: cfg.res,
+      fromMs: cp,
+      toMs: maxRollable,
+      sourceRows,
+      promotedRows,
+    };
+  }
+
+  /**
+   * Reads the rollable window (cp, maxRollable] page-by-page (each page = one
+   * `res` wide) and accumulates incrementally, so peak memory is bounded by the
+   * number of buckets, not by the number of fine-tier rows (no OOM under load).
+   * Pages are (cursor, end] with the inclusive scan bounds, so no row is counted
+   * twice and none is missed. Promotes the resulting buckets to `coarse`.
+   */
+  private _rollupWindow(fine: Journal, coarse: Journal, cp: number, maxRollable: number, res: number, agg: Record<string, AggFn>, dims: string[]): { sourceRows: number; promotedRows: number } {
+    const acc = Rollup.accumulate({ agg, dims, res });
     let sourceRows = 0;
-    let cursor = cp;
+    // Fresh table (no checkpoint): start at the oldest fine-tier row, not the
+    // epoch — stepping res-pages from 1970 means ~10^7 empty scans (~15s).
+    // An empty tier has nothing to roll up: start past the window (loop skips).
+    // Pages are (cursor, end], so minTs - 1 keeps the row at exactly minTs.
+    const range = fine.getTimeRange();
+    let cursor = range === null ? maxRollable : Math.max(cp, range[0] - 1);
     while (cursor < maxRollable) {
-      const pageEnd = Math.min(cursor + cfg.res, maxRollable);
+      const pageEnd = Math.min(cursor + res, maxRollable);
       let page: Row[];
       try {
         page = fine.scan({ start: cursor, end: pageEnd });
@@ -772,21 +776,7 @@ export class Table {
     const promoted = acc.finalize();
     for (const outRow of promoted) coarse.append(outRow);
     if (promoted.length > 0) coarse.flush();
-
-    this.checkpoints[cpKey] = maxRollable;
-    Table.writeJson(this.cpPath, this.checkpoints);
-
-    const purged = fine.purge(maxRollable + 1);
-    void purged;
-
-    return {
-      tierIndex: targetIdx,
-      resMs: cfg.res,
-      fromMs: cp,
-      toMs: maxRollable,
-      sourceRows,
-      promotedRows: promoted.length,
-    };
+    return { sourceRows, promotedRows: promoted.length };
   }
 
   /** Delete rows up to the bound (inclusive) from all journals. */
@@ -903,21 +893,14 @@ export class Table {
     this._assertOpen();
     return this.journals.map((j, i) => {
       const st = j.stats();
+      // st.timeRange already spans all segments (meta-based, no file loads);
+      // the per-segment loop is only needed for the byte total.
       let bytes = 0;
-      let minTs: number | null = null;
-      let maxTs: number | null = null;
       for (const id of j.closedSegmentIds()) {
-        const info = j.closedSegmentInfo(id);
-        if (!info) continue;
-        bytes += info.bytes ?? 0;
-        if (info.minTs !== null) minTs = minTs === null ? info.minTs : Math.min(minTs, info.minTs);
-        if (info.maxTs !== null) maxTs = maxTs === null ? info.maxTs : Math.max(maxTs, info.maxTs);
+        bytes += j.closedSegmentInfo(id)?.bytes ?? 0;
       }
-      if (st.timeRange) {
-        const [lo, hi] = st.timeRange;
-        if (lo !== null) minTs = minTs === null ? lo : Math.min(minTs, lo);
-        if (hi !== null) maxTs = maxTs === null ? hi : Math.max(maxTs, hi);
-      }
+      const minTs = st.timeRange ? st.timeRange[0] : null;
+      const maxTs = st.timeRange ? st.timeRange[1] : null;
       const t = this.tiers ? this.tiers[i] : null;
       return {
         tier: i,
@@ -934,6 +917,11 @@ export class Table {
   private static tsOf(row: Row): number | null {
     const v = row['ts'];
     return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  }
+
+  /** Ascending ts comparator for row lists (nulls first). */
+  private static _tsCmp(a: Row, b: Row): number {
+    return (Table.tsOf(a) ?? 0) - (Table.tsOf(b) ?? 0);
   }
 
   private static readJson(p: string): Record<string, number> {

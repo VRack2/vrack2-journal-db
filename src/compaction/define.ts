@@ -82,7 +82,7 @@ interface BaseTableDef {
   autoRollup?: boolean;
   /** Auto-purge on append (default true). */
   autoPurge?: boolean;
-  /** Throttling of auto-maintenance (ms, default 30 000; 0 — every append). */
+  /** Throttling of auto-maintenance (ms, default 600 000; 0 — every append). */
   maintenanceMinIntervalMs?: number;
   /** "Current time" provider (tests). Default: Date.now. */
   nowProvider?: () => number;

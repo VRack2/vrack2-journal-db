@@ -10,6 +10,19 @@ ErrorManager.registerMany('Segment', [
   { short: 'SEG_VERSION', description: 'Unsupported segment format version', rules: { version: 'number' } },
 ]);
 
+/** Adds one numeric value to the column summary (created on first call). */
+function updateSummary(summaries: Record<string, ColumnSummary>, fieldName: string, value: number): void {
+  let s = summaries[fieldName];
+  if (!s) {
+    summaries[fieldName] = { min: value, max: value, sum: value, count: 1 };
+    return;
+  }
+  if (value < s.min) s.min = value;
+  if (value > s.max) s.max = value;
+  s.sum += value;
+  s.count++;
+}
+
 export class Segment {
   readonly id: string;
   readonly schema: Schema;
@@ -85,7 +98,7 @@ export class Segment {
       for (const fieldName of this._fields) {
         const v = values[fieldName];
         if (typeof v === 'number' && Number.isFinite(v)) {
-          this._updateSummary(fieldName, v);
+          updateSummary(this.summaries, fieldName, v);
         }
       }
     }
@@ -121,9 +134,15 @@ export class Segment {
   }
 
   getRow(logicalIndex: number): Row {
+    if (logicalIndex < 0 || logicalIndex >= this.rowCount) {
+      throw ErrorManager.make('SEG_ROW_OOB', { index: logicalIndex, max: this.rowCount - 1 });
+    }
+    // Bounds check and rowMap lookup once per row, not once per field (hot path).
+    const physicalIndex = this.rowMap[logicalIndex];
     const result: Row = {};
     for (const fieldName of this._fields) {
-      result[fieldName] = this.get(fieldName, logicalIndex);
+      const column = this.columns[fieldName];
+      result[fieldName] = column ? column.get(physicalIndex) : null;
     }
     return result;
   }
@@ -148,19 +167,6 @@ export class Segment {
       }
     }
     return false;
-  }
-
-  /** Adds one numeric value to the column summary (created on first call). */
-  private _updateSummary(fieldName: string, value: number): void {
-    let s = this.summaries[fieldName];
-    if (!s) {
-      this.summaries[fieldName] = { min: value, max: value, sum: value, count: 1 };
-      return;
-    }
-    if (value < s.min) s.min = value;
-    if (value > s.max) s.max = value;
-    s.sum += value;
-    s.count++;
   }
 
   serialize(): SerializedSegment {
@@ -234,15 +240,7 @@ export class Segment {
       for (const fieldName of this._fields) {
         const v = this.get(fieldName, i);
         if (typeof v === 'number' && Number.isFinite(v)) {
-          let s = out[fieldName];
-          if (!s) {
-            out[fieldName] = { min: v, max: v, sum: v, count: 1 };
-          } else {
-            if (v < s.min) s.min = v;
-            if (v > s.max) s.max = v;
-            s.sum += v;
-            s.count++;
-          }
+          updateSummary(out, fieldName, v);
         }
       }
     }

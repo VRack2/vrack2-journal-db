@@ -16,8 +16,8 @@
 // Lossless conversion: data is read from the segment and rewritten
 // into a new file in full; dedup (segment.append) works as in compact.
 //
-// The Journal.ts ↔ RetentionEngine.ts cycle is excluded via the RetentionHost interface:
-// Journal implements it structurally, the Journal class is not imported.
+// Self-contained: works on the journal's SegmentStore (sorted ids, .meta
+// info, merge/reencode) plus the journal directory path — no Journal import.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,39 +33,16 @@ import type {
   TierStatus,
 } from './types.ts';
 import ErrorManager from './errors/ErrorManager.ts';
+import { SEG_V3_EXT } from './journal/constants.ts';
+import type { SegmentStore } from './journal/SegmentStore.ts';
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
 
 ErrorManager.registerMany('RetentionEngine', [
-  { short: 'RET_HOST', description: 'RetentionEngine: host (journal) is required' },
+  { short: 'RET_HOST', description: 'RetentionEngine: segment store is required' },
   { short: 'RET_TIER_UNKNOWN', description: 'Unknown tier', rules: { tierId: 'string' } },
 ]);
-
-/**
-  * The part of a Journal that RetentionEngine works with.
-  * Journal implements it structurally (duck typing), so RetentionEngine
-// does not import the Journal class (dependency only "downward" — no cycle).
- */
-export interface RetentionHost {
-  /** Journal directory on disk. */
-  journalPath(): string;
-  /** IDs of closed segments in chronological order. */
-  closedSegmentIds(): string[];
-  /** Segment bounds + counters — null if unknown. */
-  closedSegmentInfo(id: string): {
-    minTs: number | null; maxTs: number | null;
-    rowCount: number | null; physicalRowCount: number | null; bytes: number | null;
-  } | null;
-  /** Name of the segment file on disk — null if unknown. */
-  closedSegmentFile(id: string): string | null;
-  /** Closed segment from cache/disk. */
-  getClosedSegment(id: string): Segment;
-  /** Merges closed segments (dedup at boundaries). */
-  mergeClosedSegments(ids: string[], encode: (seg: Segment) => Buffer): string;
-  /** Re-encodes a closed segment (same data, new codec/compression). */
-  reencodeClosedSegment(id: string, encode: (seg: Segment) => Buffer): string;
-}
 
 const NOT_V3: SegmentEncoding = { v3: false, compression: '', codecs: {} };
 
@@ -80,14 +57,21 @@ const NOT_V3: SegmentEncoding = { v3: false, compression: '', codecs: {} };
   *   eng.compactTier('archive');             // merging only in a tier
  */
 export class RetentionEngine {
-  private readonly host: RetentionHost;
+  private readonly store: SegmentStore;
+  private readonly pathOf: () => string;
   readonly tiers: RetentionTier[];
   private readonly nowProvider: () => number;
   private readonly encCache = new Map<string, SegmentEncoding>();
 
-  constructor(host: RetentionHost, tiers?: RetentionTier[], nowProvider?: () => number) {
-    if (!host) throw ErrorManager.make('RET_HOST');
-    this.host = host;
+  constructor(
+    store: SegmentStore,
+    pathOf: () => string,
+    tiers?: RetentionTier[],
+    nowProvider?: () => number,
+  ) {
+    if (!store) throw ErrorManager.make('RET_HOST');
+    this.store = store;
+    this.pathOf = pathOf;
     this.tiers = (tiers ?? RetentionEngine.defaultTiers())
       .slice()
       .sort((a, b) => a.from - b.from);
@@ -131,12 +115,17 @@ export class RetentionEngine {
     * compression, numeric codecs. null if the segment/file is unknown.
    */
   encodingOf(segId: string): SegmentEncoding | null {
-    const file = this.host.closedSegmentFile(segId);
+    const file = this.store.fileOf(segId);
     if (!file) return null;
-    let ins = this.encCache.get(segId);
+    return this.encodingCached(segId, file);
+  }
+
+  /** Encoding of a closed segment, cached per segment id. */
+  private encodingCached(id: string, file: string | null): SegmentEncoding {
+    let ins = this.encCache.get(id);
     if (!ins) {
-      ins = RetentionEngine.inspectSegFile(path.join(this.host.journalPath(), file));
-      this.encCache.set(segId, ins);
+      ins = file ? RetentionEngine.inspectSegFile(path.join(this.pathOf(), file)) : NOT_V3;
+      this.encCache.set(id, ins);
     }
     return ins;
   }
@@ -151,8 +140,8 @@ export class RetentionEngine {
         segments: 0, bytes: 0, rows: 0, oldestTs: null, newestTs: null,
       });
     }
-    for (const id of this.host.closedSegmentIds()) {
-      const info = this.host.closedSegmentInfo(id);
+    for (const id of this.store.sortedIds()) {
+      const info = this.store.info(id);
       if (!info || info.maxTs === null) continue;
       const tier = this.tierForAge(Math.max(0, t - info.maxTs));
       const s = out.get(tier.id);
@@ -167,14 +156,10 @@ export class RetentionEngine {
   }
 
   /** Plan item for a single segment. */
-  private planOne(id: string, t: number, tier: RetentionTier): { action: 'none' | 'reencode'; ins: SegmentEncoding } {
-    const file = this.host.closedSegmentFile(id);
-    let ins = this.encCache.get(id);
-    if (!ins) {
-      ins = file ? RetentionEngine.inspectSegFile(path.join(this.host.journalPath(), file)) : NOT_V3;
-      this.encCache.set(id, ins);
-    }
-    const seg = this.host.getClosedSegment(id);
+  private planOne(id: string, tier: RetentionTier): { action: 'none' | 'reencode'; ins: SegmentEncoding } {
+    const file = this.store.fileOf(id);
+    const ins = this.encodingCached(id, file);
+    const seg = this.store.loadClosed(id);
     const action = RetentionEngine.matchesTier(ins, tier, seg) ? 'none' : 'reencode';
     return { action, ins };
   }
@@ -190,7 +175,7 @@ export class RetentionEngine {
     for (const g of groups) {
       const needMerge = g.ids.length >= 2;
       for (const id of g.ids) {
-        const { action } = this.planOne(id, t, g.tier);
+        const { action } = this.planOne(id, g.tier);
         plans.push({
           segId: id,
           tier: g.tier.id,
@@ -209,28 +194,28 @@ export class RetentionEngine {
     const t = now ?? this.now();
     const groups = this.groupByTier(t);
     let reencoded = 0, merged = 0, skipped = 0;
-    const beforeSegments = this.host.closedSegmentIds().length;
+    const beforeSegments = this.store.sortedIds().length;
     const beforeBytes = this.totalBytes();
 
     for (const g of groups) {
       if (g.ids.length >= 2) {
         // Merging the tier's blocks: dedup at boundaries + the tier's codec/compression
-        this.host.mergeClosedSegments(g.ids, seg => this.encodeForTier(g.tier, seg));
+        this.store.merge(g.ids, (rows) => rows, seg => this.encodeForTier(g.tier, seg), SEG_V3_EXT);
         merged++;
       } else {
         const id = g.ids[0];
-        const { action } = this.planOne(id, t, g.tier);
+        const { action } = this.planOne(id, g.tier);
         if (action === 'none') {
           skipped++;
           continue;
         }
-        this.host.reencodeClosedSegment(id, seg => this.encodeForTier(g.tier, seg));
+        this.store.reencode(id, seg => this.encodeForTier(g.tier, seg));
         reencoded++;
       }
     }
 
     this.encCache.clear();
-    const afterSegments = this.host.closedSegmentIds().length;
+    const afterSegments = this.store.sortedIds().length;
     const afterBytes = this.totalBytes();
     return { reencoded, merged, skipped, beforeSegments, afterSegments, beforeBytes, afterBytes };
   }
@@ -242,15 +227,15 @@ export class RetentionEngine {
     if (!tier) throw ErrorManager.make('RET_TIER_UNKNOWN', { tierId });
     const groups = this.groupByTier(t).filter(g => g.tier.id === tierId);
     let mergedGroups = 0;
-    const beforeSegments = this.host.closedSegmentIds().length;
+    const beforeSegments = this.store.sortedIds().length;
     for (const g of groups) {
       if (g.ids.length >= 2) {
-        this.host.mergeClosedSegments(g.ids, seg => this.encodeForTier(tier, seg));
+        this.store.merge(g.ids, (rows) => rows, seg => this.encodeForTier(tier, seg), SEG_V3_EXT);
         mergedGroups++;
       }
     }
     this.encCache.clear();
-    const afterSegments = this.host.closedSegmentIds().length;
+    const afterSegments = this.store.sortedIds().length;
     return { tier: tierId, mergedGroups, beforeSegments, afterSegments };
   }
 
@@ -261,8 +246,8 @@ export class RetentionEngine {
   /** Groups closed segments by (tier, block) — for 1h → 1d merging. */
   private groupByTier(t: number): { tier: RetentionTier; blockKey: number; ids: string[] }[] {
     const groups = new Map<string, { tier: RetentionTier; blockKey: number; ids: string[] }>();
-    for (const id of this.host.closedSegmentIds()) {
-      const info = this.host.closedSegmentInfo(id);
+    for (const id of this.store.sortedIds()) {
+      const info = this.store.info(id);
       if (!info || info.minTs === null || info.maxTs === null) continue;
       const tier = this.tierForAge(Math.max(0, t - info.maxTs));
       const blockKey = tier.block > 0 ? Math.floor(info.minTs / tier.block) : 0;
@@ -284,8 +269,8 @@ export class RetentionEngine {
 
   private totalBytes(): number {
     let b = 0;
-    for (const id of this.host.closedSegmentIds()) {
-      b += this.host.closedSegmentInfo(id)?.bytes ?? 0;
+    for (const id of this.store.sortedIds()) {
+      b += this.store.info(id)?.bytes ?? 0;
     }
     return b;
   }

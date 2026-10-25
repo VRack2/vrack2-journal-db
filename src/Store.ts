@@ -12,7 +12,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Journal, DEFAULT_ROWS_PER_SEGMENT, DEFAULT_COMPACT_MIN_SEGMENTS } from './Journal.ts';
+import { Journal, DEFAULT_ROWS_PER_SEGMENT, DEFAULT_COMPACT_MIN_SEGMENTS, isSegmentFile, idFromFile } from './Journal.ts';
 import type { Segment } from './Segment.ts';
 import { LRUCache } from './LRUCache.ts';
 import { SegmentFile } from './SegmentFile.ts';
@@ -37,9 +37,6 @@ import type { EngineKind } from './compaction/types.ts';
 import ErrorManager from './errors/ErrorManager.ts';
 
 const MANIFEST_FILE = '_store.json';
-const isSegmentFile = (f: string): boolean => f.endsWith('.seg') || f.endsWith('.json');
-const idFromFile = (f: string): string =>
-  f.endsWith('.seg') ? f.slice(0, -4) : f.endsWith('.json') ? f.slice(0, -5) : f;
 
 ErrorManager.registerMany('Store', [
   { short: 'STO_LOCK', description: "Store: lock must be 'pid' or 'off'", rules: { lock: 'string' } },
@@ -351,9 +348,8 @@ export class Store {
 
   loadSegment(journalName: string, segmentId: string): Segment | null {
     const cacheKey = `${journalName}:${segmentId}`;
-    if (this.segmentCache.has(cacheKey)) {
-      return this.segmentCache.get(cacheKey)!;
-    }
+    const cached = this.segmentCache.get(cacheKey);
+    if (cached) return cached;
     // The file may be .seg (v3) or .json (v1/v2) — try both
     const dir = path.join(this.journalsDir, journalName);
     for (const ext of ['.seg', '.json']) {

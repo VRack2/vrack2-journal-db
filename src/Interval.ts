@@ -75,15 +75,15 @@ export class Interval {
       if (token === '-') { sign = -1; continue; }
       if (token === '+') { sign = 1; continue; }
       if (token === '') continue;
-      result +=  this.prepareInterval(token, now) * sign;
+      result += this.prepareInterval(token, now) * sign;
     }
     return result;
   }
 
-  protected static prepareInterval(token:string, now:number){
-      if (token === 'now') return now;
-      if (/^\d+$/.test(token)) return parseInt(token, 10); 
-      return Interval.parseInterval(token);
+  protected static prepareInterval(token: string, now: number): number {
+    if (token === 'now') return now;
+    if (/^\d+$/.test(token)) return parseInt(token, 10);
+    return Interval.parseInterval(token);
   }
 
 

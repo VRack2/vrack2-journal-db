@@ -32,6 +32,15 @@ interface FieldAcc {
   max: number;
 }
 
+/** Final value of a field aggregate (count === 0 is handled by the caller). */
+const AGG_VALUE: Record<AggFn, (a: FieldAcc) => number> = {
+  count: a => a.count,
+  sum: a => a.sum,
+  min: a => a.min,
+  max: a => a.max,
+  avg: a => a.sum / a.count,
+};
+
 /** One (bucket, dims) group being accumulated. */
 interface Group {
   bucket: number;
@@ -79,13 +88,21 @@ export class Rollup {
       case 'count':
         return vals.length;
       case 'sum':
-        return vals.reduce((a, b) => a + b, 0);
+      case 'avg': {
+        // One pass: avg reuses the sum.
+        let sum = 0;
+        for (const v of vals) sum += v;
+        return fn === 'avg' ? sum / vals.length : sum;
+      }
       case 'min':
-        return Math.min(...vals);
-      case 'max':
-        return Math.max(...vals);
-      case 'avg':
-        return vals.reduce((a, b) => a + b, 0) / vals.length;
+      case 'max': {
+        // Loops, not Math.min(...vals): spreading millions of values overflows the call stack.
+        let m = fn === 'min' ? Infinity : -Infinity;
+        for (const v of vals) {
+          if (fn === 'min' ? v < m : v > m) m = v;
+        }
+        return m;
+      }
     }
   }
 
@@ -136,27 +153,7 @@ export class Rollup {
           const outRow: Row = { ts: g.bucket, ...g.dims };
           for (const f of aggFields) {
             const a = g.acc[f];
-            if (a.count === 0) {
-              outRow[f] = null;
-              continue;
-            }
-            switch (agg[f]) {
-              case 'count':
-                outRow[f] = a.count;
-                break;
-              case 'sum':
-                outRow[f] = a.sum;
-                break;
-              case 'min':
-                outRow[f] = a.min;
-                break;
-              case 'max':
-                outRow[f] = a.max;
-                break;
-              case 'avg':
-                outRow[f] = a.sum / a.count;
-                break;
-            }
+            outRow[f] = a.count === 0 ? null : AGG_VALUE[agg[f]](a);
           }
           out.push(outRow);
         }
