@@ -14,6 +14,23 @@ export class RLEColumn extends Column {
   runs: RLERun[] = [];
   offsets: number[] = [];
 
+  distinct(limit: number): (string | number | boolean | null)[] | null {
+    const seen: (string | number | boolean | null)[] = [];
+    const known = new Set<string>();
+    for (const r of this.runs) {
+      const v = r.value;
+      let key: string;
+      if (v === null || v === undefined) key = '\0n';
+      else if (typeof v === 'object') return null;
+      else key = typeof v + ':' + String(v);
+      if (known.has(key)) continue;
+      known.add(key);
+      seen.push(v === undefined ? null : (v as string | number | boolean));
+      if (seen.length > limit) return null;
+    }
+    return seen;
+  }
+
   append(value: JsonValue): void {
     const last = this.runs.length - 1;
     if (last >= 0 && this.runs[last].value === value) {

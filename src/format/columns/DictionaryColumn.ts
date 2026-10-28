@@ -39,6 +39,17 @@ export class DictionaryColumn extends Column {
     return this.dictionary[this.data[i]];
   }
 
+  distinct(limit: number): (string | number | boolean | null)[] | null {
+    if (this.dictionary.length > limit) return null;
+    const out: (string | number | boolean | null)[] = [];
+    for (const v of this.dictionary) {
+      if (v === null || v === undefined) out.push(null);
+      else if (typeof v === 'object') return null;
+      else out.push(v as string | number | boolean);
+    }
+    return out;
+  }
+
   serialize(): SerializedColumn {
     return { type: 'dictionary', dictionary: this.dictionary, data: this.data };
   }

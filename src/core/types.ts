@@ -133,6 +133,19 @@ export interface ColumnSummary {
   count: number;
 }
 
+/** Primitive value domain of a cluster dimension column (DimSummary set). */
+export type DimPrimitive = string | number | boolean | null;
+
+/**
+ * Per-segment summary of a cluster dimension column, used by scan skips.
+ * 'set'  — the exact value set (only when primitive and |set| ≤ DIM_SET_LIMIT;
+ *          may be a physical superset of the logical values — safe for skips).
+ * 'range'— min/max over all numeric values in the segment's rows.
+ */
+export type DimSummary =
+  | { t: 'set'; v: DimPrimitive[] }
+  | { t: 'range'; min: number; max: number };
+
 /** Downsampling bucket: bounds + `field` aggregates in the bucket.
  *  Only the requested functions are present (and always `count`). */
 export interface DownsampleBucket {

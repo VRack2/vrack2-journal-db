@@ -69,6 +69,26 @@ export class AutoColumn extends Column {
     return this.delegate!.get(i);
   }
 
+  distinct(limit: number): (string | number | boolean | null)[] | null {
+    if (!this.decided) {
+      // Undecided: samples ARE the whole column — exact distinct set.
+      const seen: (string | number | boolean | null)[] = [];
+      const known = new Set<string>();
+      for (const v of this.samples) {
+        let key: string;
+        if (v === null || v === undefined) key = '\0n';
+        else if (typeof v === 'object') return null;
+        else key = typeof v + ':' + String(v);
+        if (known.has(key)) continue;
+        known.add(key);
+        seen.push(v === undefined ? null : (v as string | number | boolean));
+        if (seen.length > limit) return null;
+      }
+      return seen;
+    }
+    return this.delegate!.distinct(limit);
+  }
+
   serialize(): SerializedColumn {
     if (!this.decided) {
       return { type: 'auto', decided: false, samples: this.samples };

@@ -37,6 +37,18 @@ export abstract class Column {
   abstract serialize(): SerializedColumn;
   abstract deserialize(data: SerializedColumn): void;
 
+  /**
+   * Distinct primitive values of this column, capped at `limit`: return null
+   * when the column has more than `limit` distinct values or any non-primitive
+   * value. The set may be a PHYSICAL superset of the logical values (dictionary
+   * backing) — callers use it only conservatively (segment skips).
+   * Base returns null: only columns with free distinct metadata override this.
+   */
+  distinct(limit: number): (string | number | boolean | null)[] | null {
+    void limit;
+    return null;
+  }
+
   // --------------------------------------------------
   // v3 binary blob encoding (values-driven, format-neutral)
   // --------------------------------------------------
