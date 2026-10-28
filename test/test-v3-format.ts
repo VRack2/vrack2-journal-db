@@ -7,14 +7,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/Journal.ts';
-import { Segment } from '../src/Segment.ts';
-import { SegmentFileV2 } from '../src/SegmentFileV2.ts';
-import { SegmentFileV3 } from '../src/SegmentFileV3.ts';
-import { Compression } from '../src/Compression.ts';
-import { NumCodecs } from '../src/numcodecs/NumCodecs.ts';
+import { Journal } from '../src/journal/Journal.ts';
+import { Segment } from '../src/format/Segment.ts';
+import { SegmentFileV2 } from '../src/format/SegmentFileV2.ts';
+import { SegmentFileV3 } from '../src/format/SegmentFileV3.ts';
+import { Compression } from '../src/core/Compression.ts';
+import { NumCodecs } from '../src/format/numcodecs/NumCodecs.ts';
 import ErrorManager from '../src/errors/ErrorManager.ts';
-import type { Schema } from '../src/types.ts';
+import type { Schema } from '../src/core/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.join(__dirname, '..', 'test-data', 'v3');

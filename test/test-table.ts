@@ -7,11 +7,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Store } from '../src/Store.ts';
-import { Table, parseRetention } from '../src/Table.ts';
-import { Rollup } from '../src/Rollup.ts';
+import { Store } from '../src/store/Store.ts';
+import { Table, parseRetention } from '../src/table/Table.ts';
+import { Rollup } from '../src/metric/Rollup.ts';
 import { defineLogTable, defineUpsertTable } from '../src/compaction/define.ts';
-import type { Row } from '../src/types.ts';
+import type { Row } from '../src/core/types.ts';
 
 let passed = 0;
 let failed = 0;

@@ -2,7 +2,7 @@
 // Distinct values are stored once; data holds indices.
 
 import { Column } from './Column.ts';
-import type { DictionaryColumnData, JsonValue, SerializedColumn } from '../types.ts';
+import type { DictionaryColumnData, JsonValue, SerializedColumn } from '../../core/types.ts';
 
 export class DictionaryColumn extends Column {
   dictionary: JsonValue[] = [];

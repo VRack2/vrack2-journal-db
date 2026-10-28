@@ -7,7 +7,7 @@ import { RawColumn } from './RawColumn.ts';
 import { DictionaryColumn } from './DictionaryColumn.ts';
 import { DeltaColumn } from './DeltaColumn.ts';
 import { RLEColumn } from './RLEColumn.ts';
-import type { AutoColumnData, JsonValue, SerializedColumn } from '../types.ts';
+import type { AutoColumnData, JsonValue, SerializedColumn } from '../../core/types.ts';
 
 export class AutoColumn extends Column {
   samples: JsonValue[] = [];

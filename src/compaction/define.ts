@@ -18,7 +18,7 @@
 // Validation runs at the define* call — errors are visible at the declaration
 // site, not at the first compact().
 
-import type { AggFn, OpenJournalOptions, ResolutionTier, RetentionTier, Schema } from '../types.ts';
+import type { AggFn, OpenJournalOptions, ResolutionTier, RetentionTier, Schema } from '../core/types.ts';
 import { Descriptor } from './Descriptor.ts';
 import { isAggFn } from '../journal/Aggregation.ts';
 import ErrorManager from '../errors/ErrorManager.ts';

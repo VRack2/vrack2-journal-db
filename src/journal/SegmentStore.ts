@@ -7,11 +7,11 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Segment } from '../Segment.ts';
-import { LRUCache } from '../LRUCache.ts';
-import { SegmentFile } from '../SegmentFile.ts';
+import { Segment } from '../format/Segment.ts';
+import { LRUCache } from '../core/LRUCache.ts';
+import { SegmentFile } from '../format/SegmentFile.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
-import type { Row } from '../types.ts';
+import type { Row } from '../core/types.ts';
 import { LOCK_FILE, META_SUFFIX, SEG_V3_EXT, WAL_FILE, idFromFile, isSegmentFile } from './constants.ts';
 import { parseSegmentMeta, type SegmentMeta } from './SegmentMeta.ts';
 import type { SegmentEncoder } from './SegmentEncoder.ts';

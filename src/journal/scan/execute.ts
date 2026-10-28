@@ -1,9 +1,9 @@
 // execute.ts — runs a compiled ScanPlan over a journal's segments (vectorized:
 // column-at-a-time access, .meta skipping, summaries fast path, early stop).
 
-import type { Column } from '../../columns/Column.ts';
-import type { Segment } from '../../Segment.ts';
-import type { Row } from '../../types.ts';
+import type { Column } from '../../format/columns/Column.ts';
+import type { Segment } from '../../format/Segment.ts';
+import type { Row } from '../../core/types.ts';
 import { addSummary, addValue, aggValue, newAcc, scanAggregate, type AggAcc } from '../Aggregation.ts';
 import { metaSkips } from '../SegmentMeta.ts';
 import type { SegmentSource } from '../segmentSource.ts';

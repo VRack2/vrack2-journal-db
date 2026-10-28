@@ -7,8 +7,8 @@ import { RLEColumn } from './RLEColumn.ts';
 import { AutoColumn } from './AutoColumn.ts';
 import { CatchAllColumn } from './CatchAllColumn.ts';
 import { Column } from './Column.ts';
-import type { ColumnType } from '../types.ts';
-import ErrorManager from '../errors/ErrorManager.ts';
+import type { ColumnType } from '../../core/types.ts';
+import ErrorManager from '../../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('ColumnFactory', [
   { short: 'COL_TYPE_UNKNOWN', description: 'Unknown column type', rules: { type: 'string' } },

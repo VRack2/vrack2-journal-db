@@ -13,7 +13,7 @@ import { DoubleDeltaCodec } from './DoubleDeltaCodec.ts';
 import { GorillaCodec } from './GorillaCodec.ts';
 import { RleCodec } from './RleCodec.ts';
 import type { NumCodec } from './types.ts';
-import ErrorManager from '../errors/ErrorManager.ts';
+import ErrorManager from '../../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('NumCodecs', [
   { short: 'NC_CODEC_UNKNOWN', description: 'Unknown numeric codec', rules: { name: 'string' } },

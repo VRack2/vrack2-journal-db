@@ -9,9 +9,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/Journal.ts';
-import { SegmentFileV3 } from '../src/SegmentFileV3.ts';
-import type { Row, Schema } from '../src/types.ts';
+import { Journal } from '../src/journal/Journal.ts';
+import { SegmentFileV3 } from '../src/format/SegmentFileV3.ts';
+import type { Row, Schema } from '../src/core/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.join(__dirname, '..', 'test-data', 'migration');

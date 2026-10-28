@@ -1,7 +1,7 @@
 // shutdown.ts — process-level registry of open journals: on exit/SIGINT/SIGTERM
 // every open journal's WAL is drained so no acknowledged row is lost.
 
-import type { Journal } from '../Journal.ts';
+import type { Journal } from './Journal.ts';
 
 const activeJournals = new Set<Journal>();
 let shutdownHooksInstalled = false;

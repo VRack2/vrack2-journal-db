@@ -9,8 +9,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/Journal.ts';
-import type { AggFn, Row, Schema, ScanOp, ScanWhere } from '../src/types.ts';
+import { Journal } from '../src/journal/Journal.ts';
+import type { AggFn, Row, Schema, ScanOp, ScanWhere } from '../src/core/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.join(__dirname, '..', 'test-data', 'scan');

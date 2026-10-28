@@ -6,7 +6,7 @@
 
 // Row — the base journal row type; re-exported so the compaction/ API
 // (Engine.merge, etc.) is self-contained.
-export type { Row } from '../types.ts';
+export type { Row } from '../core/types.ts';
 
 /** Compaction engine identifiers. */
 export type EngineKind = 'log' | 'upsert' | 'summing' | 'collapsing';

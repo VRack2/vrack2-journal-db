@@ -2,8 +2,8 @@
 
 import { Column } from './columns/Column.ts';
 import { ColumnFactory } from './columns/ColumnFactory.ts';
-import type { ColumnSummary, JsonValue, Metadata, Row, Schema, SerializedColumn, SerializedSegment } from './types.ts';
-import ErrorManager from './errors/ErrorManager.ts';
+import type { ColumnSummary, JsonValue, Metadata, Row, Schema, SerializedColumn, SerializedSegment } from '../core/types.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('Segment', [
   { short: 'SEG_ROW_OOB', description: 'Segment: logical row index out of range', rules: { index: 'number', max: 'number' } },

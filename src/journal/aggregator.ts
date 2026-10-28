@@ -5,13 +5,13 @@
 // Shared with JournalReader: both take a SegmentSource, so the same code
 // serves the public Journal API and the reader object.
 
-import { Interval } from '../Interval.ts';
-import { Percentile } from '../Percentile.ts';
-import type { Segment } from '../Segment.ts';
+import { Interval } from '../core/Interval.ts';
+import { Percentile } from '../metric/Percentile.ts';
+import type { Segment } from '../format/Segment.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 import type {
   AggregateExpr, AggFn, DownsampleBucket, TimelineBucket,
-} from '../types.ts';
+} from '../core/types.ts';
 import { addSummary, addValue, aggValue, isAggFn, newAcc, scanAggregate, type AggAcc } from './Aggregation.ts';
 import { metaSkips, type SegmentMeta } from './SegmentMeta.ts';
 import type { SegmentSource } from './segmentSource.ts';

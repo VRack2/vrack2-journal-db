@@ -1,6 +1,6 @@
 // columns/Column.ts — Base abstract column class
 
-import type { JsonValue, SerializedColumn } from '../types.ts';
+import type { JsonValue, SerializedColumn } from '../../core/types.ts';
 
 /** Base column class. */
 export abstract class Column {

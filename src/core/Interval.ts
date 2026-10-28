@@ -7,7 +7,7 @@
 //   'now-1d' 'now+1h' 'now-1h-1m'           — relative point (→ ms)
 //   'now-7d:now'                            — period [start, end] (→ ms)
 
-import ErrorManager from './errors/ErrorManager.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
 
 /** Time unit → ms (mapping matches VRackDB: mon=30d, y=365d). */
 const UNIT_MS: Record<string, number> = {

@@ -4,8 +4,8 @@
 // are computed at serialization time).
 
 import { Column } from './Column.ts';
-import type { DeltaColumnData, JsonValue, SerializedColumn } from '../types.ts';
-import ErrorManager from '../errors/ErrorManager.ts';
+import type { DeltaColumnData, JsonValue, SerializedColumn } from '../../core/types.ts';
+import ErrorManager from '../../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('DeltaColumn', [
   { short: 'COL_DELTA_TYPE', description: 'DeltaColumn.append: a number is expected', rules: { value: 'string' } },

@@ -16,11 +16,11 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Interval } from './Interval.ts';
-import { Journal } from './Journal.ts';
-import { Percentile } from './Percentile.ts';
-import { Rollup } from './Rollup.ts';
-import type { RollupConfig } from './Rollup.ts';
+import { Interval } from '../core/Interval.ts';
+import { Journal } from '../journal/Journal.ts';
+import { Percentile } from '../metric/Percentile.ts';
+import { Rollup } from '../metric/Rollup.ts';
+import type { RollupConfig } from '../metric/Rollup.ts';
 import type {
   AggFn,
   AggregateExpr,
@@ -36,14 +36,14 @@ import type {
   TableTierStat,
   TimelineBucket,
   TruncateResult,
-} from './types.ts';
-import type { AnyTableDef, TableRuntime } from './compaction/define.ts';
-import { Descriptor, ENGINE_META_KEY } from './compaction/Descriptor.ts';
-import { RetentionEngine } from './RetentionEngine.ts';
-import type { ApplyReport, ConversionPlan, ScanWhere, TierStatus } from './types.ts';
-import ErrorManager from './errors/ErrorManager.ts';
-import { isAggFn } from './journal/Aggregation.ts';
-import { isScanOp, whereOne } from './journal/scan/plan.ts';
+} from '../core/types.ts';
+import type { AnyTableDef, TableRuntime } from '../compaction/define.ts';
+import { Descriptor, ENGINE_META_KEY } from '../compaction/Descriptor.ts';
+import { RetentionEngine } from '../journal/RetentionEngine.ts';
+import type { ApplyReport, ConversionPlan, ScanWhere, TierStatus } from '../core/types.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
+import { isAggFn } from '../journal/Aggregation.ts';
+import { isScanOp, whereOne } from '../journal/scan/plan.ts';
 
 ErrorManager.registerMany('Table', [
   { short: 'TBL_SCAN_AGG', description: 'Table: scan — agg/groupBy in tier mode: use aggregate()' },

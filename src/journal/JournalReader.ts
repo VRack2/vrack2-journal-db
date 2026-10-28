@@ -8,12 +8,12 @@
 // Self-contained: it works on the SegmentStore plus accessors for the active
 // segment and schema — no reference to the Journal.
 
-import { Interval } from '../Interval.ts';
-import type { Segment } from '../Segment.ts';
+import { Interval } from '../core/Interval.ts';
+import type { Segment } from '../format/Segment.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 import type {
   AggregateExpr, AggFn, DownsampleBucket, Row, ScanOptions, Schema, TimelineBucket,
-} from '../types.ts';
+} from '../core/types.ts';
 import { aggregate, downsample, percentileOf, timeline } from './aggregator.ts';
 import { metaSkips, type SegmentMeta } from './SegmentMeta.ts';
 import type { SegmentSource } from './segmentSource.ts';

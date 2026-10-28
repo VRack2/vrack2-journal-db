@@ -1,7 +1,7 @@
 // columns/RawColumn.ts — Storage "as-is"
 
 import { Column } from './Column.ts';
-import type { JsonValue, RawColumnData, SerializedColumn } from '../types.ts';
+import type { JsonValue, RawColumnData, SerializedColumn } from '../../core/types.ts';
 
 export class RawColumn extends Column {
   data: JsonValue[] = [];

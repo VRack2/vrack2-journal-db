@@ -3,10 +3,10 @@
 // Owns the format/compression/codecs config so SegmentStore, RetentionEngine
 // and the v3 migration never reach into the Journal for it.
 
-import { SegmentFileV2 } from '../SegmentFileV2.ts';
-import { SegmentFileV3 } from '../SegmentFileV3.ts';
-import type { Segment } from '../Segment.ts';
-import type { CompressionMode, SegmentFormat } from '../types.ts';
+import { SegmentFileV2 } from '../format/SegmentFileV2.ts';
+import { SegmentFileV3 } from '../format/SegmentFileV3.ts';
+import type { Segment } from '../format/Segment.ts';
+import type { CompressionMode, SegmentFormat } from '../core/types.ts';
 import { SEG_V2_EXT, SEG_V3_EXT } from './constants.ts';
 
 export class SegmentEncoder {

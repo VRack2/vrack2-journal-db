@@ -9,8 +9,8 @@
 // list of values. This lets Table feed rows page-by-page and keep peak memory
 // bounded by the number of buckets, not by the number of input rows.
 
-import { Interval } from './Interval.ts';
-import type { AggFn, JsonValue, Row } from './types.ts';
+import { Interval } from '../core/Interval.ts';
+import type { AggFn, JsonValue, Row } from '../core/types.ts';
 
   /**
    * Explicit rollup configuration: how to aggregate a fine tier into the target (res).

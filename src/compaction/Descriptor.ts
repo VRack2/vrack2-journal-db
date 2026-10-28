@@ -6,7 +6,7 @@
 // Serialization (toMeta / fromMeta) — part of the description itself,
 // so it lives here, not in types.ts and not in scattered functions.
 
-import type { JsonObject } from '../types.ts';
+import type { JsonObject } from '../core/types.ts';
 import type { EngineKind } from './types.ts';
 
   /** Key in the journal metadata where the engine descriptor is stored. */

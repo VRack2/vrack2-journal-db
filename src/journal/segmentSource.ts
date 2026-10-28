@@ -2,7 +2,7 @@
 // Implemented by JournalReader; kept in a shared file so scan/execute.ts and
 // aggregator.ts can depend on it without importing JournalReader (no cycle).
 
-import type { Segment } from '../Segment.ts';
+import type { Segment } from '../format/Segment.ts';
 import type { SegmentMeta } from './SegmentMeta.ts';
 
 export interface SegmentSource {

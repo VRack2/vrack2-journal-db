@@ -1,7 +1,7 @@
 // SegmentMeta.ts — the per-segment .meta sidecar: min/max ts + row counts.
 // Time-range queries use it to skip whole files without loading them.
 
-import type { ColumnSummary } from '../types.ts';
+import type { ColumnSummary } from '../core/types.ts';
 
 export interface SegmentMeta {
   minTs: number | null;

@@ -3,7 +3,7 @@
 
 import fs from 'node:fs';
 import ErrorManager from '../errors/ErrorManager.ts';
-import type { LockMode } from '../types.ts';
+import type { LockMode } from '../core/types.ts';
 
 export class JournalLock {
   /** Acquire the lock at lockPath; throws JRN_LOCKED when held by a live process. */

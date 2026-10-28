@@ -21,7 +21,7 @@
 import zlib from 'node:zlib';
 import { Segment } from './Segment.ts';
 import { RawColumn } from './columns/RawColumn.ts';
-import { Compression } from './Compression.ts';
+import { Compression } from '../core/Compression.ts';
 import { NumCodecs } from './numcodecs/NumCodecs.ts';
 import type {
   ColumnSummary,
@@ -29,8 +29,8 @@ import type {
   JsonValue,
   Metadata,
   Schema,
-} from './types.ts';
-import ErrorManager from './errors/ErrorManager.ts';
+} from '../core/types.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('SegmentFileV3', [
   { short: 'SFW3_NOT_V3', description: 'decodeV3: buffer is not a v3 segment' },

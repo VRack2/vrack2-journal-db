@@ -12,13 +12,13 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Journal, DEFAULT_ROWS_PER_SEGMENT, DEFAULT_COMPACT_MIN_SEGMENTS, isSegmentFile, idFromFile } from './Journal.ts';
-import type { Segment } from './Segment.ts';
-import { LRUCache } from './LRUCache.ts';
-import { SegmentFile } from './SegmentFile.ts';
-import { Compression } from './Compression.ts';
-import { ColumnFactory } from './columns/ColumnFactory.ts';
-import { Table } from './Table.ts';
+import { Journal, DEFAULT_ROWS_PER_SEGMENT, DEFAULT_COMPACT_MIN_SEGMENTS, isSegmentFile, idFromFile } from '../journal/Journal.ts';
+import type { Segment } from '../format/Segment.ts';
+import { LRUCache } from '../core/LRUCache.ts';
+import { SegmentFile } from '../format/SegmentFile.ts';
+import { Compression } from '../core/Compression.ts';
+import { ColumnFactory } from '../format/columns/ColumnFactory.ts';
+import { Table } from '../table/Table.ts';
 import type {
   ColumnType,
   CompressionMode,
@@ -29,12 +29,12 @@ import type {
   SegmentFormat,
   StoreOptions,
   StoreStats,
-} from './types.ts';
-import { ENGINE_META_KEY } from './compaction/Descriptor.ts';
-import { engineDescriptorOf } from './compaction/define.ts';
-import type { AnyTableDef, LogTableDef, TableDescription, TableRuntime } from './compaction/define.ts';
-import type { EngineKind } from './compaction/types.ts';
-import ErrorManager from './errors/ErrorManager.ts';
+} from '../core/types.ts';
+import { ENGINE_META_KEY } from '../compaction/Descriptor.ts';
+import { engineDescriptorOf } from '../compaction/define.ts';
+import type { AnyTableDef, LogTableDef, TableDescription, TableRuntime } from '../compaction/define.ts';
+import type { EngineKind } from '../compaction/types.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
 
 const MANIFEST_FILE = '_store.json';
 
@@ -396,6 +396,3 @@ export class Store {
     };
   }
 }
-
-// Re-export — so Store can be used in Table types without a circular import.
-export { ENGINE_META_KEY };

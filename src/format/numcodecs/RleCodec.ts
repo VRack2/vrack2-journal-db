@@ -2,7 +2,7 @@
 // [runsCount u32] [value i64][count u32] ...
 
 import type { NumCodec } from './types.ts';
-import ErrorManager from '../errors/ErrorManager.ts';
+import ErrorManager from '../../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('RleCodec', [
   { short: 'NC_RLE_NOT_INT', description: 'RleCodec: value is not an integer — rle is for integers only', rules: { value: 'number' } },

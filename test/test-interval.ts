@@ -2,7 +2,7 @@
 // test-interval.ts — Interval: «язык интервалов» (VRackDB-совместимо, в мс)
 // ============================================================
 
-import { Interval } from '../src/Interval.ts';
+import { Interval } from '../src/core/Interval.ts';
 
 let passed = 0;
 let failed = 0;

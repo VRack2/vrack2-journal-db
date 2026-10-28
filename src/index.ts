@@ -7,9 +7,9 @@
 
 // --- values -------------------------------------------------
 
-export { Store } from './Store.ts';
-export { Table } from './Table.ts';
-export { Interval } from './Interval.ts';
+export { Store } from './store/Store.ts';
+export { Table } from './table/Table.ts';
+export { Interval } from './core/Interval.ts';
 export {
   defineLogTable,
   defineUpsertTable,
@@ -34,7 +34,7 @@ export type {
   TimelineBucket,
   RollupReport,
   TruncateResult
-} from './types.ts';
+} from './core/types.ts';
 
 export type {
   AnyTableDef,

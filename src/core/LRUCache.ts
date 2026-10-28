@@ -1,4 +1,4 @@
-import ErrorManager from './errors/ErrorManager.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('LRUCache', [
   { short: 'LRU_MAXSIZE', description: 'LRUCache: maxSize must be an integer >= 1', rules: { maxSize: 'number' } },

@@ -13,14 +13,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Store } from '../src/Store.ts';
+import { Store } from '../src/store/Store.ts';
 import {
   defineLogTable,
   defineUpsertTable,
   defineSummingTable,
   defineCollapsingTable
 } from '../src/compaction/define.ts';
-import type { Row } from '../src/types.ts';
+import type { Row } from '../src/core/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.join(__dirname, '..', 'test-data', 'engines');

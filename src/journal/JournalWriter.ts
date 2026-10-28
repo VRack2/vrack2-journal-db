@@ -3,8 +3,8 @@
 // durable and rolls to a fresh one.
 
 import path from 'node:path';
-import type { Segment } from '../Segment.ts';
-import type { Row } from '../types.ts';
+import type { Segment } from '../format/Segment.ts';
+import type { Row } from '../core/types.ts';
 import { WAL_FILE } from './constants.ts';
 import { Wal } from './Wal.ts';
 

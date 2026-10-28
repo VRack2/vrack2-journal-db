@@ -19,13 +19,13 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Compression } from './Compression.ts';
-import { Interval } from './Interval.ts';
-import { Segment } from './Segment.ts';
+import { Compression } from '../core/Compression.ts';
+import { Interval } from '../core/Interval.ts';
+import { Segment } from '../format/Segment.ts';
 import { RetentionEngine } from './RetentionEngine.ts';
-import ErrorManager from './errors/ErrorManager.ts';
-import { ENGINE_META_KEY, Descriptor } from './compaction/Descriptor.ts';
-import { makeEngine } from './journal/engineFactory.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
+import { ENGINE_META_KEY, Descriptor } from '../compaction/Descriptor.ts';
+import { makeEngine } from './engineFactory.ts';
 import {
   DEFAULT_COMPACT_MIN_SEGMENTS,
   DEFAULT_ROWS_PER_SEGMENT,
@@ -33,25 +33,25 @@ import {
   LOCK_FILE,
   idFromFile,
   isSegmentFile,
-} from './journal/constants.ts';
-import './journal/errors.ts';
-import { SegmentEncoder } from './journal/SegmentEncoder.ts';
-import { SegmentStore } from './journal/SegmentStore.ts';
-import { JournalWriter } from './journal/JournalWriter.ts';
-import { JournalReader } from './journal/JournalReader.ts';
-import { AutoCompactor } from './journal/AutoCompactor.ts';
-import { JournalLock } from './journal/JournalLock.ts';
-import { trackJournal, untrackJournal } from './journal/shutdown.ts';
-import { detectSegmentFormat } from './journal/segmentFormat.ts';
+} from './constants.ts';
+import './errors.ts';
+import { SegmentEncoder } from './SegmentEncoder.ts';
+import { SegmentStore } from './SegmentStore.ts';
+import { JournalWriter } from './JournalWriter.ts';
+import { JournalReader } from './JournalReader.ts';
+import { AutoCompactor } from './AutoCompactor.ts';
+import { JournalLock } from './JournalLock.ts';
+import { trackJournal, untrackJournal } from './shutdown.ts';
+import { detectSegmentFormat } from './segmentFormat.ts';
 import type {
   AggregateExpr, AggFn, CompactResult, CompressionMode,
   DownsampleBucket, JournalOptions, JournalStats, LockMode,
   Metadata, PurgeResult, RetentionTier, Row, ScanOptions,
   Schema, SegmentFormat, TimelineBucket,
-} from './types.ts';
+} from '../core/types.ts';
 
 // Back-compat re-exports (these historically lived in Journal.ts).
-export { DEFAULT_COMPACT_MIN_SEGMENTS, DEFAULT_ROWS_PER_SEGMENT, idFromFile, isSegmentFile } from './journal/constants.ts';
+export { DEFAULT_COMPACT_MIN_SEGMENTS, DEFAULT_ROWS_PER_SEGMENT, idFromFile, isSegmentFile } from './constants.ts';
 
 export class Journal {
   readonly baseDir: string;

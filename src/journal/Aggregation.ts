@@ -1,8 +1,8 @@
 // aggregation.ts — min/max/sum/count accumulators shared by
 // aggregate() / downsample() / scan(agg), plus the agg-fn vocabulary.
 
-import type { Segment } from '../Segment.ts';
-import type { AggFn, ColumnSummary } from '../types.ts';
+import type { Segment } from '../format/Segment.ts';
+import type { AggFn, ColumnSummary } from '../core/types.ts';
 
 export interface AggAcc {
   min: number;

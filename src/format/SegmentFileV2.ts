@@ -10,9 +10,9 @@
 // detected by the absence of magic bytes. Writes are always v2.
 
 import zlib from 'node:zlib';
-import { Compression } from './Compression.ts';
-import type { SerializedSegment } from './types.ts';
-import ErrorManager from './errors/ErrorManager.ts';
+import { Compression } from '../core/Compression.ts';
+import type { SerializedSegment } from '../core/types.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('SegmentFileV2', [
   { short: 'SFW_PARSE', description: 'Failed to read segment (v1 JSON)', rules: { reason: 'string' } },

@@ -6,9 +6,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/Journal.ts';
+import { Journal } from '../src/journal/Journal.ts';
 import ErrorManager from '../src/errors/ErrorManager.ts';
-import type { Schema } from '../src/types.ts';
+import type { Schema } from '../src/core/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.join(__dirname, '..', 'test-data', 'durability');

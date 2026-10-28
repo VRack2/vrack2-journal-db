@@ -21,9 +21,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { Segment } from './Segment.ts';
-import { SegmentFileV3 } from './SegmentFileV3.ts';
-import type { CompressionKind } from './types.ts';
+import { Segment } from '../format/Segment.ts';
+import { SegmentFileV3 } from '../format/SegmentFileV3.ts';
+import type { CompressionKind } from '../core/types.ts';
 import type {
   ApplyReport,
   CompactTierReport,
@@ -31,10 +31,10 @@ import type {
   RetentionTier,
   SegmentEncoding,
   TierStatus,
-} from './types.ts';
-import ErrorManager from './errors/ErrorManager.ts';
-import { SEG_V3_EXT } from './journal/constants.ts';
-import type { SegmentStore } from './journal/SegmentStore.ts';
+} from '../core/types.ts';
+import ErrorManager from '../errors/ErrorManager.ts';
+import { SEG_V3_EXT } from './constants.ts';
+import type { SegmentStore } from './SegmentStore.ts';
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;

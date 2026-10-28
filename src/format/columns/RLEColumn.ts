@@ -3,8 +3,8 @@
 // for O(log n) access to an arbitrary position
 
 import { Column } from './Column.ts';
-import type { JsonValue, RLEColumnData, RLERun, SerializedColumn } from '../types.ts';
-import ErrorManager from '../errors/ErrorManager.ts';
+import type { JsonValue, RLEColumnData, RLERun, SerializedColumn } from '../../core/types.ts';
+import ErrorManager from '../../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('RLEColumn', [
   { short: 'COL_RLE_BOUNDS', description: 'RLEColumn: index out of range', rules: { index: 'number' } },

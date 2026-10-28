@@ -1,10 +1,10 @@
 // plan.ts — the scan parser: validates a ScanOptions and compiles it into a
 // flat ScanPlan that execute.ts can run without any further validation.
 
-import { Interval } from '../../Interval.ts';
+import { Interval } from '../../core/Interval.ts';
 import ErrorManager from '../../errors/ErrorManager.ts';
 import { isAggFn } from '../Aggregation.ts';
-import type { AggFn, JsonValue, ScanOp, ScanOptions, Schema } from '../../types.ts';
+import type { AggFn, JsonValue, ScanOp, ScanOptions, Schema } from '../../core/types.ts';
 
 export interface ScanPlan {
   start: number | null;

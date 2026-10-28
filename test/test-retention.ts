@@ -8,9 +8,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Journal } from '../src/Journal.ts';
-import { RetentionEngine } from '../src/RetentionEngine.ts';
-import type { Schema, RetentionTier, Row } from '../src/types.ts';
+import { Journal } from '../src/journal/Journal.ts';
+import { RetentionEngine } from '../src/journal/RetentionEngine.ts';
+import type { Schema, RetentionTier, Row } from '../src/core/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const baseDir = path.join(__dirname, '..', 'test-data', 'retention');
