@@ -451,6 +451,7 @@ export class Table {
     start: number | string,
     end: number | string,
     exprs: AggregateExpr[],
+    where?: ScanOptions['where'],
   ): Record<string, number | null> {
     if (!Array.isArray(exprs) || exprs.length === 0) {
       throw ErrorManager.make('TBL_AGG_EXPRS');
@@ -463,22 +464,36 @@ export class Table {
         throw ErrorManager.make('TBL_AGG_EXPR_FN', { fn: String(e.fn) });
       }
     }
-    const rows = this.query(start, end);
-    const fields = [...new Set(exprs.map(e => e.field))];
-    const values: Record<string, number[]> = {};
-    for (const f of fields) values[f] = [];
-    for (const r of rows) {
-      for (const f of fields) {
-        const v = r[f];
-        if (typeof v === 'number' && Number.isFinite(v)) values[f].push(v);
+    if (where) {
+      for (const w of where) {
+        if (!isScanOp(w.op)) throw ErrorManager.make('TBL_WHERE_OP', { op: String(w.op) });
       }
+    }
+    const [startTs, endTs] = Interval.period(start, end, this.now());
+    const aggMap: Record<string, AggFn[]> = {};
+    for (const e of exprs) {
+      const fns = (aggMap[e.field] ??= []);
+      if (!fns.includes(e.fn)) fns.push(e.fn);
+    }
+    // Aggregation runs where it lives: journal scan-agg (segment summaries
+    // fast path) for single-journal tables; per-tier agg scans merged through
+    // Aggregation accumulators in tier mode.
+    let row: Row;
+    if (!this.tiered) {
+      const rows = this.journals[0].scan({
+        start: startTs, end: endTs,
+        ...(where && where.length > 0 ? { where } : {}),
+        agg: aggMap,
+      });
+      row = rows[0] ?? {};
+    } else {
+      const rows = this.tiered.aggregate(startTs, endTs, this.now(), aggMap, where);
+      row = rows[0] ?? {};
     }
     const out: Record<string, number | null> = {};
     for (const e of exprs) {
-      out[`${e.field}_${e.fn}`] =
-        values[e.field].length === 0
-          ? e.fn === 'count' ? 0 : null
-          : Rollup.applyAgg(e.fn, values[e.field]);
+      const v = row[`${e.field}_${e.fn}`];
+      out[`${e.field}_${e.fn}`] = typeof v === 'number' ? v : (e.fn === 'count' ? 0 : null);
     }
     return out;
   }

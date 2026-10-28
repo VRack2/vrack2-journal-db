@@ -5,7 +5,9 @@
 // from it — no dups), coarser tiers cover only their TTL span.
 
 import type { Journal } from '../journal/Journal.ts';
-import type { ResolutionTier, Row, ScanOptions, TimelineBucket } from '../core/types.ts';
+import { keyOf } from '../journal/scan/plan.ts';
+import { Aggregation, type AggAcc } from '../metric/Aggregation.ts';
+import type { AggFn, JsonValue, ResolutionTier, Row, ScanOptions, TimelineBucket } from '../core/types.ts';
 
 export class TieredQuery {
   private readonly journals: Journal[];
@@ -74,6 +76,88 @@ export class TieredQuery {
     const merged = TieredQuery.mergeAsc(lists);
     if (nullTs.length > 0) merged.unshift(...nullTs);
     return merged;
+  }
+
+  /**
+   * Aggregation over the tier windows: each tier journal runs an agg scan
+   * (segment summaries fast path included), then identical groups are merged
+   * through Aggregation accumulators — min/max/sum/count are additive, avg is
+   * rebuilt from sum/count. Output shape matches a journal scan-agg row
+   * (`<field>_<fn>` columns: one row per group, or a single row without groupBy).
+   */
+  aggregate(
+    startTs: number, endTs: number, now: number,
+    agg: Record<string, AggFn[]>,
+    where?: ScanOptions['where'],
+    groupBy?: string[],
+  ): Row[] {
+    const gb = groupBy ?? [];
+    // 'count' is always requested per field — the merge needs per-tier counts
+    // to fold partial min/max/sum correctly; avg additionally needs 'sum'.
+    const req: Record<string, AggFn[]> = {};
+    for (const [field, fns] of Object.entries(agg)) {
+      const set = new Set<AggFn>(fns);
+      set.add('count');
+      if (set.has('avg')) set.add('sum');
+      req[field] = [...set];
+    }
+
+    const groups = new Map<string, { row: Row; accs: Record<string, AggAcc> }>();
+    for (let i = 0; i < this.tiers.length; i++) {
+      const win = this.window(i, startTs, endTs, now);
+      if (win === null) continue;
+      const rows = this.journals[i].scan({
+        start: win.start,
+        end: win.end,
+        ...(where && where.length > 0 ? { where } : {}),
+        ...(gb.length > 0 ? { groupBy: gb } : {}),
+        agg: req,
+      });
+      for (const r of rows) {
+        let key = '';
+        for (const g of gb) key += (key ? '\u0000' : '') + keyOf(r[g] as JsonValue);
+        let g = groups.get(key);
+        if (g === undefined) {
+          const accs: Record<string, AggAcc> = {};
+          for (const f of Object.keys(req)) accs[f] = Aggregation.newAcc();
+          const grow: Row = {};
+          for (const f of gb) grow[f] = r[f] ?? null;
+          g = { row: grow, accs };
+          groups.set(key, g);
+        }
+        for (const field of Object.keys(req)) {
+          const ct = typeof r[`${field}_count`] === 'number' ? (r[`${field}_count`] as number) : 0;
+          if (ct <= 0) continue;
+          const acc = g.accs[field];
+          const mn = r[`${field}_min`];
+          const mx = r[`${field}_max`];
+          const sm = r[`${field}_sum`];
+          if (typeof mn === 'number' && mn < acc.min) acc.min = mn;
+          if (typeof mx === 'number' && mx > acc.max) acc.max = mx;
+          if (typeof sm === 'number') acc.sum += sm;
+          acc.count += ct;
+        }
+      }
+    }
+
+    const out: Row[] = [];
+    for (const g of groups.values()) {
+      const row: Row = { ...g.row };
+      for (const [field, fns] of Object.entries(agg)) {
+        for (const fn of fns) row[`${field}_${fn}`] = Aggregation.value(g.accs[field], fn);
+      }
+      out.push(row);
+    }
+    const firstField = Object.keys(agg)[0];
+    const sortKey = `${firstField}_${agg[firstField][0]}`;
+    out.sort((a, b) => {
+      const av = a[sortKey];
+      const bv = b[sortKey];
+      if (typeof av !== 'number') return 1;
+      if (typeof bv !== 'number') return -1;
+      return av - bv;
+    });
+    return out;
   }
 
   /** Tier window for [startTs, endTs]: finest covers everything, coarser only their TTL span. */

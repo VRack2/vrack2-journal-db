@@ -68,10 +68,11 @@ interface BaseTableDef {
 
   // --- age-based merging rule (tiers/rollup), optional ------------
   /** Retention policy 'res:ttl,res:ttl' (resolution tiers).
-   *  Set → the table is multi-tier (rollup + TTL). Requires an explicit `agg`. */
+   *  Set → the table has retention: a single 'res:ttl' pair is pure TTL
+   *  (no rollup, agg optional); two or more tiers roll up and require `agg`. */
   retention?: string;
   /** Explicit tier array (fine to coarse). Takes precedence over `retention`.
-   *  Set → the table is multi-tier. Requires an explicit `agg`. */
+   *  One tier — TTL only; two or more — rollup, requires an explicit `agg`. */
   tiers?: ResolutionTier[];
   /** Rollup aggregation: field → fn (min|max|sum|avg|count). Required with `retention`. */
   agg?: Record<string, AggFn>;
@@ -186,9 +187,15 @@ function validateBase(cfg: BaseTableDef, kind: string): void {
     throw ErrorManager.make('DEF_COLUMNS_EMPTY', { kind });
   }
   // --- retention/agg/dims --------------------------------------------------
-  if ((cfg.retention !== undefined || cfg.tiers !== undefined)
-    && (!cfg.agg || Object.keys(cfg.agg).length === 0)) {
-    throw ErrorManager.make('DEF_RETENTION_AGG', { kind });
+  // A single-tier retention ('res:ttl') is pure TTL: no rollup pair to merge
+  // into a coarser tier, so no agg is required. Two or more tiers require agg.
+  if (cfg.retention !== undefined || cfg.tiers !== undefined) {
+    const tierCount = cfg.tiers !== undefined
+      ? (Array.isArray(cfg.tiers) ? cfg.tiers.length : 0)
+      : String(cfg.retention).split(',').length;
+    if (tierCount > 1 && (!cfg.agg || Object.keys(cfg.agg).length === 0)) {
+      throw ErrorManager.make('DEF_RETENTION_AGG', { kind });
+    }
   }
   if (cfg.tiers !== undefined) {
     if (!Array.isArray(cfg.tiers) || cfg.tiers.length === 0) {

@@ -11,6 +11,7 @@ import { Store } from '../src/store/Store.ts';
 import { Table, parseRetention } from '../src/table/Table.ts';
 import { Rollup } from '../src/metric/Rollup.ts';
 import { defineLogTable, defineUpsertTable } from '../src/compaction/define.ts';
+import { TieredQuery } from '../src/table/TieredQuery.ts';
 import ErrorManager from '../src/errors/ErrorManager.ts';
 import type { Row } from '../src/core/types.ts';
 
@@ -397,8 +398,8 @@ console.log('\ndefine*Table: валидация:');
     'имя с "/" бросает'
   );
   assertThrows(
-    () => defineLogTable({ name: 'noagg', columns: { ts: 'delta', value: 'auto' }, retention: '5s:1d' }),
-    'retention без agg бросает'
+    () => defineLogTable({ name: 'noagg', columns: { ts: 'delta', value: 'auto' }, retention: '5s:1d,15s:1w' }),
+    'многоуровневый retention без agg бросает'
   );
   assertThrows(
     () => defineLogTable({
@@ -833,6 +834,128 @@ console.log('\nscan() в тир-режиме: pushdown where/select/limit во �
 
   t.close();
   store.closeAll();
+}
+
+
+// --------------------------------------------------
+// Фаза E: single-tier retention (TTL без rollup)
+// --------------------------------------------------
+console.log('\nsingle-tier retention: rollup — no-op, TTL-purge работает:');
+{
+  const dir = tmpDir();
+  const DAY = 86400000;
+  const NOW = 1700000000000;
+  const store = new Store(dir);
+  const t = store.create(defineLogTable({
+    name: 'logs',
+    columns: { ts: 'delta', value: 'auto' },
+    retention: '1s:30d',
+    rowsPerSegment: 10,
+    nowProvider: () => NOW,
+    maintenanceMinIntervalMs: 0,
+  }));
+  assert(t.tiers !== null && t.tiers.length === 1, 'single-tier retention: один тир');
+  for (let i = 0; i < 40; i++) t.append({ ts: NOW - 40 * DAY + i * 1000, value: i });
+  t.flush();
+  const rr = t.rollup();
+  assert(rr.pairs === 0 && rr.rolledRows === 0, 'rollup на single-tier — no-op');
+  assert(t.allRows().length === 0, 'auto-purge срезал строки старше ttl (30d)');
+  t.append({ ts: NOW - 1000, value: 1 });
+  const fresh = t.allRows();
+  assert(fresh.length === 1 && fresh[0].value === 1, 'свежая строка переживает TTL');
+  t.close();
+  store.closeAll();
+}
+
+// --------------------------------------------------
+// Фаза E: aggregate(start,end,exprs,where?) — single и tiered
+// --------------------------------------------------
+console.log('\naggregate с where: single-journal и tiered (merge по тирам):');
+{
+  const DAY = 86400000;
+  const HOUR = 3600000;
+  const NOW = 1700000000000;
+
+  // single journal
+  const dir1 = tmpDir();
+  const store1 = new Store(dir1);
+  const t1 = store1.create(defineLogTable({
+    name: 'simple', columns: { ts: 'delta', host: 'dictionary', value: 'auto' },
+    rowsPerSegment: 5,
+  }));
+  for (let i = 0; i < 20; i++) t1.append({ ts: i * 1000 + 1, host: i % 2 === 0 ? 'a' : 'b', value: i });
+  const valsA: number[] = [];
+  for (const r of t1.allRows()) if (r.host === 'a') valsA.push(r.value as number);
+  const single = t1.aggregate(0, 999999, [
+    { field: 'value', fn: 'min' }, { field: 'value', fn: 'max' },
+    { field: 'value', fn: 'sum' }, { field: 'value', fn: 'avg' }, { field: 'value', fn: 'count' },
+  ], [{ field: 'host', op: 'eq', value: 'a' }]);
+  const sSum = valsA.reduce((s, v) => s + v, 0);
+  assert(single.value_min === Math.min(...valsA) && single.value_max === Math.max(...valsA)
+    && single.value_sum === sSum && single.value_avg === sSum / valsA.length
+    && single.value_count === valsA.length,
+    `aggregate single + where(host=a): ${JSON.stringify(single)}`);
+  const singleNone = t1.aggregate(0, 999999, [{ field: 'value', fn: 'count' }], [{ field: 'host', op: 'eq', value: 'zz' }]);
+  assert(singleNone.value_count === 0, 'aggregate: where без совпадений → count 0');
+  let threwAgg = false;
+  try {
+    t1.aggregate(0, 1, [{ field: 'value', fn: 'eq' as never }]);
+  } catch (e) {
+    threwAgg = ErrorManager.isCode(e, 'TBL_AGG_EXPR_FN');
+  }
+  assert(threwAgg, 'aggregate: невалидный fn → TBL_AGG_EXPR_FN');
+  t1.close();
+  store1.closeAll();
+
+  // tiered: rollup перенёс старые строки в coarse-тир — agg считает по stored-строкам тиров
+  const dir2 = tmpDir();
+  const store2 = new Store(dir2);
+  const t2 = store2.create(defineLogTable({
+    name: 'metrics', columns: { ts: 'delta', host: 'dictionary', value: 'auto' },
+    retention: '1m:1h,10m:30d', agg: { value: 'sum' }, dims: ['host'],
+    rowsPerSegment: 8, nowProvider: () => NOW, autoRollup: false, autoPurge: false,
+  }));
+  // старые (3 дня назад) → уедут во второй тир после rollup; свежие — останутся в первом
+  for (let i = 0; i < 12; i++) t2.append({ ts: NOW - 3 * DAY + i * 60000, host: 'a', value: 100 + i });
+  for (let i = 0; i < 8; i++) t2.append({ ts: NOW - i * 60000, host: 'a', value: i });
+  t2.flush();
+  const moved = t2.rollup();
+  assert(moved.rolledRows > 0, `rollup перенёс старые строки в coarse (${moved.rolledRows})`);
+
+  // baseline: materialized query по всем тирам (stored-строки) — ту же сумму/мин/макс
+  const qrows = t2.query(0, NOW).filter(r => typeof r.value === 'number');
+  const qvals = qrows.map(r => r.value as number);
+  const expectedSum = qvals.reduce((s, v) => s + v, 0);
+  const expectedCount = qvals.length;
+  const tieredAgg = t2.aggregate(0, NOW, [
+    { field: 'value', fn: 'min' }, { field: 'value', fn: 'max' },
+    { field: 'value', fn: 'sum' }, { field: 'value', fn: 'avg' }, { field: 'value', fn: 'count' },
+  ]);
+  assert(tieredAgg.value_sum === expectedSum && tieredAgg.value_count === expectedCount
+    && tieredAgg.value_min === Math.min(...qvals) && tieredAgg.value_max === Math.max(...qvals)
+    && tieredAgg.value_avg === expectedSum / expectedCount,
+    `aggregate tiered = merge agg по тирам (sum=${tieredAgg.value_sum})`);
+
+  // где-фильтр применяется в каждом тире до merge
+  const qrowsW = t2.query(0, NOW).filter(r => typeof r.value === 'number' && (r.value as number) >= 100);
+  const qvalsW = qrowsW.map(r => r.value as number);
+  const tieredAggW = t2.aggregate(0, NOW,
+    [{ field: 'value', fn: 'sum' }, { field: 'value', fn: 'count' }],
+    [{ field: 'value', op: 'ge', value: 100 }]);
+  assert(tieredAggW.value_sum === qvalsW.reduce((s, v) => s + v, 0) && tieredAggW.value_count === qvalsW.length,
+    'aggregate tiered + where(ge 100) — фильтр в тирах перед merge');
+
+  // groupBy merge на уровне TieredQuery: одинаковые ключи групп из разных тиров склеиваются
+  const tq = new TieredQuery(
+    t2.tiers!.map((_, i) => t2.journal(i)),
+    t2.tiers!,
+  );
+  const groups = tq.aggregate(0, NOW, NOW, { value: ['sum', 'count'] }, undefined, ['host']);
+  assert(groups.length === 1 && groups[0].host === 'a' && (groups[0].value_sum as number) === expectedSum,
+    `TieredQuery.aggregate groupBy(host): склейка тиров, got ${JSON.stringify(groups)}`);
+
+  t2.close();
+  store2.closeAll();
 }
 
 console.log(`\nТесты table (Фазы 4-6): ${passed} passed, ${failed} failed`);
