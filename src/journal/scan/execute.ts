@@ -36,12 +36,17 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
   // real ts range, and overlapping ranges let the break cut smaller ts from
   // a later segment); and rows without a numeric ts cannot steal the
   // collection budget — either the ts window rejects them, or every scanned
-  // source has tsCount === rowCount (no ts-less rows anywhere).
+  // source has tsCount === rowCount (no ts-less rows anywhere). Clustered
+  // segments (meta.tsOrdered === false) break the ordering invariant — their
+  // rows follow dimension order, not ts — so early stop additionally requires
+  // every closed segment to be ts-ordered.
   const closedIds = src.sortedClosedIds();
   let rangesDisjoint = true;
   let allTsCovered = true;
+  let tsOrderedAll = true;
   for (let i = 0; i < closedIds.length; i++) {
     const m = src.metaOf(closedIds[i]);
+    if (m !== null && m !== undefined && m.tsOrdered === false) tsOrderedAll = false;
     if (!m || typeof m.minTs !== 'number' || typeof m.maxTs !== 'number' || m.tsCount !== m.rowCount) {
       allTsCovered = false;
       if (!m || typeof m.minTs !== 'number' || typeof m.maxTs !== 'number') rangesDisjoint = false;
@@ -55,7 +60,7 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
   const activeSeg = src.activeSegment;
   if (activeSeg && activeSeg.rowCount > 0 && activeSeg.tsCount !== activeSeg.rowCount) allTsCovered = false;
   const canEarlyStop = !plan.agg && plan.order === 1 && plan.limit !== null
-    && plan.sortKey === 'ts' && rangesDisjoint
+    && plan.sortKey === 'ts' && rangesDisjoint && tsOrderedAll
     && (plan.hasTsFilter || allTsCovered);
 
   const getGroup = (key: string, row: Row): { row: Row; accs: Record<string, AggAcc> } => {
