@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Segment } from '../format/Segment.ts';
 import { LRUCache } from '../core/LRUCache.ts';
+import { AtomicJson } from '../core/AtomicJson.ts';
 import { SegmentFile } from '../format/SegmentFile.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 import type { Row } from '../core/types.ts';
@@ -214,8 +215,7 @@ export class SegmentStore {
     };
     this.meta.set(seg.id, meta);
     const metaPath = path.join(this.pathOf(), `${fileName}${META_SUFFIX}`);
-    fs.writeFileSync(`${metaPath}.tmp`, JSON.stringify(meta));
-    fs.renameSync(`${metaPath}.tmp`, metaPath);
+    AtomicJson.write(metaPath, meta);
   }
 
   /** Remove a closed segment (file + .meta) and all its in-memory state. */

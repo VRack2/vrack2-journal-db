@@ -17,6 +17,7 @@ import type { Segment } from '../format/Segment.ts';
 import { LRUCache } from '../core/LRUCache.ts';
 import { SegmentFile } from '../format/SegmentFile.ts';
 import { Compression } from '../core/Compression.ts';
+import { AtomicJson } from '../core/AtomicJson.ts';
 import { Table } from '../table/Table.ts';
 import type {
   CompressionMode,
@@ -237,15 +238,7 @@ export class Store {
     const manifest = this._readManifest();
     manifest.version = 1;
     manifest.tables[def.name] = def;
-    const p = this._manifestPath();
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    const tmp = `${p}.tmp.${process.pid}`;
-    try {
-      fs.writeFileSync(tmp, JSON.stringify(manifest, null, 2));
-      fs.renameSync(tmp, p);
-    } finally {
-      try { fs.unlinkSync(tmp); } catch {}
-    }
+    AtomicJson.write(this._manifestPath(), manifest, { mkdir: true, uniqueTmp: true, pretty: true });
   }
 
   /**

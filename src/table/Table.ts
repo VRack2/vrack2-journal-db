@@ -13,8 +13,11 @@
 //   t.append({ ts: now, value: 42.3, host: 'web-1' });
 //   t.query('now-30d', 'now');
 //   t.rollup();
+//
+// Tier rules live in TableDef; rollup in RollupManager; tier reads in
+// TieredQuery; append-time throttled upkeep in Maintenance. Table is the
+// facade that wires them over one or more journals.
 
-import fs from 'node:fs';
 import path from 'node:path';
 import { Interval } from '../core/Interval.ts';
 import { Journal } from '../journal/Journal.ts';
@@ -37,26 +40,23 @@ import type {
   TimelineBucket,
   TruncateResult,
 } from '../core/types.ts';
-import type { AnyTableDef, TableRuntime } from '../compaction/define.ts';
+import type { AnyTableDef } from '../compaction/define.ts';
 import { Descriptor, ENGINE_META_KEY } from '../compaction/Descriptor.ts';
 import { RetentionEngine } from '../journal/RetentionEngine.ts';
 import type { ApplyReport, ConversionPlan, ScanWhere, TierStatus } from '../core/types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 import { isAggFn } from '../journal/Aggregation.ts';
 import { isScanOp, whereOne } from '../journal/scan/plan.ts';
+import { TableDef } from './TableDef.ts';
+import { RollupManager } from './RollupManager.ts';
+import { Maintenance, DEFAULT_MAINTENANCE_INTERVAL_MS } from './Maintenance.ts';
+import { TieredQuery } from './TieredQuery.ts';
+
+export type { RollupOneReport } from './RollupManager.ts';
 
 ErrorManager.registerMany('Table', [
   { short: 'TBL_SCAN_AGG', description: 'Table: scan — agg/groupBy in tier mode: use aggregate()' },
   { short: 'TBL_WHERE_OP', description: 'where — unknown operator', rules: { op: 'string' } },
-  { short: 'TBL_RETENTION_STRING', description: 'Table: retention — non-empty string, e.g. "5s:1d,15s:1w,1m:1mon"' },
-  { short: 'TBL_RETENTION_EMPTY', description: 'Table: retention — at least one tier in "res:ttl" form' },
-  { short: 'TBL_RETENTION_TIER_FORMAT', description: 'Table: retention — tier in "res:ttl" format', rules: { part: 'string' } },
-  { short: 'TBL_RETENTION_RES', description: 'Table: retention — resolution', rules: { res: 'string', message: 'string' } },
-  { short: 'TBL_RETENTION_TTL', description: 'Table: retention — ttl', rules: { ttl: 'string', message: 'string' } },
-  { short: 'TBL_RETENTION_RES_POS', description: 'Table: retention — res must be > 0', rules: { part: 'string' } },
-  { short: 'TBL_RETENTION_TTL_POS', description: 'Table: retention — ttl must be > 0', rules: { part: 'string' } },
-  { short: 'TBL_RETENTION_RES_ASC', description: 'Table: retention — resolutions must be non-decreasing left to right (fine → coarse)' },
-  { short: 'TBL_RETENTION_TTL_ASC', description: 'Table: retention — ttl must be non-decreasing left to right' },
   { short: 'TBL_NAME_EMPTY', description: 'Table: name — non-empty string' },
   { short: 'TBL_NAME_SLASH', description: 'Table: name must not contain "/" (tiers are created as <name>/r<res>)' },
   { short: 'TBL_DEF_REQUIRED', description: 'Table: def is required ({ columns: { … } })' },
@@ -70,11 +70,6 @@ ErrorManager.registerMany('Table', [
   { short: 'TBL_MAINT_MIN_INTERVAL', description: 'Table: maintenanceMinIntervalMs — a number >= 0' },
   { short: 'TBL_AGG_NEED_FIELDS', description: 'Table: non-ts fields are required for aggregation', rules: { kind: 'string' } },
   { short: 'TBL_ROLLUP_NEED_FIELDS', description: 'Table: schema must contain at least one non-ts column for rollup' },
-  { short: 'TBL_TIERS_EMPTY', description: 'Table: tiers — non-empty array' },
-  { short: 'TBL_TIERS_RES_POS', description: 'Table: tiers — resMs must be > 0' },
-  { short: 'TBL_TIERS_TTL_POS', description: 'Table: tiers — ttlMs must be > 0' },
-  { short: 'TBL_TIERS_RES_ASC', description: 'Table: tiers — resolutions must be non-decreasing (fine → coarse)' },
-  { short: 'TBL_TIERS_TTL_ASC', description: 'Table: tiers — ttl must be non-decreasing (by increasing age)' },
   { short: 'TBL_JOURNAL_INDEX', description: 'Table: no journal', rules: { index: 'number' } },
   { short: 'TBL_NOT_OPEN', description: 'Table: not open (close() was called)' },
   { short: 'TBL_TAIL_COUNT', description: 'Table: tail — count >= 0' },
@@ -83,11 +78,6 @@ ErrorManager.registerMany('Table', [
   { short: 'TBL_AGG_FIELD_EMPTY', description: 'Table: aggregate() — expr.field: non-empty field name' },
   { short: 'TBL_AGG_EXPR_FN', description: 'Table: aggregate() — expr.fn: min|max|sum|avg|count', rules: { fn: 'string' } },
   { short: 'TBL_PCTL_LEVEL', description: 'Table: percentile() — level: a number in (0, 1)', rules: { level: 'string' } },
-  { short: 'TBL_ROLLUP_NO_TIERS', description: 'Table: rollup() — table without retention (no tiers)' },
-  { short: 'TBL_ROLLUP_NOW', description: 'Table: rollup(now) — now: a finite number (ms)' },
-  { short: 'TBL_ROLLUP_ONE_NO_TIERS', description: 'Table: rollupOne() — table without retention (no tiers)' },
-  { short: 'TBL_ROLLUP_ONE_NOW', description: 'Table: rollupOne(now) — now: a finite number (ms)' },
-  { short: 'TBL_ROLLUP_ONE_RES', description: 'Table: rollupOne() — res does not match a tier (or tier 0)', rules: { res: 'number' } },
   { short: 'TBL_NO_STORAGE', description: 'Table: def.storage is not set (no storage retention tiers)' },
 ]);
 
@@ -104,66 +94,8 @@ export interface TableStore {
   _closeJournal(name: string): void;
 }
 
-// Throttling for auto-rollup/auto-purge: at most once per interval (0 disables).
-// 10 min by default: keeps per-pass file churn (segment/meta/WAL/checkpoint
-// writes) ~20x lower under low-rate ingest while still bounding lag.
-export const DEFAULT_MAINTENANCE_INTERVAL_MS = 600_000;
-
-export interface RollupOneReport {
-  tierIndex: number;
-  resMs: number;
-  fromMs: number;
-  toMs: number;
-  sourceRows: number;
-  promotedRows: number;
-}
-
 /** Parses a retention string '5s:1d,15s:1w' into tiers (fine → coarse). */
-export function parseRetention(retention: string): ResolutionTier[] {
-  const s = String(retention).trim();
-  if (!s) {
-    throw ErrorManager.make('TBL_RETENTION_STRING');
-  }
-  const parts = s.split(',').map(p => p.trim()).filter(p => p.length > 0);
-  if (parts.length === 0) {
-    throw ErrorManager.make('TBL_RETENTION_EMPTY');
-  }
-  const tiers: ResolutionTier[] = [];
-  for (const part of parts) {
-    const m = part.match(/^(\S+):(\S+)$/);
-    if (!m) {
-      throw ErrorManager.make('TBL_RETENTION_TIER_FORMAT', { part });
-    }
-    let resMs: number;
-    let ttlMs: number;
-    try {
-      resMs = Interval.parseInterval(m[1]);
-    } catch (e) {
-      throw ErrorManager.make('TBL_RETENTION_RES', { res: m[1], message: (e as Error).message });
-    }
-    try {
-      ttlMs = Interval.parseInterval(m[2]);
-    } catch (e) {
-      throw ErrorManager.make('TBL_RETENTION_TTL', { ttl: m[2], message: (e as Error).message });
-    }
-    if (!Number.isFinite(resMs) || resMs <= 0) {
-      throw ErrorManager.make('TBL_RETENTION_RES_POS', { part });
-    }
-    if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
-      throw ErrorManager.make('TBL_RETENTION_TTL_POS', { part });
-    }
-    tiers.push({ resMs, ttlMs });
-  }
-  for (let i = 1; i < tiers.length; i++) {
-    if (tiers[i].resMs < tiers[i - 1].resMs) {
-      throw ErrorManager.make('TBL_RETENTION_RES_ASC');
-    }
-    if (tiers[i].ttlMs < tiers[i - 1].ttlMs) {
-      throw ErrorManager.make('TBL_RETENTION_TTL_ASC');
-    }
-  }
-  return tiers;
-}
+export const parseRetention = TableDef.parseRetention;
 
 export class Table {
   readonly name: string;
@@ -179,14 +111,16 @@ export class Table {
   private readonly nowProvider: () => number;
   private readonly journalNames: string[];
   private readonly journals: Journal[];
-  private checkpoints: Record<string, number>;
-  private readonly cpPath: string;
+  private readonly rollupManager: RollupManager;
+  /** null — single journal, no retention. */
+  private readonly tiered: TieredQuery | null;
+  /** null — single journal, no retention. */
+  private readonly maintenance: Maintenance | null;
   private readonly engines: RetentionEngine[];
 
   readonly autoRollup: boolean;
   readonly autoPurge: boolean;
   readonly maintenanceMinIntervalMs: number;
-  private _lastMaintain = 0;
 
   constructor(store: TableStore, name: string, def: AnyTableDef) {
     if (typeof name !== 'string' || name.length === 0) {
@@ -246,9 +180,9 @@ export class Table {
     }
 
     this.tiers = def.tiers && def.tiers.length > 0
-      ? (() => { Table.validateTiers(def.tiers!); return def.tiers!.slice(); })()
+      ? (() => { TableDef.validateTiers(def.tiers!); return def.tiers!.slice(); })()
       : def.retention
-        ? parseRetention(def.retention)
+        ? TableDef.parseRetention(def.retention)
         : null;
 
     this.nowProvider = def.nowProvider ?? Date.now;
@@ -260,8 +194,6 @@ export class Table {
       throw ErrorManager.make('TBL_MAINT_MIN_INTERVAL');
     }
     this.maintenanceMinIntervalMs = minInterval;
-    // Start the throttling window at creation — no maintenance on the first append.
-    this._lastMaintain = this.nowProvider();
 
     let descriptor: Descriptor | null = null;
     if (this.kind !== 'log') {
@@ -289,6 +221,7 @@ export class Table {
     // Rollup rows may carry null — agg fields in tier mode are written as 'auto'.
     const tierSchema = this.tiers ? Table._tierSchema(schema, this.agg) : schema;
 
+    let cpPath = '';
     if (this.tiers) {
       this.journalNames = this.tiers.map(t => `${name}/r${t.resMs}`);
       this.journals = this.tiers.map((t, i) =>
@@ -306,8 +239,7 @@ export class Table {
           opts,
         ),
       );
-      this.cpPath = path.join(store.baseDir, 'journals', name, '_rollup.json');
-      this.checkpoints = Table.readJson(this.cpPath);
+      cpPath = path.join(store.baseDir, 'journals', name, '_rollup.json');
     } else {
       this.journalNames = [name];
       this.journals = [
@@ -318,9 +250,29 @@ export class Table {
           opts,
         ),
       ];
-      this.cpPath = '';
-      this.checkpoints = {};
     }
+
+    this.rollupManager = new RollupManager({
+      journals: this.journals,
+      tiers: this.tiers,
+      agg: this.agg,
+      dims: this.dims,
+      cpPath,
+      nowProvider: this.nowProvider,
+    });
+    this.tiered = this.tiers ? new TieredQuery(this.journals, this.tiers) : null;
+    this.maintenance = this.tiers
+      ? new Maintenance({
+        name: this.name,
+        journals: this.journals,
+        tiers: this.tiers,
+        autoRollup: this.autoRollup,
+        autoPurge: this.autoPurge,
+        minIntervalMs: this.maintenanceMinIntervalMs,
+        nowProvider: this.nowProvider,
+        rollup: (now: number) => { this.rollupManager.rollup(now); },
+      })
+      : null;
 
     this.engines = def.storage
       ? this.journals.map(j => new RetentionEngine(j.store, () => j.journalPath(), def.storage?.tiers))
@@ -358,23 +310,7 @@ export class Table {
   }
 
   static validateTiers(tiers: ResolutionTier[]): void {
-    if (!tiers || tiers.length === 0) throw ErrorManager.make('TBL_TIERS_EMPTY');
-    for (const t of tiers) {
-      if (!Number.isFinite(t.resMs) || t.resMs <= 0) {
-        throw ErrorManager.make('TBL_TIERS_RES_POS');
-      }
-      if (!Number.isFinite(t.ttlMs) || t.ttlMs <= 0) {
-        throw ErrorManager.make('TBL_TIERS_TTL_POS');
-      }
-    }
-    for (let i = 1; i < tiers.length; i++) {
-      if (tiers[i].resMs < tiers[i - 1].resMs) {
-        throw ErrorManager.make('TBL_TIERS_RES_ASC');
-      }
-      if (tiers[i].ttlMs < tiers[i - 1].ttlMs) {
-        throw ErrorManager.make('TBL_TIERS_TTL_ASC');
-      }
-    }
+    TableDef.validateTiers(tiers);
   }
 
   now(): number {
@@ -399,32 +335,7 @@ export class Table {
   append(row: Row): void {
     this._assertOpen();
     this.journals[0].append(row);
-    if (this.tiers) this._maybeMaintain();
-  }
-
-  /** Auto-rollup + auto-purge, throttled by maintenanceMinIntervalMs; errors do not break append. */
-  private _maybeMaintain(): void {
-    if (!this.tiers) return;
-    if (!this.autoRollup && !this.autoPurge) return;
-    const now = this.nowProvider();
-    if (now - this._lastMaintain < this.maintenanceMinIntervalMs) return;
-    this._lastMaintain = now;
-
-    if (this.autoRollup) {
-      try {
-        this.rollup(now);
-      } catch (e) {
-        console.error(`Table ${this.name}: auto-rollup failed:`, e);
-      }
-    }
-    if (this.autoPurge) {
-      const i = this.tiers.length - 1;
-      try {
-        this.journals[i].purge(now - this.tiers[i].ttlMs);
-      } catch (e) {
-        console.error(`Table ${this.name}: tier ${i} auto-purge failed:`, e);
-      }
-    }
+    if (this.maintenance) this.maintenance.maybeMaintain();
   }
 
   flush(): void {
@@ -451,49 +362,30 @@ export class Table {
     this._assertOpen();
     const [startTs, endTs] = Interval.period(start, end, this.now());
 
-    if (!this.tiers) {
+    if (!this.tiered) {
       return this.journals[0].scan({ start: startTs, end: endTs });
     }
-
-    const now = this.now();
-    const out: Row[] = [];
-    for (let i = 0; i < this.tiers.length; i++) {
-      const ttl = this.tiers[i].ttlMs;
-      let winStart: number;
-      let winEnd: number;
-      if (i === 0) {
-        winStart = startTs;
-        winEnd = Math.min(endTs, now);
-      } else {
-        winStart = Math.max(startTs, now - ttl);
-        winEnd = Math.min(endTs, now - this.tiers[i - 1].ttlMs);
-      }
-      if (winStart > winEnd) continue;
-      const rows = this.journals[i].scan({ start: winStart, end: winEnd });
-      for (const r of rows) out.push(r);
-    }
-    out.sort(Table._tsCmp);
-    return out;
+    return this.tiered.query(startTs, endTs, this.now());
   }
 
   allRows(): Row[] {
     this._assertOpen();
-    if (!this.tiers) return this.journals[0].allRows();
+    if (!this.tiered) return this.journals[0].allRows();
     const rows = this.query(0, this.now());
-    rows.sort(Table._tsCmp);
+    rows.sort(TieredQuery.tsCmp);
     return rows;
   }
 
   tail(count: number): Row[] {
     this._assertOpen();
     if (count < 0) throw ErrorManager.make('TBL_TAIL_COUNT');
-    if (!this.tiers) return this.journals[0].tail(count);
+    if (!this.tiered) return this.journals[0].tail(count);
     return this.allRows().slice(-count);
   }
 
   scan(opts: ScanOptions): Row[] {
     this._assertOpen();
-    if (!this.tiers) return this.journals[0].scan(opts);
+    if (!this.tiered) return this.journals[0].scan(opts);
 
     const now = this.now();
     const [start, end] = Interval.period(opts.start ?? 0, opts.end ?? now, now);
@@ -506,7 +398,7 @@ export class Table {
     }
     // Sort before offset/limit — same order of operations as Journal.scan.
     if (opts.order === 'desc') {
-      rows.sort((a, b) => Table._tsCmp(b, a));
+      rows.sort((a, b) => TieredQuery.tsCmp(b, a));
     }
     return Table._applyScanOptions(rows, opts);
   }
@@ -544,30 +436,10 @@ export class Table {
     }
     const [startTs, endTs] = Interval.period(start, end, this.now());
 
-    if (!this.tiers) {
+    if (!this.tiered) {
       return this.journals[0].timeline(int, [startTs, endTs]);
     }
-
-    const rows = this.query(startTs, endTs);
-    const n = Math.floor((endTs - startTs) / int);
-    const counts = new Array<number>(n).fill(0);
-    for (const r of rows) {
-      const ts = Table.tsOf(r);
-      if (ts === null) continue;
-      const idx = Math.floor((ts - startTs) / int);
-      if (idx >= 0 && idx < n) counts[idx]++;
-    }
-    const out: TimelineBucket[] = new Array(n);
-    for (let i = 0; i < n; i++) {
-      const bStart = startTs + i * int;
-      out[i] = {
-        start: bStart,
-        end: Math.min(bStart + int, endTs),
-        count: counts[i],
-        hasData: counts[i] > 0,
-      };
-    }
-    return out;
+    return this.tiered.timeline(int, startTs, endTs, this.now());
   }
 
   aggregate(
@@ -632,138 +504,15 @@ export class Table {
     return out;
   }
 
-  /**
-   * Move aged-out data from each fine tier to the next coarser one (downsample +
-   * agg), then purge the fine tier. Idempotent by checkpoint. Tier mode only.
-   */
   rollup(now?: number): RollupReport {
     this._assertOpen();
-    if (!this.tiers) {
-      throw ErrorManager.make('TBL_ROLLUP_NO_TIERS');
-    }
-    const nowTs = typeof now === 'number' ? now : this.now();
-    if (!Number.isFinite(nowTs)) throw ErrorManager.make('TBL_ROLLUP_NOW');
-
-    let pairs = 0;
-    let rolledRows = 0;
-    let purgedRows = 0;
-
-    for (let i = 0; i + 1 < this.tiers.length; i++) {
-      const fine = this.journals[i];
-      const coarse = this.journals[i + 1];
-      const fineTtl = this.tiers[i].ttlMs;
-      const coarseRes = this.tiers[i + 1].resMs;
-      const maxRollable = nowTs - fineTtl;
-      const cpKey = `${i}->${i + 1}`;
-      const cp = this.checkpoints[cpKey] ?? 0;
-      if (maxRollable <= cp) continue;
-
-      const { sourceRows } = this._rollupWindow(fine, coarse, cp, maxRollable, coarseRes, this.agg, this.dims);
-
-      // Checkpoint before purge — makes a repeat rollup idempotent.
-      this.checkpoints[cpKey] = maxRollable;
-      Table.writeJson(this.cpPath, this.checkpoints);
-
-      const purged = fine.purge(maxRollable + 1);
-      purgedRows += purged.removedRows ?? 0;
-      pairs++;
-      rolledRows += sourceRows;
-    }
-
-    return { pairs, rolledRows, purgedRows };
+    return this.rollupManager.rollup(now);
   }
 
   /** Rollup into one target tier (by resolution res). Tier mode only. */
-  rollupOne(cfgOrNow: RollupConfig | number, now?: number): RollupOneReport {
+  rollupOne(cfgOrNow: RollupConfig | number, now?: number) {
     this._assertOpen();
-    if (!this.tiers) {
-      throw ErrorManager.make('TBL_ROLLUP_ONE_NO_TIERS');
-    }
-    let cfg: RollupConfig;
-    let nowTs: number;
-    if (typeof cfgOrNow === 'number') {
-      cfg = { agg: this.agg, dims: this.dims, res: 15_000 };
-      nowTs = cfgOrNow;
-      if (now !== undefined) nowTs = now;
-    } else {
-      cfg = cfgOrNow;
-      nowTs = now !== undefined ? now : this.now();
-    }
-    if (!Number.isFinite(nowTs)) throw ErrorManager.make('TBL_ROLLUP_ONE_NOW');
-
-    const targetIdx = this.tiers.findIndex(t => t.resMs === cfg.res);
-    if (targetIdx <= 0) {
-      throw ErrorManager.make('TBL_ROLLUP_ONE_RES', { res: cfg.res });
-    }
-    const fineIdx = targetIdx - 1;
-    const fine = this.journals[fineIdx];
-    const coarse = this.journals[targetIdx];
-    const fineTtl = this.tiers[fineIdx].ttlMs;
-    const maxRollable = nowTs - fineTtl;
-    const cpKey = `${fineIdx}->${targetIdx}`;
-    const cp = this.checkpoints[cpKey] ?? 0;
-    if (maxRollable <= cp) {
-      return {
-        tierIndex: targetIdx, resMs: cfg.res, fromMs: cp, toMs: maxRollable,
-        sourceRows: 0, promotedRows: 0,
-      };
-    }
-
-    const { sourceRows, promotedRows } = this._rollupWindow(fine, coarse, cp, maxRollable, cfg.res, cfg.agg, cfg.dims);
-
-    this.checkpoints[cpKey] = maxRollable;
-    Table.writeJson(this.cpPath, this.checkpoints);
-
-    const purged = fine.purge(maxRollable + 1);
-    void purged;
-
-    return {
-      tierIndex: targetIdx,
-      resMs: cfg.res,
-      fromMs: cp,
-      toMs: maxRollable,
-      sourceRows,
-      promotedRows,
-    };
-  }
-
-  /**
-   * Reads the rollable window (cp, maxRollable] page-by-page (each page = one
-   * `res` wide) and accumulates incrementally, so peak memory is bounded by the
-   * number of buckets, not by the number of fine-tier rows (no OOM under load).
-   * Pages are (cursor, end] with the inclusive scan bounds, so no row is counted
-   * twice and none is missed. Promotes the resulting buckets to `coarse`.
-   */
-  private _rollupWindow(fine: Journal, coarse: Journal, cp: number, maxRollable: number, res: number, agg: Record<string, AggFn>, dims: string[]): { sourceRows: number; promotedRows: number } {
-    const acc = Rollup.accumulate({ agg, dims, res });
-    let sourceRows = 0;
-    // Fresh table (no checkpoint): start at the oldest fine-tier row, not the
-    // epoch — stepping res-pages from 1970 means ~10^7 empty scans (~15s).
-    // An empty tier has nothing to roll up: start past the window (loop skips).
-    // Pages are (cursor, end], so minTs - 1 keeps the row at exactly minTs.
-    const range = fine.getTimeRange();
-    let cursor = range === null ? maxRollable : Math.max(cp, range[0] - 1);
-    while (cursor < maxRollable) {
-      const pageEnd = Math.min(cursor + res, maxRollable);
-      let page: Row[];
-      try {
-        page = fine.scan({ start: cursor, end: pageEnd });
-      } catch {
-        page = [];
-      }
-      for (const r of page) {
-        const ts = r['ts'];
-        if (typeof ts === 'number' && Number.isFinite(ts) && ts > cursor && ts <= pageEnd) {
-          acc.add(r);
-          sourceRows++;
-        }
-      }
-      cursor = pageEnd;
-    }
-    const promoted = acc.finalize();
-    for (const outRow of promoted) coarse.append(outRow);
-    if (promoted.length > 0) coarse.flush();
-    return { sourceRows, promotedRows: promoted.length };
+    return this.rollupManager.rollupOne(cfgOrNow, now);
   }
 
   /** Delete rows up to the bound (inclusive) from all journals. */
@@ -790,10 +539,7 @@ export class Table {
     for (const j of this.journals) j.clear();
 
     // Reset rollup checkpoints — otherwise new rows with ts below the previous max would be skipped.
-    this.checkpoints = {};
-    if (this.cpPath) {
-      fs.rmSync(this.cpPath, { force: true });
-    }
+    this.rollupManager.reset();
 
     return { removedRows };
   }
@@ -899,38 +645,5 @@ export class Table {
         maxTs,
       };
     });
-  }
-
-  private static tsOf(row: Row): number | null {
-    const v = row['ts'];
-    return typeof v === 'number' && Number.isFinite(v) ? v : null;
-  }
-
-  /** Ascending ts comparator for row lists (nulls first). */
-  private static _tsCmp(a: Row, b: Row): number {
-    return (Table.tsOf(a) ?? 0) - (Table.tsOf(b) ?? 0);
-  }
-
-  private static readJson(p: string): Record<string, number> {
-    try {
-      const obj = JSON.parse(fs.readFileSync(p, 'utf-8'));
-      if (obj && typeof obj === 'object') {
-        const out: Record<string, number> = {};
-        for (const [k, v] of Object.entries(obj)) {
-          if (typeof v === 'number') out[k] = v;
-        }
-        return out;
-      }
-    } catch {
-      /* missing or corrupt — no checkpoints */
-    }
-    return {};
-  }
-
-  private static writeJson(p: string, obj: Record<string, number>): void {
-    fs.mkdirSync(path.dirname(p), { recursive: true });
-    const tmp = `${p}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(obj));
-    fs.renameSync(tmp, p);
   }
 }
