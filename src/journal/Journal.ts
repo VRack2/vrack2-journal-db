@@ -8,7 +8,7 @@
  *
  * The class is a thin composition root: it owns the collaborators from the
  * journal/ module and delegates to them.
- *   SegmentEncoder — on-disk format: v2/v3, compression, codecs
+ *   SegmentEncoder — on-disk format: binary container, compression, codecs
  *   SegmentStore   — closed-segment registry (index, .meta, LRU cache, persist)
  *   JournalWriter  — active segment + write-ahead log + flush/rollback
  *   JournalReader  — query/scan/timeline/aggregation over the segments
@@ -41,14 +41,13 @@ import { JournalWriter } from './JournalWriter.ts';
 import { JournalReader } from './JournalReader.ts';
 import { AutoCompactor } from './AutoCompactor.ts';
 import { JournalLock } from './JournalLock.ts';
-import { Migration } from './Migration.ts';
 import { Purge } from './Purge.ts';
 import { Shutdown } from './Shutdown.ts';
 import type {
   AggregateExpr, AggFn, CompactResult, CompressionMode,
   DownsampleBucket, JournalOptions, JournalStats, LockMode, WalMode,
   Metadata, PurgeResult, RetentionTier, Row, ScanOptions,
-  Schema, SegmentFormat, TimelineBucket,
+  Schema, TimelineBucket,
 } from '../core/types.ts';
 
 // Back-compat re-exports (these historically lived in Journal.ts).
@@ -92,13 +91,10 @@ export class Journal {
   /** Single-owner lock strategy ('pid' | 'off'). */
   readonly lockMode: LockMode;
 
-  /** Segment file format on write ('v2' | 'v3'); reads are transparent. */
-  readonly format: SegmentFormat;
-
-  /** Blob compression in v3 ('gzip' | 'zstd'); ignored in v2. */
+  /** Blob compression ('gzip' | 'zstd'). */
   readonly compression: CompressionMode;
 
-  /** Explicit v3 numeric codecs: field → codec name. Empty = auto-select. */
+  /** Explicit numeric codecs: field → codec name. Empty = auto-select. */
   readonly codecs: Record<string, string>;
 
   /** Retention tiers (Phase 4); null = defaults (see RetentionEngine.defaultTiers()). */
@@ -106,9 +102,6 @@ export class Journal {
 
   /** Lazy retention engine (see getter retention). */
   private retentionEngine: RetentionEngine | null = null;
-
-  /** One-time v2→v3 migration for this open (see journal/Migration.ts). */
-  private readonly migration: Migration;
 
   /** Row-level purge before a timestamp (see journal/Purge.ts). */
   private readonly purgeOp: Purge;
@@ -136,17 +129,13 @@ export class Journal {
     if (lock !== 'pid' && lock !== 'off') throw ErrorManager.make('JRN_OPT_LOCK');
     this.lockMode = lock;
 
-    const format = opts.format ?? 'v2';
-    if (format !== 'v2' && format !== 'v3') throw ErrorManager.make('JRN_OPT_FORMAT');
-    this.format = format;
-
     const compression = opts.compression ?? Compression.default();
     if (compression !== 'gzip' && compression !== 'zstd') throw ErrorManager.make('JRN_OPT_COMPRESSION');
     this.compression = compression;
 
     this.codecs = opts.codecs && typeof opts.codecs === 'object' ? { ...opts.codecs } : {};
     this.retentionTiers = Array.isArray(opts.retention) && opts.retention.length > 0 ? opts.retention.slice() : null;
-    this.encoder = new SegmentEncoder(this.format, this.compression, this.codecs);
+    this.encoder = new SegmentEncoder(this.compression, this.codecs);
 
     this.store = new SegmentStore(
       () => this.journalPath(),
@@ -168,7 +157,6 @@ export class Journal {
       () => this.writer.activeSegment,
       () => this.schema,
     );
-    this.migration = new Migration(this.store, this.encoder, () => this.journalPath());
     this.purgeOp = new Purge(this.store, this.writer, () => this.schema!, () => this.metadata);
     this.compactor = new AutoCompactor(this.store, {
       minSegments: this.compactMinSegments,
@@ -252,10 +240,6 @@ export class Journal {
 
   compact(): CompactResult {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
-    // Migrate any legacy v2 segments first, even when there is nothing to
-    // merge: compacting a lone old segment is exactly how it gets re-encoded
-    // to v3 (test-migration relies on this).
-    this._ensureV3();
     const ids = this.store.sortedIds();
     if (ids.length < 2) return { mergedSegments: 0, logicalRows: 0, physicalBefore: 0, physicalAfter: 0, collapsedRows: 0 };
     // Explicit call = "merge everything now". Keeps the synchronous, whole-table
@@ -272,7 +256,6 @@ export class Journal {
    */
   compactBatch(ids: string[]): CompactResult {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
-    this._ensureV3();
     const engineDesc = Descriptor.fromMeta((this.metadata as Record<string, unknown>)[ENGINE_META_KEY]);
     const transform = engineDesc
       ? (rows: Row[]) => makeEngine(engineDesc).merge(rows)
@@ -285,16 +268,6 @@ export class Journal {
       physicalAfter: merged.physicalRowCount,
       collapsedRows: logicalRows - keptRows
     };
-  }
-
-  private _ensureV3(): void {
-    this.migration.run();
-  }
-
-  migrateToV3(): { migrated: number; logicalRows: number } {
-    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
-    if (this.format !== 'v3') return { migrated: 0, logicalRows: 0 };
-    return this.migration.run();
   }
 
   purge(beforeTs: number | string): PurgeResult {

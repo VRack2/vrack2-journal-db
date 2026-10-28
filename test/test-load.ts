@@ -17,7 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/journal/Journal.ts';
 import { Segment } from '../src/format/Segment.ts';
-import { SegmentFileV2 } from '../src/format/SegmentFileV2.ts';
+import { SegmentFileV3 } from '../src/format/SegmentFileV3.ts';
 import type { Row, Schema } from '../src/core/types.ts';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -104,7 +104,7 @@ function journalDir(): string {
 function segmentFiles(): string[] {
   const d = journalDir();
   if (!fs.existsSync(d)) return [];
-  const files = fs.readdirSync(d).filter((f) => /^\S+\.json$/.test(f) && !f.startsWith('.'));
+  const files = fs.readdirSync(d).filter((f) => /^\S+\.seg$/.test(f) && !f.startsWith('.'));
   return files;
 }
 
@@ -121,8 +121,10 @@ function measureDisk(): DiskReport {
   for (const f of files) {
     const buf = fs.readFileSync(path.join(journalDir(), f));
     compressedBytes += buf.length;
-    const seg = SegmentFileV2.decode(buf);
-    rawJsonBytes += Buffer.byteLength(JSON.stringify(seg), 'utf-8');
+    const seg = SegmentFileV3.decode(buf);
+    for (let i = 0; i < seg.rowCount; i++) {
+      rawJsonBytes += Buffer.byteLength(JSON.stringify(seg.getRow(i)), 'utf-8') + 1;
+    }
   }
   return { fileCount: files.length, compressedBytes, rawJsonBytes };
 }

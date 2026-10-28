@@ -40,7 +40,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   const dir = path.join(baseDir, 'journals', 'wal-crash');
   assert(fs.existsSync(path.join(dir, 'wal.log')), 'WAL существует после «краха» (строки не сфлашены)');
   assert(
-    fs.readdirSync(dir).filter(f => f.endsWith('.json')).length === 0,
+    fs.readdirSync(dir).filter(f => f.endsWith('.seg')).length === 0,
     'сегментов на диске нет — flush не успел'
   );
 
@@ -80,7 +80,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   j.close(); // flush → сегмент на диске, WAL усечён
 
   const dir = path.join(baseDir, 'journals', 'clean');
-  assert(fs.readdirSync(dir).filter(f => f.endsWith('.json')).length === 1, 'сегмент записан при close()');
+  assert(fs.readdirSync(dir).filter(f => f.endsWith('.seg')).length === 1, 'сегмент записан при close()');
   assert(!fs.existsSync(path.join(dir, 'wal.log')), 'WAL усечён после flush');
 
   const j2 = new Journal(baseDir);
@@ -154,14 +154,14 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   const dir = path.join(baseDir, 'journals', 'wiped');
   assert(j.stats().totalRows === 150, 'до clear: записано 150 строк');
   assert(
-    fs.readdirSync(dir).some(f => f.endsWith('.json')),
+    fs.readdirSync(dir).some(f => f.endsWith('.seg')),
     'до clear: есть сегмент на диске (flush сработал)'
   );
 
   j.clear();
 
   const after = fs.readdirSync(dir);
-  assert(!after.some(f => f.endsWith('.json') || f.endsWith('.meta') || f === 'wal.log' || f.endsWith('.tmp')),
+  assert(!after.some(f => f.endsWith('.seg') || f.endsWith('.meta') || f === 'wal.log' || f.endsWith('.tmp')),
     `clear: сегменты, .meta и wal.log удалены с диска (осталось: ${after.join(', ')})`);
   assert(after.includes('.lock'), 'clear: блокировка владельца сохранена');
   assert(j.isOpen, 'clear: журнал остался открытым');
@@ -275,7 +275,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   const dir = path.join(baseDir, 'journals', 'wal-off-crash');
   assert(!fs.existsSync(path.join(dir, 'wal.log')), 'off: wal.log не создан');
   assert(
-    fs.readdirSync(dir).filter(f => f.endsWith('.json')).length === 0,
+    fs.readdirSync(dir).filter(f => f.endsWith('.seg')).length === 0,
     'off: сегментов нет (нет и строки с ними)'
   );
 

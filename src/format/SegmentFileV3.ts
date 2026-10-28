@@ -1,30 +1,26 @@
-// SegmentFileV3.ts — Binary segment format v3 (Phase 2). Container only:
+// SegmentFileV3.ts — Binary segment container (version 4). Container only:
 // header, blob framing, compression and CRC32 live here; per-column value
 // encoding lives in Column.encodeBlob/decodeBlob (single codec layer).
 //
 //   [0..3]     "JSDB"
-//   [4]        4  (version; 3 = older v3 files, still readable)
+//   [4]        4  (container version; anything else → SFW3_BAD_VERSION)
 //   [5..7]     0
 //   [8..11]    headerLen (u32 LE)
 //   [12 ..]    header JSON (UTF-8): schema, summaries, column kind/codec/type,
-//              column order, compression method, rowMap encoding
+//              column order, compression method
 //   then, for each column (in columnOrder):
 //     [blobLen u32]
 //     [compressed blob]   (gzip by default, zstd — option)
-//   then (when header.rowMapLen is set):
+//   then:
 //     [rowMapLen × u32 LE]  — binary logical→physical map
 //   [N-4..N-1] CRC32 of all preceding bytes
-//   (version-3 files store rowMap as a JSON array in the header instead —
-//    they are read unchanged; the version byte went 3→4 when the binary
-//    rowMap tail + walSeq appeared, so older readers reject these files
-//    with a clean "not a v3 segment" instead of a delayed decode error)
 //
 // Columns:
 //   numeric — null mask + numeric codec (f64|doubleDelta|gorilla|rle)
 //   dict    — dictionary of distinct values + index per row
 //
-// Lossless: all values are restored exactly. v1/v2 are read as before;
-// v3 writes are enabled by the format:'v3' flag (see Journal).
+// Lossless: all values are restored exactly. This is the only readable
+// on-disk format — older generations are rejected with a coded error.
 
 import zlib from 'node:zlib';
 import { Segment } from './Segment.ts';
@@ -41,15 +37,15 @@ import type {
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('SegmentFileV3', [
-  { short: 'SFW3_NOT_V3', description: 'decodeV3: buffer is not a v3 segment' },
-  { short: 'SFW3_TOO_SMALL', description: 'Corrupted v3 segment: file too small' },
-  { short: 'SFW3_CRC', description: 'Corrupted v3 segment: checksum mismatch' },
-  { short: 'SFW3_NO_ROWMAP', description: 'Corrupted v4 segment: binary rowMap tail missing from header' },
-  { short: 'SFW3_ZSTD_REQUIRED', description: 'v3 segment uses zstd: requires Node.js >= 23.8' },
+  { short: 'SFW3_NOT_V3', description: 'decode: buffer is not a JSDB segment file' },
+  { short: 'SFW3_BAD_VERSION', description: 'Unsupported segment container version', rules: { version: 'number' } },
+  { short: 'SFW3_TOO_SMALL', description: 'Corrupted segment: file too small' },
+  { short: 'SFW3_CRC', description: 'Corrupted segment: checksum mismatch' },
+  { short: 'SFW3_NO_ROWMAP', description: 'Corrupted segment: binary rowMap tail missing from header' },
+  { short: 'SFW3_ZSTD_REQUIRED', description: 'Segment uses zstd: requires Node.js >= 23.8' },
 ]);
 
-const V3 = 3;
-/** Version 4 = binary rowMap tail + walSeq header (written now); 3 = JSON rowMap (read-only legacy). */
+/** Container version written and read (the only supported one). */
 const V4 = 4;
 
 export interface V3EncodeOptions {
@@ -81,10 +77,8 @@ interface V3Header {
   walSeq?: number;
   minTs: number | null;
   maxTs: number | null;
-  /** Logical→physical map. New writes use the binary tail (rowMapLen);
-   *  old files carry it as a JSON array here. */
-  rowMap?: number[];
-  rowMapLen?: number;
+  /** Length of the binary logical→physical map tail. */
+  rowMapLen: number;
   summaries: Record<string, ColumnSummary>;
   compression: CompressionKind;
   columnOrder: string[];
@@ -92,10 +86,14 @@ interface V3Header {
 }
 
 export class SegmentFileV3 {
-  /** Whether the buffer is a v3-generation segment (magic + version 3 or 4). */
+  /** Whether the buffer starts with the "JSDB" magic bytes. */
+  static hasMagic(buf: Buffer): boolean {
+    return buf.length >= 4 && buf.subarray(0, 4).equals(Buffer.from('JSDB', 'ascii'));
+  }
+
+  /** Whether the buffer is the current (v4) segment container. */
   static isV3(buf: Buffer): boolean {
-    return buf.length >= 5 && buf.subarray(0, 4).equals(Buffer.from('JSDB', 'ascii'))
-      && (buf[4] === V3 || buf[4] === V4);
+    return buf.length >= 5 && this.hasMagic(buf) && buf[4] === V4;
   }
 
   /** Serialize a segment to a v3 buffer (binary blobs + compression + CRC32). */
@@ -162,10 +160,15 @@ export class SegmentFileV3 {
     return Buffer.concat([body, tail]);
   }
 
-  /** v3 buffer → in-memory segment. */
+  /** Segment buffer → in-memory segment. */
   static decode(buf: Buffer): Segment {
-    if (!this.isV3(buf)) {
+    if (!this.hasMagic(buf)) {
       throw ErrorManager.make('SFW3_NOT_V3');
+    }
+    // Container version first — an older/unknown generation gets a clean
+    // coded error instead of a CRC/decode failure on its own layout.
+    if (buf[4] !== V4) {
+      throw ErrorManager.make('SFW3_BAD_VERSION', { version: buf[4] });
     }
     if (buf.length < 12) {
       throw ErrorManager.make('SFW3_TOO_SMALL');
@@ -195,20 +198,13 @@ export class SegmentFileV3 {
       blobMap.set(field, Compression.decompress(blobBuf, compression));
     }
 
-    // rowMap: v4 always stores it as a binary u32 tail; v3 (legacy) carries a
-    // JSON array in the header. Branch on the version byte, not on header
-    // presence, so a v4 file with a missing tail is caught as corruption.
-    const version = buf[4];
-    let rowMap: number[];
-    if (version === V4) {
-      if (typeof header.rowMapLen !== 'number') {
-        throw ErrorManager.make('SFW3_NO_ROWMAP');
-      }
-      rowMap = new Array<number>(header.rowMapLen);
-      for (let i = 0; i < header.rowMapLen; i++) { rowMap[i] = buf.readUInt32LE(off); off += 4; }
-    } else {
-      rowMap = Array.isArray(header.rowMap) ? header.rowMap : [];
+    // rowMap: a binary u32 tail, always present in a v4 file (its length is
+    // in the header); a missing tail is caught as corruption.
+    if (typeof header.rowMapLen !== 'number') {
+      throw ErrorManager.make('SFW3_NO_ROWMAP');
     }
+    const rowMap = new Array<number>(header.rowMapLen);
+    for (let i = 0; i < header.rowMapLen; i++) { rowMap[i] = buf.readUInt32LE(off); off += 4; }
 
     const seg = new Segment(header.id, header.schema, header.metadata);
     seg.rowCount = header.rowCount;

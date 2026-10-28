@@ -10,7 +10,6 @@ import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/journal/Journal.ts';
 import { Segment } from '../src/format/Segment.ts';
-import { SegmentFileV2 } from '../src/format/SegmentFileV2.ts';
 import { SegmentFileV3 } from '../src/format/SegmentFileV3.ts';
 import { Compression } from '../src/core/Compression.ts';
 import { NumCodecs } from '../src/format/numcodecs/NumCodecs.ts';
@@ -73,7 +72,7 @@ fs.rmSync(baseDir, { recursive: true, force: true });
 // --------------------------------------------------
 {
   const schema: Schema = { ts: 'raw', count: 'raw', value: 'raw', source: 'raw' };
-  const j = new Journal(baseDir, { format: 'v3', compression: 'gzip', codecs: { value: 'gorilla' } });
+  const j = new Journal(baseDir, { compression: 'gzip', codecs: { value: 'gorilla' } });
   j.open('roundtrip', schema);
   const N = 500;
   for (let i = 0; i < N; i++) {
@@ -121,20 +120,23 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   // бинарные кодек'и v3 выигрывают у JSON.
   const schema: Schema = { ts: 'raw', cpu: 'raw', host: 'raw' };
   const seg = new Segment('t', schema);
+  const rows: Record<string, number | string>[] = [];
   const N = 10000;
   for (let i = 0; i < N; i++) {
-    seg.append({
+    const row = {
       ts: i * 1000,
       cpu: 40 + 20 * Math.sin(i / 7) + 5 * Math.cos(i / 3),
       host: 'h' + (i % 2)
-    });
+    };
+    rows.push(row);
+    seg.append(row);
   }
-  const rawJson = Buffer.byteLength(JSON.stringify(seg.serialize()), 'utf-8');
+  const rawJson = Buffer.byteLength(JSON.stringify(rows), 'utf-8');
   const v3Size = SegmentFileV3.encode(seg).length;
-  const v2Size = SegmentFileV2.encode(seg.serialize()).length;
+  const noneSize = SegmentFileV3.encode(seg, { compression: 'none' }).length;
   assert(v3Size < rawJson, `v3 (${v3Size} Б) < JSON (${rawJson} Б)`);
-  assert(v3Size < v2Size, `v3 (${v3Size} Б) < v2 JSON+gzip (${v2Size} Б)`);
-  console.log(`   v3=${v3Size} Б, v2=${v2Size} Б, JSON=${rawJson} Б (v3 в ${(rawJson / v3Size).toFixed(1)}x меньше JSON)`);
+  assert(v3Size < noneSize, `v3 со сжатием (${v3Size} Б) < без сжатия (${noneSize} Б)`);
+  console.log(`   v3=${v3Size} Б, без сжатия=${noneSize} Б, JSON=${rawJson} Б (v3 в ${(rawJson / v3Size).toFixed(1)}x меньше JSON)`);
 }
 
 // --------------------------------------------------
@@ -142,7 +144,7 @@ fs.rmSync(baseDir, { recursive: true, force: true });
 // --------------------------------------------------
 {
   const schema: Schema = { ts: 'raw', cpu: 'raw' };
-  const j = new Journal(baseDir, { format: 'v3', compression: 'zstd' });
+  const j = new Journal(baseDir, { compression: 'zstd' });
   j.open('zstd-rt', schema);
   const N = 2000;
   for (let i = 0; i < N; i++) j.append({ ts: i * 1000, cpu: 30 + 10 * Math.cos(i / 4) });
@@ -203,31 +205,32 @@ fs.rmSync(baseDir, { recursive: true, force: true });
 }
 
 // --------------------------------------------------
-// 6. Прозрачная совместимость: v1 (JSON) + v3 читаются вместе
+// 6. Легаси-файлы (.json v1/v2) больше не сегменты:
+//    журнал их не видит, read() отказывает кодовой ошибкой.
 // --------------------------------------------------
 {
   const schema: Schema = { ts: 'raw', val: 'raw' };
-  // v3-сегмент через Journal
-  const j = new Journal(baseDir, { format: 'v3' });
+  const j = new Journal(baseDir, { compression: 'gzip' });
   j.open('mixed', schema);
-  for (let i = 0; i < 3; i++) j.append({ ts: i, val: `v3-${i}` });
+  for (let i = 0; i < 3; i++) j.append({ ts: i, val: `seg-${i}` });
   j.close();
 
-  // v1-сегмент (чистый JSON) вручную в тот же журнал
-  const seg1 = new Segment('seg_999999_0_legacy', schema, { legacy: true });
-  for (let i = 0; i < 3; i++) seg1.append({ ts: 1000 + i, val: `v1-${i}` });
+  // Файл старого поколения (чистый JSON) в тот же журнал
   const dir = path.join(baseDir, 'journals', 'mixed');
-  fs.writeFileSync(path.join(dir, 'seg_999999_0_legacy.json'), JSON.stringify(seg1.serialize()));
+  fs.writeFileSync(path.join(dir, 'seg_999999_0_legacy.json'), JSON.stringify({ id: 'legacy' }));
+
+  let threw = false;
+  try {
+    SegmentFileV3.decode(fs.readFileSync(path.join(dir, 'seg_999999_0_legacy.json')));
+  } catch (e) {
+    threw = ErrorManager.isCode(e, 'SFW3_NOT_V3');
+  }
+  assert(threw, 'легаси JSON без магических байтов → SFW3_NOT_V3');
 
   const j2 = new Journal(baseDir);
   j2.open('mixed', schema);
   const rows = j2.allRows();
-  assert(rows.length === 6, `v1 + v3 читаются вместе (факт ${rows.length})`);
-  const vals = rows.map(r => r.val as string).sort();
-  assert(
-    vals.includes('v1-0') && vals.includes('v3-2'),
-    'значения из обоих форматов присутствуют'
-  );
+  assert(rows.length === 3, `.json не считается сегментом: только v4-данные (факт ${rows.length})`);
   j2.close();
 }
 
@@ -236,7 +239,7 @@ fs.rmSync(baseDir, { recursive: true, force: true });
 // --------------------------------------------------
 {
   const schema: Schema = { ts: 'raw', val: 'raw' };
-  const j = new Journal(baseDir, { format: 'v3' });
+  const j = new Journal(baseDir);
   j.open('corrupt', schema);
   for (let i = 0; i < 10; i++) j.append({ ts: i, val: 'a' });
   j.close();
@@ -276,7 +279,7 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   // Журнал без явного compression → сегмент v3 сжимается по умолчанию (zstd/gzip),
   // и данные читаются обратно без потерь.
   const schema: Schema = { ts: 'raw', val: 'raw' };
-  const j = new Journal(baseDir, { format: 'v3' });
+  const j = new Journal(baseDir);
   j.open('zstdDefault', schema);
   const N = 400;
   for (let i = 0; i < N; i++) j.append({ ts: i * 1000, val: Math.cos(i / 5) * 1000 });
@@ -299,13 +302,14 @@ fs.rmSync(baseDir, { recursive: true, force: true });
 }
 
 // --------------------------------------------------
-// 8. Версия контейнера: записи — v4; легаси v3 (JSON rowMap в шапке)
-//    читается прозрачно; v4-файл с потерянным rowMap-хвостом → явная ошибка.
+// 8. Версия контейнера: записи — только v4; легаси v3 (JSON rowMap
+//    в шапке) отклоняется кодовой ошибкой SFW3_BAD_VERSION;
+//    v4-файл с потерянным rowMap-хвостом → явная ошибка.
 // --------------------------------------------------
 {
   const schema: Schema = { ts: 'raw', value: 'raw' };
 
-  // 8a. Легаси v3: JSON rowMap в шапке, версия 3 — декодируется как раньше.
+  // 8a. Легаси v3: версия 3 — распознаётся как JSDB, но декодируется отказом.
   {
     const seg = new Segment('legacy', schema);
     for (let i = 0; i < 20; i++) seg.append({ ts: i * 100, value: i });
@@ -334,14 +338,13 @@ fs.rmSync(baseDir, { recursive: true, force: true });
     const crc = Buffer.alloc(4); crc.writeUInt32LE(zlib.crc32(body) >>> 0, 0);
     const buf = Buffer.concat([body, crc]);
 
-    assert(SegmentFileV3.isV3(buf), 'легаси v3 (версия 3) распознаётся');
-    const dec = SegmentFileV3.decode(buf);
-    let ok = dec.rowCount === 20;
-    for (let i = 0; i < 20 && ok; i++) {
-      const r = dec.getRow(i);
-      if (r.ts !== i * 100 || r.value !== i) ok = false;
+    assert(SegmentFileV3.hasMagic(buf), 'легаси v3 распознаётся по магическим байтам');
+    assert(!SegmentFileV3.isV3(buf), 'легаси v3 (версия 3) — не текущий контейнер');
+    let threw = false;
+    try { SegmentFileV3.decode(buf); } catch (e) {
+      threw = ErrorManager.isCode(e, 'SFW3_BAD_VERSION');
     }
-    assert(ok, 'легаси v3 с JSON rowMap — lossless-декод (20 строк)');
+    assert(threw, 'легаси v3 → SFW3_BAD_VERSION (обратная совместимость не нужна)');
   }
 
   // 8b. v4-шапка без rowMapLen (урезан хвост) → явная ошибка, а не тихий пустой rowMap.

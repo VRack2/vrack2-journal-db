@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Journal, DEFAULT_ROWS_PER_SEGMENT, DEFAULT_COMPACT_MIN_SEGMENTS, isSegmentFile, idFromFile } from '../journal/Journal.ts';
-import { META_SUFFIX } from '../journal/constants.ts';
+import { META_SUFFIX, SEG_V3_EXT } from '../journal/constants.ts';
 import { SegmentMeta } from '../journal/SegmentMeta.ts';
 import type { Segment } from '../format/Segment.ts';
 import { LRUCache } from '../core/LRUCache.ts';
@@ -27,7 +27,6 @@ import type {
   Metadata,
   OpenJournalOptions,
   Schema,
-  SegmentFormat,
   StoreOptions,
   StoreStats,
   WalMode,
@@ -54,7 +53,6 @@ export class Store {
   readonly lockMode: LockMode;
   /** Default WAL strategy for journals (validated by the Journal constructor). */
   readonly walMode: WalMode;
-  readonly format: SegmentFormat;
   readonly compression: CompressionMode;
   readonly codecs: Record<string, string>;
   readonly autoCompact: boolean;
@@ -80,7 +78,6 @@ export class Store {
     }
     this.lockMode = lock;
     this.walMode = opts.wal ?? 'off';
-    this.format = opts.format ?? 'v2';
     // zstd by default on Node >= 23.8; an explicit opts.compression wins.
     this.compression = opts.compression ?? Compression.default();
     this.codecs = opts.codecs && typeof opts.codecs === 'object' ? { ...opts.codecs } : {};
@@ -128,7 +125,6 @@ export class Store {
       maxCachedSegments: opts.maxCachedSegments ?? this.maxCacheSize,
       lock: opts.lock ?? this.lockMode,
       wal: opts.wal ?? this.walMode,
-      format: opts.format ?? this.format,
       compression: opts.compression ?? this.compression,
       codecs: opts.codecs ?? this.codecs,
       autoCompact: opts.autoCompact ?? this.autoCompact,
@@ -264,8 +260,8 @@ export class Store {
       throw ErrorManager.make('STO_TABLE_NOT_FOUND', { name });
     }
     const seg = SegmentFile.read(fs.readFileSync(path.join(dir, files[0])));
-    // Segment.schema carries the declared column types (both v2 and v3
-    // headers store it) — no runtime class sniffing needed.
+    // Segment.schema carries the declared column types (the segment header
+    // stores it) — no runtime class sniffing needed.
     return { kind: 'log', name, columns: { ...seg.schema } };
   }
 
@@ -352,20 +348,15 @@ export class Store {
     const cacheKey = `${journalName}:${segmentId}`;
     const cached = this.segmentCache.get(cacheKey);
     if (cached) return cached;
-    // The file may be .seg (v3) or .json (v1/v2) — try both
-    const dir = path.join(this.journalsDir, journalName);
-    for (const ext of ['.seg', '.json']) {
-      const segPath = path.join(dir, `${segmentId}${ext}`);
-      if (!fs.existsSync(segPath)) continue;
-      try {
-        const seg = SegmentFile.read(fs.readFileSync(segPath));
-        this.segmentCache.set(cacheKey, seg);
-        return seg;
-      } catch {
-        return null;
-      }
+    const segPath = path.join(this.journalsDir, journalName, `${segmentId}${SEG_V3_EXT}`);
+    if (!fs.existsSync(segPath)) return null;
+    try {
+      const seg = SegmentFile.read(fs.readFileSync(segPath));
+      this.segmentCache.set(cacheKey, seg);
+      return seg;
+    } catch {
+      return null;
     }
-    return null;
   }
 
   listSegments(journalName: string): string[] {

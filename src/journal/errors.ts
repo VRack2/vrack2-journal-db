@@ -8,7 +8,6 @@ ErrorManager.registerMany('Journal', [
   { short: 'JRN_OPT_WAL_BATCH', description: 'walBatchSize must be an integer >= 1' },
   { short: 'JRN_OPT_LOCK', description: "lock must be 'pid' or 'off'" },
   { short: 'JRN_OPT_WAL', description: "wal must be 'on' or 'off'" },
-  { short: 'JRN_OPT_FORMAT', description: "format must be 'v2' or 'v3'" },
   { short: 'JRN_OPT_COMPRESSION', description: "compression must be 'gzip' or 'zstd'" },
   { short: 'JRN_ALREADY_OPEN', description: 'Journal already open', rules: { name: 'string' } },
   { short: 'JRN_NOT_OPEN', description: 'Journal not open. Call open() first.' },

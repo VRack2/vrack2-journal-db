@@ -1,5 +1,6 @@
 // ============================================================
-// test-compression.ts — Формат файла v2: gzip + CRC32, совместимость с v1
+// test-compression.ts — Контейнер сегмент-файла (JSDB v4):
+// магические байты, сжатие блобов, CRC32, реакция на повреждение.
 // ============================================================
 
 import fs from 'node:fs';
@@ -8,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/journal/Journal.ts';
 import { Segment } from '../src/format/Segment.ts';
 import { SegmentFile } from '../src/format/SegmentFile.ts';
-import { SegmentFileV2 } from '../src/format/SegmentFileV2.ts';
+import { SegmentFileV3 } from '../src/format/SegmentFileV3.ts';
 import ErrorManager from '../src/errors/ErrorManager.ts';
 import type { Schema } from '../src/core/types.ts';
 
@@ -32,7 +33,7 @@ fs.rmSync(baseDir, { recursive: true, force: true });
 const schema: Schema = { ts: 'delta', val: 'dictionary' };
 
 // --------------------------------------------------
-// 1. Round-trip: запись → файл v2 → чтение
+// 1. Round-trip: запись → файл → чтение
 // --------------------------------------------------
 {
   const j = new Journal(baseDir);
@@ -43,21 +44,22 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   j.close();
 
   const dir = path.join(baseDir, 'journals', 'roundtrip');
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.seg'));
   assert(files.length === 1, `один сегмент на диске (факт ${files.length})`);
 
   const buf = fs.readFileSync(path.join(dir, files[0]));
   assert(SegmentFile.isWrapped(buf), 'файл начинается с магических байтов JSDB');
+  assert(buf[4] === 4, 'версия контейнера 4');
   assert(buf.length >= 12, 'в файле есть заголовок и CRC32');
 
-  // Сжатие реально уменьшает повторяющиеся данные
+  // Сжатие реально уменьшает данные: один и тот же сегмент без сжатия vs по умолчанию
   const seg = new Segment('t', schema);
   for (let i = 0; i < 500; i++) {
     seg.append({ ts: i, val: i % 2 === 0 ? 'even' : 'odd' });
   }
-  const rawSize = Buffer.byteLength(JSON.stringify(seg.serialize()), 'utf-8');
-  const encSize = SegmentFileV2.encode(seg.serialize()).length;
-  assert(encSize < rawSize, `сжатый (${encSize} Б) меньше JSON (${rawSize} Б)`);
+  const rawSize = SegmentFileV3.encode(seg, { compression: 'none' }).length;
+  const encSize = SegmentFileV3.encode(seg, { compression: 'gzip' }).length;
+  assert(encSize < rawSize, `сжатый (${encSize} Б) меньше несжатого (${rawSize} Б)`);
 
   // Повторное чтение: данные целы
   const j2 = new Journal(baseDir);
@@ -68,52 +70,35 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
     rows[0].val === 'v0' && rows[4].ts === 4 && rows[4].val === 'v0',
     'значения совпадают с исходными'
   );
-
-  // formatVersion в payload'е
-  const data = SegmentFileV2.decode(buf);
-  assert(data.formatVersion === 2, `formatVersion=2 (факт ${data.formatVersion})`);
   j2.close();
 }
 
 // --------------------------------------------------
-// 2. Совместимость: сегмент v1 (чистый JSON) читается
+// 2. Чужой/легаси файл: не JSDB → SFW3_NOT_V3,
+//    JSDB с чужой версией → SFW3_BAD_VERSION
 // --------------------------------------------------
 {
-  const s1: Schema = { ts: 'delta', val: 'raw' };
-  const seg = new Segment('seg_0_0', s1, { legacy: true });
-  for (let i = 0; i < 3; i++) {
-    seg.append({ ts: i * 10, val: `x${i}` });
+  const notSeg = Buffer.from(JSON.stringify({ id: 'x' }), 'utf-8');
+  let threw = false;
+  try {
+    SegmentFile.read(notSeg);
+  } catch (e) {
+    threw = ErrorManager.isCode(e, 'SFW3_NOT_V3');
   }
+  assert(threw, 'чистый JSON без магических байтов → SFW3_NOT_V3');
 
-  const dir = path.join(baseDir, 'journals', 'legacy');
-  fs.mkdirSync(dir, { recursive: true });
-  const filePath = path.join(dir, 'seg_0_0.json');
-  fs.writeFileSync(filePath, JSON.stringify(seg.serialize())); // без магических байтов
-
-  const rawBuf = fs.readFileSync(filePath);
-  assert(!SegmentFile.isWrapped(rawBuf), 'v1-файл не имеет магических байтов');
-
-  const data = SegmentFileV2.decode(rawBuf);
-  assert(data.rowCount === 3, 'SegmentFileV2.decode читает v1 напрямую');
-
-  const j = new Journal(baseDir);
-  j.open('legacy', s1);
-  const rows = j.allRows();
-  assert(rows.length === 3 && rows[2].val === 'x2' && rows[2].ts === 20, 'v1-сегмент читается через Journal');
-
-  // Запись поверх v1: новые сегменты уже в формате v2
-  j.append({ ts: 99, val: 'new' });
-  j.close();
-
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
-  assert(files.length === 2, `v1 + новый v2 (факт ${files.length})`);
-  const newFile = files.find(f => f !== 'seg_0_0.json')!;
-  assert(SegmentFile.isWrapped(fs.readFileSync(path.join(dir, newFile))), 'новый сегмент записан в v2');
-
-  const j2 = new Journal(baseDir);
-  j2.open('legacy', s1);
-  assert(j2.allRows().length === 4, 'v1 и v2 сегменты читаются вместе');
-  j2.close();
+  // Легаси-версия контейнера (byte 4 = 3) с корректным CRC — отклоняется по версии
+  const seg = new Segment('oldver', schema);
+  for (let i = 0; i < 10; i++) seg.append({ ts: i, val: `v${i}` });
+  const buf = Buffer.from(SegmentFileV3.encode(seg, { compression: 'gzip' }));
+  buf[4] = 3; // портим только версию; CRC уже не совпадёт — проверим, что проверка версии первее
+  let bad = false;
+  try {
+    SegmentFileV3.decode(buf);
+  } catch (e) {
+    bad = ErrorManager.isCode(e, 'SFW3_BAD_VERSION');
+  }
+  assert(bad, 'версия != 4 → SFW3_BAD_VERSION (проверка версии первее CRC)');
 }
 
 // --------------------------------------------------
@@ -128,7 +113,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   j.close();
 
   const dir = path.join(baseDir, 'journals', 'corrupt');
-  const file = fs.readdirSync(dir).find(f => f.endsWith('.json'))!;
+  const file = fs.readdirSync(dir).find(f => f.endsWith('.seg'))!;
   const filePath = path.join(dir, file);
   const buf = Buffer.from(fs.readFileSync(filePath));
   buf[10] ^= 0xff; // ломаем байт в области payload (после 8-байтового заголовка)
@@ -147,5 +132,5 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   assert(threw, 'чтение повреждённого сегмента бросает ошибку');
 }
 
-console.log(`\nТесты сжатия: ${passed} passed, ${failed} failed`);
+console.log(`\nТесты контейнера: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

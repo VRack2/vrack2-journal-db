@@ -41,7 +41,7 @@ fs.rmSync(baseDir, { recursive: true, force: true });
 
   const dir = path.join(baseDir, 'journals', 'dedup-merge');
   assert(
-    fs.readdirSync(dir).filter(f => f.endsWith('.json')).length === 3,
+    fs.readdirSync(dir).filter(f => f.endsWith('.seg')).length === 3,
     'до compact: 3 отдельных сегмента'
   );
 
@@ -53,7 +53,7 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   assert(r.physicalBefore === 3, `физических до: 3 (факт ${r.physicalBefore})`);
   assert(r.physicalAfter === 1, `физических после: 1 (факт ${r.physicalAfter})`);
 
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.seg'));
   assert(files.length === 1, `на диске остался один сегмент (факт ${files.length})`);
 
   const after = JSON.stringify(j.allRows());
@@ -87,13 +87,13 @@ fs.rmSync(baseDir, { recursive: true, force: true });
 
   const dir = path.join(baseDir, 'journals', 'reencode');
   assert(
-    fs.readdirSync(dir).filter(f => f.endsWith('.json')).length === 2,
+    fs.readdirSync(dir).filter(f => f.endsWith('.seg')).length === 2,
     'до compact: 2 сегмента по 30 строк'
   );
 
   // До compact колонка в каждом файле — «не решённая» (сэмпл < 50)
   const store = new Store(baseDir);
-  const segIdBefore = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort()[0].replace(/\.json$/, '');
+  const segIdBefore = fs.readdirSync(dir).filter(f => f.endsWith('.seg')).sort()[0].replace(/\.seg$/, '');
   const colBefore = store.loadSegment('reencode', segIdBefore)!.columns['val'].serialize() as SerializedColumn;
   assert(
     colBefore.type === 'auto' && (colBefore as { decided?: boolean }).decided === false,
@@ -105,10 +105,10 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   assert(r.mergedSegments === 2 && r.physicalAfter === 60, 'compact: 2→1 сегмент, 60 строк');
 
   // После compact сэмпл пересёк порог → колонка перекодирована в dictionary
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.seg'));
   assert(files.length === 1, `один файл после compact (факт ${files.length})`);
 
-  const mergedId = files[0].replace(/\.json$/, '');
+  const mergedId = files[0].replace(/\.seg$/, '');
   const colAfter = store.loadSegment('reencode', mergedId)!.columns['val'].serialize() as SerializedColumn;
   assert(
     colAfter.type === 'auto' && (colAfter as { decided?: boolean }).decided === true,

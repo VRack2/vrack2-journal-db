@@ -135,11 +135,11 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
 
   // 7 строк по 3 в сегменте → 2 закрытых + активный с 1 строкой
   const dir = path.join(baseDir, 'journals', 'flushy');
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.seg'));
   assert(files.length === 2, `rowsPerSegment=3: 2 закрытых сегмента (факт ${files.length})`);
 
   j.close(); // активный с 1 строкой → третий файл
-  const files2 = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  const files2 = fs.readdirSync(dir).filter(f => f.endsWith('.seg'));
   assert(files2.length === 3, `После close: 3 сегмента (факт ${files2.length})`);
 
   const j2 = new Journal(baseDir);

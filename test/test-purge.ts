@@ -28,7 +28,7 @@ fs.rmSync(baseDir, { recursive: true, force: true });
 
 const schema: Schema = { ts: 'delta', val: 'dictionary' };
 const segFiles = (name: string): string[] =>
-  fs.readdirSync(path.join(baseDir, 'journals', name)).filter(f => f.endsWith('.json'));
+  fs.readdirSync(path.join(baseDir, 'journals', name)).filter(f => f.endsWith('.seg'));
 
 // --------------------------------------------------
 // 1. Purge посередине: целые сегменты удаляются, пересекающий перекодируется

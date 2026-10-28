@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/journal/Journal.ts';
-import { SegmentFileV2 } from '../src/format/SegmentFileV2.ts';
+import { SegmentFileV3 } from '../src/format/SegmentFileV3.ts';
 import ErrorManager from '../src/errors/ErrorManager.ts';
 import type { Schema } from '../src/core/types.ts';
 
@@ -109,13 +109,13 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   // --------------------------------------------------
   {
     const dir = path.join(baseDir, 'journals', 'events');
-    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.seg'));
     assert(files.length === 4, `Сегментов на диске: 4 (факт ${files.length})`);
 
     // Каждый сегмент имеет minTs/maxTs для пропуска вне диапазона
     for (const f of files) {
-      const data = SegmentFileV2.decode(fs.readFileSync(path.join(dir, f)));
-      assert(data.minTs !== null && data.maxTs !== null, `${f}: minTs/maxTs записаны`);
+      const seg = SegmentFileV3.decode(fs.readFileSync(path.join(dir, f)));
+      assert(seg.minTs !== null && seg.maxTs !== null, `${f}: minTs/maxTs записаны`);
     }
   }
 
@@ -242,15 +242,15 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   b.append({ ts: 100, val: 'new' });
   b.close();
 
-  const files = fs.readdirSync(dir).filter(f => f.endsWith('.json'));
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.seg'));
   assert(files.length === 2, `ordid: 2 сегмента на диске (факт ${files.length})`);
   const metaOf = (f: string) => JSON.parse(fs.readFileSync(path.join(dir, `${f}.meta`), 'utf-8'));
   const oldFile = files.find(f => metaOf(f).minTs === 0);
   const newFile = files.find(f => metaOf(f).minTs === 100);
   assert(!!oldFile && !!newFile, 'ordid: сегменты с ts 0 и 100 найдены');
   const renames: Array<[string, string]> = [
-    [oldFile!, 'seg_2000_0_123456.json'], // старый — nonce из цифр
-    [newFile!, 'seg_3000_1_abcdef.json']  // новый — nonce с буквой
+    [oldFile!, 'seg_2000_0_123456.seg'], // старый — nonce из цифр
+    [newFile!, 'seg_3000_1_abcdef.seg']  // новый — nonce с буквой
   ];
   for (const [src, dst] of renames) {
     if (src === dst) continue;

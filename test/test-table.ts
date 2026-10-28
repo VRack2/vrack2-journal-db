@@ -355,7 +355,7 @@ console.log('\nСайдкар .meta: bytes + listTables без разжатия 
   t.close();
 
   const jdir = path.join(dir, 'journals', 'metab', 'r5000');
-  const segs = fs.readdirSync(jdir).filter(f => f.endsWith('.seg') || f.endsWith('.json'));
+  const segs = fs.readdirSync(jdir).filter(f => f.endsWith('.seg') || f.endsWith('.seg'));
   const metas = fs.readdirSync(jdir).filter(f => f.endsWith('.meta'));
   assert(segs.length >= 1 && metas.length === segs.length, `каждый сегмент с .meta (сегментов=${segs.length}, мета=${metas.length})`);
   let bytesOk = metas.length === segs.length;

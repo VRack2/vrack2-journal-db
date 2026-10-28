@@ -87,7 +87,7 @@ function canonical(rows: Row[]): string {
   const STEP = 1_000_000; // 1000 секунд
   // Запись: v3, gzip, авто-кодек'и (retention перекодирует в тир'ы).
   // autoCompact: false — тест управляет числом сегментов сам (tiering 1h→1d).
-  const j = new Journal(baseDir, { format: 'v3', compression: 'gzip', rowsPerSegment: 10, autoCompact: false });
+  const j = new Journal(baseDir, { compression: 'gzip', rowsPerSegment: 10, autoCompact: false });
   j.open('metrics', schema);
   const expected: Array<{ ts: number; value: number }> = [];
   for (let i = 0; i < N; i++) {
@@ -210,7 +210,7 @@ function canonical(rows: Row[]): string {
   const N = 400; // 400 дней данных
   const STEP = DAY; // 1 день на строку
   // autoCompact: false — тест управляет числом сегментов сам (архивация).
-  const j = new Journal(baseDir, { format: 'v3', compression: 'gzip', rowsPerSegment: 10, autoCompact: false });
+  const j = new Journal(baseDir, { compression: 'gzip', rowsPerSegment: 10, autoCompact: false });
   j.open('archive', schema);
   const expected: Array<{ ts: number; value: number }> = [];
   for (let i = 0; i < N; i++) {

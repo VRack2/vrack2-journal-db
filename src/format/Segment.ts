@@ -2,12 +2,11 @@
 
 import { Column } from './columns/Column.ts';
 import { ColumnFactory } from './columns/ColumnFactory.ts';
-import type { ColumnSummary, JsonValue, Metadata, Row, Schema, SerializedColumn, SerializedSegment } from '../core/types.ts';
+import type { ColumnSummary, JsonValue, Metadata, Row, Schema } from '../core/types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('Segment', [
   { short: 'SEG_ROW_OOB', description: 'Segment: logical row index out of range', rules: { index: 'number', max: 'number' } },
-  { short: 'SEG_VERSION', description: 'Unsupported segment format version', rules: { version: 'number' } },
 ]);
 
 /** Adds one numeric value to the column summary (created on first call). */
@@ -172,85 +171,5 @@ export class Segment {
       }
     }
     return false;
-  }
-
-  serialize(): SerializedSegment {
-    const serializedColumns: Record<string, SerializedColumn> = {};
-    for (const [fieldName, column] of Object.entries(this.columns)) {
-      serializedColumns[fieldName] = column.serialize();
-    }
-
-    return {
-      formatVersion: 2,
-      id: this.id,
-      schema: this.schema,
-      metadata: this.metadata,
-      rowCount: this.rowCount,
-      physicalRowCount: this.physicalRowCount,
-      tsCount: this.tsCount,
-      minTs: this.minTs,
-      maxTs: this.maxTs,
-      rowMap: this.rowMap,
-      columns: serializedColumns,
-      summaries: this.summaries,
-      walSeq: this.walSeq
-    };
-  }
-
-  static deserialize(data: SerializedSegment): Segment {
-    if (data.formatVersion !== undefined && data.formatVersion > 2) {
-      throw ErrorManager.make('SEG_VERSION', { version: data.formatVersion });
-    }
-
-    const segment = new Segment(data.id, data.schema, data.metadata);
-    segment.rowCount = data.rowCount;
-    segment.physicalRowCount = data.physicalRowCount;
-    segment.minTs = data.minTs;
-    segment.maxTs = data.maxTs;
-    segment.rowMap = data.rowMap;
-
-    for (const [fieldName, serializedData] of Object.entries(data.columns)) {
-      segment.columns[fieldName].deserialize(serializedData);
-    }
-
-    // tsCount comes from the file; for old segments (before this field) we compute it —
-    // purge() relies on it to not delete rows without ts.
-    segment.tsCount = typeof data.tsCount === 'number' ? data.tsCount : segment._countTsRows();
-
-    // Summaries of numeric columns: from the file, or recomputed (old segments).
-    segment.summaries = (data.summaries && typeof data.summaries === 'object')
-      ? data.summaries
-      : segment._computeSummaries();
-    segment.walSeq = typeof data.walSeq === 'number' ? data.walSeq : 0;
-    return segment;
-  }
-
-  /** How many rows carry a numeric ts (rows without ts are not counted). */
-  private _countTsRows(): number {
-    const tsCol = this.columns['ts'];
-    if (!tsCol) return 0;
-    let n = 0;
-    for (let i = 0; i < this.rowCount; i++) {
-      if (typeof this.get('ts', i) === 'number') n++;
-    }
-    return n;
-  }
-
-  /** Recomputes summaries of numeric columns over logical rows,
-   *  as aggregate() does: only rows with a numeric ts, only finite numbers.
-   *  For segments written before the summaries field existed. */
-  private _computeSummaries(): Record<string, ColumnSummary> {
-    const out: Record<string, ColumnSummary> = {};
-    for (let i = 0; i < this.rowCount; i++) {
-      const ts = this.get('ts', i);
-      if (typeof ts !== 'number') continue; // rows without ts are outside aggregation
-      for (const fieldName of this._fields) {
-        const v = this.get(fieldName, i);
-        if (typeof v === 'number' && Number.isFinite(v)) {
-          updateSummary(out, fieldName, v);
-        }
-      }
-    }
-    return out;
   }
 }

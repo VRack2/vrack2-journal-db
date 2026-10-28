@@ -1,5 +1,5 @@
 // ============================================================
-// types.ts — Common types and serialization format
+// types.ts — Common types
 // ============================================================
 
 export type ColumnType = 'raw' | 'dictionary' | 'delta' | 'rle' | 'auto' | 'catchall';
@@ -63,33 +63,6 @@ export type SerializedColumn =
   | DeltaColumnData
   | RLEColumnData
   | AutoColumnData;
-
-// --------------------------------------------------
-// Serialized segment format (JSON file)
-// --------------------------------------------------
-export interface SerializedSegment {
-  /** Payload format version. Absent in v1 files (JS implementation) */
-  formatVersion?: number;
-  id: string;
-  schema: Schema;
-  metadata: Metadata;
-  rowCount: number;
-  physicalRowCount: number;
-  /** How many rows carry a numeric ts (rows without ts are not counted).
-   *  Optional: absent in files before this field version. */
-  tsCount?: number;
-  /** WAL watermark: highest WAL sequence covered by this segment's rows.
-   *  Optional: absent before WAL seq watermarking (treated as 0). */
-  walSeq?: number;
-  minTs: number | null;
-  maxTs: number | null;
-  rowMap: number[];
-  columns: Record<string, SerializedColumn>;
-  /** Per-segment summaries of numeric columns (min/max/sum/count over non-empty
-   *  numeric values). Optional: absent in older files —
-   *  Segment.deserialize() recomputes them on the fly. */
-  summaries?: Record<string, ColumnSummary>;
-}
 
 // --------------------------------------------------
 // Aggregations — min/max/sum/avg/count over a range
@@ -228,11 +201,7 @@ export type LockMode = 'pid' | 'off';
  *   a process crash replays the WAL on the next open (no row loss). */
 export type WalMode = 'on' | 'off';
 
-/** Segment file format: v1/v2 (gzip+JSON) or v3 (binary column blobs).
- *  Reading is transparent — any format can be read; writing goes into the chosen format. */
-export type SegmentFormat = 'v2' | 'v3';
-
-/** Blob compression in v3: 'zstd' (default on Node ≥ 23.8) or
+/** Blob compression: 'zstd' (default on Node ≥ 23.8) or
  *  'gzip' (older Node / explicit choice; if zstd is absent — falls back to gzip). */
 export type CompressionMode = 'gzip' | 'zstd';
 
@@ -381,13 +350,9 @@ export interface JournalOptions {
    *   database lives in worker_threads: a worker may die while the process is
    *   alive, and the PID lock would look "held" forever. */
   lock?: LockMode;
-  /** Segment file format (default `'v2'`). `'v3'` — binary column blobs
-   *  (numeric codec + dictionary + compression), `.seg` files; v1/v2 are readable. */
-  format?: SegmentFormat;
-  /** Blob compression in v3 (default `'zstd'` on Node ≥ 23.8, otherwise `'gzip'`).
-   *  `compression` is ignored in v2. */
+  /** Blob compression (default `'zstd'` on Node ≥ 23.8, otherwise `'gzip'`). */
   compression?: CompressionMode;
-  /** Explicit numeric codec choice for a column in v3: field → codec name
+  /** Explicit numeric codec choice for a column: field → codec name
    *  ('f64' | 'doubleDelta' | 'gorilla' | 'rle'). Omitted — auto-picked. */
   codecs?: Record<string, string>;
   /** Retention tiers. Default: defaultTiers() — see retention.ts. */
@@ -407,11 +372,9 @@ export interface StoreOptions {
   lock?: LockMode;
   /** Default WAL strategy for all journals (default `'off'` — see `WalMode`). */
   wal?: WalMode;
-  /** Segment file format for all journals (default `'v2'`). */
-  format?: SegmentFormat;
-  /** Blob compression in v3 (default `'zstd'` on Node ≥ 23.8, otherwise `'gzip'`). */
+  /** Blob compression for all journals (default `'zstd'` on Node ≥ 23.8, otherwise `'gzip'`). */
   compression?: CompressionMode;
-  /** Default v3 numeric codecs: field → codec name. */
+  /** Default numeric codecs: field → codec name. */
   codecs?: Record<string, string>;
   /** Auto-compact default for all journals (default true).
    *  Overridden by OpenJournalOptions.autoCompact for an individual journal. */
@@ -427,8 +390,6 @@ export interface OpenJournalOptions {
   lock?: LockMode;
   /** Overrides `wal` from StoreOptions for this journal. */
   wal?: WalMode;
-  /** Overrides `format` from StoreOptions for this journal. */
-  format?: SegmentFormat;
   /** Overrides `compression` from StoreOptions. */
   compression?: CompressionMode;
   /** Overrides `codecs` from StoreOptions. */
