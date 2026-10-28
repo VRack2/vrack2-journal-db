@@ -244,6 +244,11 @@ export class Store {
     AtomicJson.write(this._manifestPath(), manifest, { mkdir: true, uniqueTmp: true, pretty: true });
   }
 
+  /** Internal: rewrite an existing table's description in the manifest (Table.setCluster). */
+  _updateDef(def: AnyTableDef): void {
+    this._upsertManifest(def);
+  }
+
   /**
     * Fallback description for a journal not in the manifest (old data):
     * a log table with the schema recovered from the first segment.

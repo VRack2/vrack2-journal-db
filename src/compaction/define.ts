@@ -42,6 +42,10 @@ ErrorManager.registerMany('define', [
   { short: 'DEF_COLUMN_NAME', description: 'a non-empty column name is required', rules: { kind: 'string' } },
   { short: 'DEF_COLUMN_NOT_FOUND', description: 'column not found in columns', rules: { kind: 'string', field: 'string' } },
   { short: 'DEF_SUMMING_SUM', description: 'summing: sum must be a non-empty array of numeric columns', rules: { kind: 'string' } },
+  { short: 'DEF_CLUSTER_EMPTY', description: 'cluster must be a non-empty array of dimension fields', rules: { kind: 'string' } },
+  { short: 'DEF_CLUSTER_FIELD', description: 'cluster field not found in columns', rules: { kind: 'string', field: 'string' } },
+  { short: 'DEF_CLUSTER_TS', description: 'cluster must not contain ts (ts is the secondary sort)', rules: { kind: 'string' } },
+  { short: 'DEF_CLUSTER_DUP', description: 'cluster fields must be unique', rules: { kind: 'string', field: 'string' } },
 ]);
 
 // --------------------------------------------------
@@ -73,6 +77,10 @@ interface BaseTableDef {
   agg?: Record<string, AggFn>;
   /** Rollup dimension fields (group-by). Default: the engine key (without ts) or schema − ts − agg. */
   dims?: string[];
+  /** Cluster key for compaction: dimension fields a compacted segment is sorted
+   *  by (then ts ↑). Set → compact clusters segments physically (ClickHouse
+   *  ORDER BY semantics); scans of these tables can skip whole segments by dims. */
+  cluster?: string[];
 
   // --- storage (lossless re-encode), optional -------------------------
   /** Storage tiers (codec/compression by age, lossless). Disabled by default. */
@@ -143,6 +151,27 @@ export type TableDescription = AnyTableDef & TableRuntime;
 // Validation (basic rules)
 // --------------------------------------------------
 
+/**
+ * Validate a cluster key against the table columns (shared by define*Table
+ * and Table.setCluster): non-empty string array, fields exist, no ts, unique.
+ * Returns a normalized copy.
+ */
+export function validateClusterFields(columns: Schema, cluster: unknown, kind: string): string[] {
+  if (!Array.isArray(cluster) || cluster.length === 0) {
+    throw ErrorManager.make('DEF_CLUSTER_EMPTY', { kind });
+  }
+  const seen = new Set<string>();
+  for (const f of cluster) {
+    if (typeof f !== 'string' || f.length === 0 || !(f in columns)) {
+      throw ErrorManager.make('DEF_CLUSTER_FIELD', { kind, field: String(f) });
+    }
+    if (f === 'ts') throw ErrorManager.make('DEF_CLUSTER_TS', { kind });
+    if (seen.has(f)) throw ErrorManager.make('DEF_CLUSTER_DUP', { kind, field: f });
+    seen.add(f);
+  }
+  return cluster.slice();
+}
+
 function validateBase(cfg: BaseTableDef, kind: string): void {
   if (typeof cfg.name !== 'string' || cfg.name.trim().length === 0) {
     throw ErrorManager.make('DEF_NAME_EMPTY', { kind });
@@ -202,6 +231,9 @@ function validateBase(cfg: BaseTableDef, kind: string): void {
         throw ErrorManager.make('DEF_STORAGE_TIERS', { kind });
       }
     }
+  }
+  if (cfg.cluster !== undefined) {
+    cfg.cluster = validateClusterFields(cfg.columns, cfg.cluster, kind);
   }
 }
 

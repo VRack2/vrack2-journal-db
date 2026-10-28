@@ -16,6 +16,11 @@ export interface SegmentMeta {
   walSeq: number | null;
   /** Byte size of the segment file; null on old sidecars (info() falls back to stat). */
   bytes: number | null;
+  /** Dimension fields the segment is clustered by; null = append/ts order. */
+  cluster: string[] | null;
+  /** True when segment rows are in ts order (early-stop and ts-skip rely on it;
+   *  false for clustered segments). Missing on old sidecars → assumed true. */
+  tsOrdered: boolean;
 }
 
 export class SegmentMeta {
@@ -32,7 +37,9 @@ export class SegmentMeta {
       tsCount: seg.tsCount,
       summaries: seg.summaries,
       walSeq: seg.walSeq || null,
-      bytes
+      bytes,
+      cluster: seg.clusterKey ? seg.clusterKey.slice() : null,
+      tsOrdered: seg.clusterKey === null,
     };
   }
 
@@ -48,7 +55,11 @@ export class SegmentMeta {
       tsCount: typeof m.tsCount === 'number' ? m.tsCount : null,
       summaries: (m.summaries && typeof m.summaries === 'object') ? m.summaries as Record<string, ColumnSummary> : null,
       walSeq: typeof m.walSeq === 'number' ? m.walSeq : null,
-      bytes: typeof m.bytes === 'number' ? m.bytes : null
+      bytes: typeof m.bytes === 'number' ? m.bytes : null,
+      cluster: Array.isArray(m.cluster) && m.cluster.every((f) => typeof f === 'string' && f.length > 0)
+        ? (m.cluster as string[])
+        : null,
+      tsOrdered: typeof m.tsOrdered === 'boolean' ? m.tsOrdered : true
     };
   }
 

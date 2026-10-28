@@ -160,6 +160,16 @@ export interface CompactResult {
   collapsedRows: number;
 }
 
+/** Result of journal cluster-compaction (Journal.clusterCompact). */
+export interface ClusterReport {
+  /** Closed segments merged into new clustered segments. */
+  mergedSegments: number;
+  /** Number of ts-neighbor batches (windows) that were merged. */
+  windows: number;
+  /** Logical rows read from the merged segments. */
+  rows: number;
+}
+
 export interface PurgeResult {
   /** How many rows were removed from the journal. */
   removedRows: number;

@@ -24,9 +24,11 @@ import { Interval } from '../core/Interval.ts';
 import { Segment } from '../format/Segment.ts';
 import { RetentionEngine } from './RetentionEngine.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
-import { ENGINE_META_KEY, Descriptor } from '../compaction/Descriptor.ts';
+import { CLUSTER_META_KEY, ENGINE_META_KEY, Descriptor, parseClusterKey } from '../compaction/Descriptor.ts';
+import { Cluster } from '../compaction/Cluster.ts';
 import { makeEngine } from './engineFactory.ts';
 import {
+  DEFAULT_CLUSTER_ROWS_PER_PASS,
   DEFAULT_COMPACT_MIN_SEGMENTS,
   DEFAULT_ROWS_PER_SEGMENT,
   DEFAULT_WAL_BATCH_ROWS,
@@ -44,7 +46,7 @@ import { JournalLock } from './JournalLock.ts';
 import { Purge } from './Purge.ts';
 import { Shutdown } from './Shutdown.ts';
 import type {
-  AggregateExpr, AggFn, CompactResult, CompressionMode,
+  AggregateExpr, AggFn, ClusterReport, CompactResult, CompressionMode,
   DownsampleBucket, JournalOptions, JournalStats, LockMode, WalMode,
   Metadata, PurgeResult, RetentionTier, Row, ScanOptions,
   Schema, TimelineBucket,
@@ -257,10 +259,17 @@ export class Journal {
   compactBatch(ids: string[]): CompactResult {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     const engineDesc = Descriptor.fromMeta((this.metadata as Record<string, unknown>)[ENGINE_META_KEY]);
-    const transform = engineDesc
+    const cluster = parseClusterKey((this.metadata as Record<string, unknown>)[CLUSTER_META_KEY]);
+    const engineMerge = engineDesc
       ? (rows: Row[]) => makeEngine(engineDesc).merge(rows)
       : (rows: Row[]) => rows;
-    const { merged, logicalRows, physicalBefore, keptRows } = this.store.merge(ids, transform);
+    // Clustered tables: the engine merge runs first (identity for log), then
+    // rows are ordered by the cluster key so the new segment stores same-
+    // dimension rows adjacently.
+    const transform = cluster
+      ? (rows: Row[]) => Cluster.sort(engineMerge(rows), cluster)
+      : engineMerge;
+    const { merged, logicalRows, physicalBefore, keptRows } = this.store.merge(ids, transform, undefined, undefined, cluster);
     return {
       mergedSegments: ids.length,
       logicalRows,
@@ -273,6 +282,67 @@ export class Journal {
   purge(beforeTs: number | string): PurgeResult {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     return this.purgeOp.run(Interval.resolve(beforeTs));
+  }
+
+  /**
+   * Cluster-compacts closed segments: merges ts-neighbor batches (bounded by
+   * a row budget, like AutoCompactor passes) into new segments whose rows are
+   * ordered by the journal's cluster key (dimension fields, then ts ↑).
+   * Segments outside [start, end] are left untouched; the segment order by
+   * minTs is preserved because batches are taken from sortedIds().
+   */
+  clusterCompact(start?: number, end?: number): ClusterReport {
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
+    const cluster = parseClusterKey((this.metadata as Record<string, unknown>)[CLUSTER_META_KEY]);
+    if (!cluster) throw ErrorManager.make('JRN_NO_CLUSTER');
+
+    const from = typeof start === 'number' ? start : Number.NEGATIVE_INFINITY;
+    const to = typeof end === 'number' ? end : Number.POSITIVE_INFINITY;
+    const candidates: string[] = [];
+    for (const id of this.store.sortedIds()) {
+      const m = this.store.metaOf(id);
+      // No sidecar or a ts-less segment: can't prove it's outside the window → include.
+      if (m && m.minTs !== null && m.maxTs !== null && (m.maxTs < from || m.minTs > to)) continue;
+      candidates.push(id);
+    }
+
+    const engineDesc = Descriptor.fromMeta((this.metadata as Record<string, unknown>)[ENGINE_META_KEY]);
+    const engineMerge = engineDesc
+      ? (rows: Row[]) => makeEngine(engineDesc).merge(rows)
+      : (rows: Row[]) => rows;
+
+    const report: ClusterReport = { mergedSegments: 0, windows: 0, rows: 0 };
+    if (candidates.length < 2) return report;
+
+    // ts-neighbor batches from sortedIds with a row budget (memory bound).
+    let batch: string[] = [];
+    let rows = 0;
+    const batches: string[][] = [];
+    for (const id of candidates) {
+      batch.push(id);
+      rows += this.store.metaOf(id)?.rowCount ?? this.rowsPerSegment;
+      if (batch.length >= 2 && rows >= DEFAULT_CLUSTER_ROWS_PER_PASS) {
+        batches.push(batch);
+        batch = [];
+        rows = 0;
+      }
+    }
+    if (batch.length > 0) {
+      if (batch.length === 1 && batches.length > 0) {
+        batches[batches.length - 1].push(batch[0]);
+      } else if (batch.length >= 2) {
+        batches.push(batch);
+      }
+    }
+
+    for (const ids of batches) {
+      const transform = (rs: Row[]) => Cluster.sort(engineMerge(rs), cluster);
+      const { logicalRows } = this.store.merge(ids, transform, undefined, undefined, cluster);
+      report.mergedSegments += ids.length;
+      report.windows++;
+      report.rows += logicalRows;
+    }
+    return report;
   }
 
   // --- Retention (Phase 4): helpers over the segment store ---

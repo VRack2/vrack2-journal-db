@@ -9,6 +9,9 @@ export const META_SUFFIX = '.meta';
 /** Extension of segment files. */
 export const SEG_V3_EXT = '.seg';
 
+/** Row budget for one cluster-compaction batch (memory bound, mirrors AutoCompactor). */
+export const DEFAULT_CLUSTER_ROWS_PER_PASS = 200_000;
+
 /** True for closed-segment file names (`.seg`). */
 export const isSegmentFile = (f: string): boolean => f.endsWith(SEG_V3_EXT);
 /** Segment id from its file name (extension stripped). */

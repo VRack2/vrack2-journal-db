@@ -79,6 +79,8 @@ interface V3Header {
   maxTs: number | null;
   /** Length of the binary logical→physical map tail. */
   rowMapLen: number;
+  /** Dimension fields this segment is clustered by; absent = append/ts order. */
+  clusterKey?: string[];
   summaries: Record<string, ColumnSummary>;
   compression: CompressionKind;
   columnOrder: string[];
@@ -127,6 +129,7 @@ export class SegmentFileV3 {
       minTs: segment.minTs,
       maxTs: segment.maxTs,
       rowMapLen: segment.rowMap.length,
+      clusterKey: segment.clusterKey ?? undefined,
       summaries: segment.summaries,
       compression,
       columnOrder,
@@ -215,6 +218,10 @@ export class SegmentFileV3 {
     seg.tsCount = typeof header.tsCount === 'number' ? header.tsCount : 0;
     seg.walSeq = typeof header.walSeq === 'number' ? header.walSeq : 0;
     seg.rowMap = rowMap;
+    seg.clusterKey = Array.isArray(header.clusterKey)
+      && header.clusterKey.every((f) => typeof f === 'string' && f.length > 0)
+      ? header.clusterKey.slice()
+      : null;
     seg.summaries = header.summaries && typeof header.summaries === 'object'
       ? header.summaries
       : {};

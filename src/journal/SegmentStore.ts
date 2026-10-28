@@ -264,6 +264,7 @@ export class SegmentStore {
     transform: (rows: Row[]) => Row[] = (rows) => rows,
     encode: (seg: Segment) => Buffer = (s) => this.encoder.encode(s),
     ext: string = this.encoder.ext(),
+    clusterKey: string[] | null = null,
   ): MergeResult {
     let logicalRows = 0;
     let physicalBefore = 0;
@@ -281,6 +282,7 @@ export class SegmentStore {
     const merged = this.makeSegment(this.newId());
     for (const row of kept) merged.append(row);
     merged.walSeq = walSeq;
+    if (clusterKey && clusterKey.length > 0) merged.clusterKey = clusterKey.slice();
 
     this.persist(merged, encode, null, ext);
     for (const id of ids) this.drop(id);

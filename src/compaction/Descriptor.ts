@@ -12,6 +12,16 @@ import type { EngineKind } from './types.ts';
   /** Key in the journal metadata where the engine descriptor is stored. */
 export const ENGINE_META_KEY = '_engine';
 
+  /** Key in the journal metadata where the cluster key (dimension fields) is stored. */
+export const CLUSTER_META_KEY = '_cluster';
+
+/** Journal-metadata value → validated cluster key, or null when absent/corrupt. */
+export function parseClusterKey(raw: unknown): string[] | null {
+  if (!Array.isArray(raw) || raw.length === 0) return null;
+  if (!raw.every((f) => typeof f === 'string' && f.length > 0)) return null;
+  return raw.slice();
+}
+
   /** Normalized description of the engine — merge parameters. */
 export class Descriptor {
   readonly kind: EngineKind;

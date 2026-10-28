@@ -27,6 +27,7 @@ import type { RollupConfig } from '../metric/Rollup.ts';
 import type {
   AggFn,
   AggregateExpr,
+  ClusterReport,
   CompactResult,
   Metadata,
   OpenJournalOptions,
@@ -41,7 +42,8 @@ import type {
   TruncateResult,
 } from '../core/types.ts';
 import type { AnyTableDef } from '../compaction/define.ts';
-import { Descriptor, ENGINE_META_KEY } from '../compaction/Descriptor.ts';
+import { Descriptor, ENGINE_META_KEY, CLUSTER_META_KEY } from '../compaction/Descriptor.ts';
+import { validateClusterFields } from '../compaction/define.ts';
 import { RetentionEngine } from '../journal/RetentionEngine.ts';
 import type { ApplyReport, ConversionPlan, TierStatus } from '../core/types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
@@ -92,6 +94,7 @@ export interface TableStore {
     opts?: OpenJournalOptions,
   ): Journal;
   _closeJournal(name: string): void;
+  _updateDef(def: AnyTableDef): void;
 }
 
 /** Parses a retention string '5s:1d,15s:1w' into tiers (fine → coarse). */
@@ -235,6 +238,7 @@ export class Table {
             ttlMs: t.ttlMs,
             formatVersion: 3,
             ...(descriptor ? { [ENGINE_META_KEY]: descriptor.toMeta() } : {}),
+            ...(def.cluster ? { [CLUSTER_META_KEY]: def.cluster.slice() } : {}),
           },
           opts,
         ),
@@ -246,7 +250,7 @@ export class Table {
         store._openJournal(
           name,
           schema,
-          { formatVersion: 3, ...(descriptor ? { [ENGINE_META_KEY]: descriptor.toMeta() } : {}) },
+          { formatVersion: 3, ...(descriptor ? { [ENGINE_META_KEY]: descriptor.toMeta() } : {}), ...(def.cluster ? { [CLUSTER_META_KEY]: def.cluster.slice() } : {}) },
           opts,
         ),
       ];
@@ -561,6 +565,40 @@ export class Table {
       collapsedRows += r.collapsedRows;
     }
     return { mergedSegments, logicalRows, physicalBefore, physicalAfter, collapsedRows };
+  }
+
+  /**
+   * Cluster-compacts the table's closed segments (dimension clustering).
+   * The table must declare a cluster key (define*Table `cluster` or
+   * setCluster()). Optional [start, end] ts-window limits which segments
+   * are re-laid-out; segments outside it are left untouched.
+   */
+  clusterCompact(start?: number, end?: number): ClusterReport {
+    this._assertOpen();
+    const report: ClusterReport = { mergedSegments: 0, windows: 0, rows: 0 };
+    for (const j of this.journals) {
+      const r = j.clusterCompact(start, end);
+      report.mergedSegments += r.mergedSegments;
+      report.windows += r.windows;
+      report.rows += r.rows;
+    }
+    return report;
+  }
+
+  /**
+   * Assign (or replace) the table's cluster key: validated, stored in the
+   * manifest, and applied to the open journals' metadata right away, so
+   * background auto-compaction clusters from the next merge. One-off
+   * relayout of existing segments: call clusterCompact() after this.
+   */
+  setCluster(cols: string[]): void {
+    this._assertOpen();
+    const cluster = validateClusterFields(this.def.columns, cols, this.kind);
+    this.def.cluster = cluster;
+    this.store._updateDef(this.def);
+    for (const j of this.journals) {
+      j.updateMetadata({ [CLUSTER_META_KEY]: cluster.slice() });
+    }
   }
 
   static applyAgg(fn: AggFn, vals: number[]): number {

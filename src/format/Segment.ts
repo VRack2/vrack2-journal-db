@@ -36,6 +36,11 @@ export class Segment {
   minTs: number | null = null;
   maxTs: number | null = null;
 
+  /** Cluster key this segment was compacted by (dimension fields, ts as the
+   *  secondary sort), or null when rows sit in append/ts order. Clustered
+   *  segments keep same-dimension rows adjacent for segment-level dim skips. */
+  clusterKey: string[] | null = null;
+
   /** Segment-level summaries of numeric columns: field → {min,max,sum,count}.
    *  Kept over logical rows (duplicates counted, as in getRow).
    *  Used by aggregate()/downsample() as a fast-path for segments
