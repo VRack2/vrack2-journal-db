@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-export interface AtomicJsonWriteOptions {
+interface AtomicJsonWriteOptions {
   /** Create parent directories (default false). */
   mkdir?: boolean;
   /** Suffix tmp with the pid so concurrent processes never collide (default false). */

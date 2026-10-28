@@ -29,7 +29,7 @@ export interface RollupOneReport {
   promotedRows: number;
 }
 
-export interface RollupManagerOptions {
+interface RollupManagerOptions {
   /** Tier journals, fine → coarse (single journal for a non-tier table). */
   journals: Journal[];
   /** null — table without retention. */

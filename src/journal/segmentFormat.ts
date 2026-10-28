@@ -2,7 +2,7 @@
 
 import fs from 'node:fs';
 
-export type DetectedFormat = 'v1' | 'v2' | 'v3';
+type DetectedFormat = 'v1' | 'v2' | 'v3';
 
 /** Detect the format of a segment file by reading its 5-byte magic header. */
 export function detectSegmentFormat(filePath: string): DetectedFormat {

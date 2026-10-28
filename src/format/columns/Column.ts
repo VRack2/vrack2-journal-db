@@ -12,12 +12,12 @@ import type { JsonValue, SerializedColumn } from '../../core/types.ts';
 /** v3 blob layout kind. */
 export type BlobKind = 'numeric' | 'dict';
 
-export interface BlobCodecOptions {
+interface BlobCodecOptions {
   /** Explicit numeric codec for this column; omitted → auto-pick from data. */
   codec?: string;
 }
 
-export interface BlobResult {
+interface BlobResult {
   kind: BlobKind;
   buf: Buffer;
   /** Numeric blob: the codec ACTUALLY used (requested one may fall back to f64). */

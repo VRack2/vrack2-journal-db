@@ -8,7 +8,7 @@
 
 import type { SegmentStore } from './SegmentStore.ts';
 
-export interface AutoCompactorOptions {
+interface AutoCompactorOptions {
   /** Minimum number of closed segments before a pass runs. */
   minSegments: number;
   /** Row-count fallback for segments without a .meta sidecar. */

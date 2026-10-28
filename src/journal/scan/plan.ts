@@ -22,7 +22,7 @@ export interface ScanPlan {
   sortKey: string;
 }
 
-export const SCAN_OPS: readonly ScanOp[] = ['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'in', 'nin', 'isNull', 'isNotNull'];
+const SCAN_OPS: readonly ScanOp[] = ['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'in', 'nin', 'isNull', 'isNotNull'];
 const SCAN_OP_SET: ReadonlySet<string> = new Set(SCAN_OPS);
 export function isScanOp(op: unknown): op is ScanOp {
   return typeof op === 'string' && SCAN_OP_SET.has(op);

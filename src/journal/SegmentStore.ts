@@ -17,7 +17,7 @@ import { LOCK_FILE, META_SUFFIX, SEG_V3_EXT, WAL_FILE, idFromFile, isSegmentFile
 import { SegmentMeta } from './SegmentMeta.ts';
 import type { SegmentEncoder } from './SegmentEncoder.ts';
 
-export interface MergeResult {
+interface MergeResult {
   id: string;
   merged: Segment;
   logicalRows: number;

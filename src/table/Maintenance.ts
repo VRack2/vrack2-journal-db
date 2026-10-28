@@ -10,7 +10,7 @@ import type { ResolutionTier } from '../core/types.ts';
 // writes) ~20x lower under low-rate ingest while still bounding lag.
 export const DEFAULT_MAINTENANCE_INTERVAL_MS = 600_000;
 
-export interface MaintenanceOptions {
+interface MaintenanceOptions {
   /** Table name (for the error log). */
   name: string;
   /** Tier journals, fine → coarse. */

@@ -2,7 +2,7 @@
 // every open journal's WAL is drained so no acknowledged row is lost.
 
 /** The minimal contract the registry needs from an open journal. */
-export interface WalDrainable {
+interface WalDrainable {
   /** Flush the WAL synchronously (idempotent). */
   walDrain(): void;
 }
