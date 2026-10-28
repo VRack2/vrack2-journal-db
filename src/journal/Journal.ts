@@ -41,8 +41,9 @@ import { JournalWriter } from './JournalWriter.ts';
 import { JournalReader } from './JournalReader.ts';
 import { AutoCompactor } from './AutoCompactor.ts';
 import { JournalLock } from './JournalLock.ts';
+import { Migration } from './Migration.ts';
+import { Purge } from './Purge.ts';
 import { trackJournal, untrackJournal } from './shutdown.ts';
-import { detectSegmentFormat } from './segmentFormat.ts';
 import type {
   AggregateExpr, AggFn, CompactResult, CompressionMode,
   DownsampleBucket, JournalOptions, JournalStats, LockMode,
@@ -103,8 +104,11 @@ export class Journal {
   /** Lazy retention engine (see getter retention). */
   private retentionEngine: RetentionEngine | null = null;
 
-  /** One-time v2→v3 migration done for this open. */
-  private _v3Migrated = false;
+  /** One-time v2→v3 migration for this open (see journal/Migration.ts). */
+  private readonly migration: Migration;
+
+  /** Row-level purge before a timestamp (see journal/Purge.ts). */
+  private readonly purgeOp: Purge;
 
   private readonly encoder: SegmentEncoder;
 
@@ -156,6 +160,8 @@ export class Journal {
       () => this.writer.activeSegment,
       () => this.schema,
     );
+    this.migration = new Migration(this.store, this.encoder, () => this.journalPath());
+    this.purgeOp = new Purge(this.store, this.writer, () => this.schema!, () => this.metadata);
     this.compactor = new AutoCompactor(this.store, {
       minSegments: this.compactMinSegments,
       fallbackRows: this.rowsPerSegment,
@@ -272,77 +278,18 @@ export class Journal {
   }
 
   private _ensureV3(): void {
-    if (!this._v3Migrated) {
-      this.migrateToV3();
-      this._v3Migrated = true;
-    }
+    this.migration.run();
   }
 
   migrateToV3(): { migrated: number; logicalRows: number } {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     if (this.format !== 'v3') return { migrated: 0, logicalRows: 0 };
-
-    let migrated = 0;
-    let logicalRows = 0;
-    for (const id of this.store.sortedIds()) {
-      const file = this.store.fileOf(id);
-      if (!file || detectSegmentFormat(path.join(this.journalPath(), file)) === 'v3') continue;
-      this.store.reencode(id, (seg) => this.encoder.encode(seg));
-      migrated++;
-      const seg = this.store.cached(id);
-      if (seg) logicalRows += seg.rowCount;
-    }
-    return { migrated, logicalRows };
+    return this.migration.run();
   }
 
   purge(beforeTs: number | string): PurgeResult {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
-    const before = Interval.resolve(beforeTs);
-
-    if (this.activeSegment) {
-      this.writer.drain();
-      if (this.activeSegment.rowCount > 0) this.flush();
-      else this.writer.truncateWAL();
-    }
-
-    let removedRows = 0;
-    let removedSegments = 0;
-    let rewrittenSegments = 0;
-
-    for (const id of [...this.store.sortedIds()]) {
-      const meta = this.store.metaOf(id);
-      const minTs = meta?.minTs ?? null;
-      const maxTs = meta?.maxTs ?? null;
-      const rowCount = meta?.rowCount ?? null;
-      const tsCount = meta?.tsCount ?? null;
-
-      if (maxTs !== null && maxTs < before && rowCount !== null && tsCount !== null && tsCount === rowCount) {
-        removedRows += rowCount;
-        this.store.drop(id);
-        removedSegments++;
-        continue;
-      }
-      if (minTs !== null && minTs >= before) continue;
-
-      const seg = this.store.loadClosed(id);
-      const kept: Row[] = [];
-      for (let i = 0; i < seg.rowCount; i++) {
-        const row = seg.getRow(i);
-        const ts = row.ts;
-        if (typeof ts !== 'number' || ts >= before) kept.push(row);
-      }
-      const dropped = seg.rowCount - kept.length;
-      if (dropped === 0) continue;
-
-      removedRows += dropped;
-      const fresh = new Segment(seg.id, this.schema!, this.metadata ?? {});
-      for (const row of kept) fresh.append(row);
-      this.store.persist(fresh, undefined, this.store.fileOf(id) ?? null);
-      rewrittenSegments++;
-    }
-
-    this.writer.createActiveSegment();
-    return { removedRows, removedSegments, rewrittenSegments };
+    return this.purgeOp.run(Interval.resolve(beforeTs));
   }
 
   // --- Retention (Phase 4): helpers over the segment store ---
@@ -352,33 +299,8 @@ export class Journal {
     return this.store.sortedIds();
   }
 
-  getClosedSegment(id: string): Segment {
-    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
-    return this.store.loadClosed(id);
-  }
-
-  closedSegmentFile(id: string): string | null {
-    return this.store.fileOf(id);
-  }
-
   closedSegmentInfo(id: string): { minTs: number | null; maxTs: number | null; rowCount: number | null; physicalRowCount: number | null; bytes: number | null } | null {
     return this.store.info(id);
-  }
-
-  newSegmentId(): string {
-    return this.store.newId();
-  }
-
-  reencodeClosedSegment(id: string, encode: (seg: Segment) => Buffer): string {
-    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
-    return this.store.reencode(id, encode);
-  }
-
-  mergeClosedSegments(ids: string[], encode: (seg: Segment) => Buffer): string {
-    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
-    const sorted = [...new Set(ids)];
-    if (sorted.length === 0) throw ErrorManager.make('JRN_MERGE_EMPTY');
-    return this.store.merge(sorted, (rows) => rows, encode, this.encoder.ext()).id;
   }
 
   // --- Time-series reads (Phase 1) ---

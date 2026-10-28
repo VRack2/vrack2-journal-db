@@ -11,7 +11,6 @@ ErrorManager.registerMany('Journal', [
   { short: 'JRN_OPT_COMPRESSION', description: "compression must be 'gzip' or 'zstd'" },
   { short: 'JRN_ALREADY_OPEN', description: 'Journal already open', rules: { name: 'string' } },
   { short: 'JRN_NOT_OPEN', description: 'Journal not open. Call open() first.' },
-  { short: 'JRN_MERGE_EMPTY', description: 'mergeClosedSegments: empty list' },
   { short: 'JRN_TL_INTERVAL', description: 'timeline(): interval must be a number (ms) or string like "1h/30m"' },
   { short: 'JRN_TL_INTERVAL_POS', description: 'timeline(): interval must be > 0 (ms)' },
   { short: 'JRN_TL_PERIOD', description: 'timeline(): period must be [start, end] (ms) or string like "now-7d:now"' },
