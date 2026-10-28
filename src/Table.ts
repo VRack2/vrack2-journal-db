@@ -42,6 +42,8 @@ import { Descriptor, ENGINE_META_KEY } from './compaction/Descriptor.ts';
 import { RetentionEngine } from './RetentionEngine.ts';
 import type { ApplyReport, ConversionPlan, ScanWhere, TierStatus } from './types.ts';
 import ErrorManager from './errors/ErrorManager.ts';
+import { isAggFn } from './journal/Aggregation.ts';
+import { isScanOp, whereOne } from './journal/scan/plan.ts';
 
 ErrorManager.registerMany('Table', [
   { short: 'TBL_SCAN_AGG', description: 'Table: scan — agg/groupBy in tier mode: use aggregate()' },
@@ -101,9 +103,6 @@ export interface TableStore {
   ): Journal;
   _closeJournal(name: string): void;
 }
-
-const AGG_FNS: ReadonlySet<string> = new Set(['min', 'max', 'sum', 'avg', 'count']);
-const isAggFn = (fn: unknown): fn is AggFn => AGG_FNS.has(String(fn));
 
 // Throttling for auto-rollup/auto-purge: at most once per interval (0 disables).
 // 10 min by default: keeps per-pass file churn (segment/meta/WAL/checkpoint
@@ -528,20 +527,8 @@ export class Table {
   }
 
   private static _matchWhere(row: Row, w: ScanWhere): boolean {
-    const v = row[w.field];
-    switch (w.op) {
-      case 'eq': return v === w.value;
-      case 'ne': return v !== w.value;
-      case 'lt': return typeof v === 'number' && v < (w.value as number);
-      case 'le': return typeof v === 'number' && v <= (w.value as number);
-      case 'gt': return typeof v === 'number' && v > (w.value as number);
-      case 'ge': return typeof v === 'number' && v >= (w.value as number);
-      case 'in': return Array.isArray(w.value) && w.value.includes(v);
-      case 'nin': return Array.isArray(w.value) && !w.value.includes(v);
-      case 'isNull': return v === null || v === undefined;
-      case 'isNotNull': return v !== null && v !== undefined;
-    }
-    throw ErrorManager.make('TBL_WHERE_OP', { op: String(w.op) });
+    if (!isScanOp(w.op)) throw ErrorManager.make('TBL_WHERE_OP', { op: String(w.op) });
+    return whereOne(row[w.field], w.op, w.value ?? null);
   }
 
   /** Dense buckets [start, end] (one per interval) with row counters. */

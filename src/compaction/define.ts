@@ -20,6 +20,7 @@
 
 import type { AggFn, OpenJournalOptions, ResolutionTier, RetentionTier, Schema } from '../types.ts';
 import { Descriptor } from './Descriptor.ts';
+import { isAggFn } from '../journal/Aggregation.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('define', [
@@ -142,8 +143,6 @@ export type TableDescription = AnyTableDef & TableRuntime;
 // Validation (basic rules)
 // --------------------------------------------------
 
-const AGG_FNS: ReadonlySet<string> = new Set(['min', 'max', 'sum', 'avg', 'count']);
-
 function validateBase(cfg: BaseTableDef, kind: string): void {
   if (typeof cfg.name !== 'string' || cfg.name.trim().length === 0) {
     throw ErrorManager.make('DEF_NAME_EMPTY', { kind });
@@ -182,7 +181,7 @@ function validateBase(cfg: BaseTableDef, kind: string): void {
       if (!(f in cfg.columns)) {
         throw ErrorManager.make('DEF_AGG_FIELD', { kind, field: f });
       }
-      if (!AGG_FNS.has(fn)) {
+      if (!isAggFn(fn)) {
         throw ErrorManager.make('DEF_AGG_FN', { kind, field: f, fn: String(fn) });
       }
     }
