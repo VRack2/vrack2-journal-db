@@ -57,7 +57,7 @@ const cpu2 = store.open('cpu');  // → Table (та же таблица)
 ├─ _store.json          # описание таблиц: схема, движок, retention
 └─ journals/
    └─ cpu/
-      ├─ *.seg / *.json # сегменты — сами данные
+      ├─ *.seg          # сегменты — сами данные (бинарный формат v4)
       ├─ *.meta         # границы min/max ts + саммари (для быстрых чтений)
       ├─ wal.log        # WAL (только при wal: 'on') — страховка при крахе
       └─ .lock          # владелец журнала (PID процесса)
@@ -181,6 +181,19 @@ const cpu = store.create(defineLogTable({
 `append()` (rollup + purge), с троттлингом, чтобы не дёргать диск на каждую
 строку. Итоговый размер ограничен: `≤ Σ(TTL × разрешение)`.
 
+Одна пара `res:ttl` — это чистый TTL без сгущения (агрегация не нужна):
+одно-тирной лог-таблице хватает `retention`, а `cluster` по измерениям даёт
+сублинейный `where`:
+
+```ts
+const logs = store.create(defineLogTable({
+  name: 'logs',
+  columns: { ts: 'delta', level: 'dictionary', msg: 'raw' },
+  retention: '1s:30d',     // один тир: auto-purge по TTL, без rollup
+  cluster: ['level'],      // where level='warn' — сегменты без 'warn' не грузятся
+}));
+```
+
 ## CLI
 
 ```bash
@@ -225,7 +238,7 @@ npm run typecheck # tsc --noEmit (strict)
 
 | Файл | Что |
 |---|---|
-| `Formats.md` | типы колонок, форматы файлов (v1/v2/v3), кодексы, сжатие |
+| `Formats.md` | типы колонок, бинарный формат сегментов (v4), кодексы, сжатие |
 | `Reliability.md` | WAL, атомарная запись, восстановление, блокировка |
 | `Maintenance.md` | дедупликация, кэш, compact, purge |
 | `Querying.md` | query / aggregate / scan / percentile |

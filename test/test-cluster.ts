@@ -373,5 +373,80 @@ function canon(rows: Row[]): string {
   t.close();
 }
 
+
+// --------------------------------------------------
+// 9. Фаза F: смешанные сегменты (skip только к кластеризованным),
+//    восстановление .meta из сегмента, смена cluster-spec
+// --------------------------------------------------
+{
+  const dir = freshDir('mixed');
+  const store = new Store(dir);
+  const t = store.create(defineLogTable({
+    name: 'events', columns: schema, cluster: ['host'],
+    rowsPerSegment: 10, opts: { autoCompact: false },
+  }));
+  for (let i = 0; i < 30; i++) t.append(interleavedRow(i));
+
+  // перекомпоновано окно [0,19] → 1 кластеризованный + 1 некластеризованный
+  const r = t.clusterCompact(0, 19);
+  assert(r.windows === 1 && r.rows === 20, `mixed: окно [0,19] перекомпоновано (${JSON.stringify(r)})`);
+
+  const jdir = path.join(dir, 'journals', 'events');
+  const clustered = segFiles(jdir).find(f => {
+    const s = SegmentFileV3.decode(fs.readFileSync(path.join(jdir, f)));
+    return (s.clusterKey?.length ?? 0) > 0;
+  })!;
+  const total = segFiles(jdir).length;
+  assert(total === 2, `mixed: сегментов 2 (факт ${total})`);
+
+  // счётчик загрузок: dims-skip (host=nope отсутствует в наборе кластеризованного
+  // сегмента) не трогает некластеризованные — грузятся ровно они
+  const j = t.journal(0) as unknown as { store: { loadClosed(id: string): unknown; metaOf(id: string): unknown } };
+  const segStore = j.store;
+  let loads = 0;
+  const origLoad = segStore.loadClosed.bind(segStore);
+  segStore.loadClosed = (id: string) => { loads++; return origLoad(id); };
+  const got = t.scan({ where: [{ field: 'host', op: 'eq', value: 'nope' }] });
+  const loadsAfter = loads;
+  segStore.loadClosed = origLoad;
+  assert(loadsAfter === total - 1, `mixed: skip только кластеризованного (загрузок ${loadsAfter} из ${total})`);
+  assert(got.length === 0, 'mixed: where host=nope → пусто');
+
+  // результат скана полон: h1 есть во всех трёх сегментах, skip не съел данных
+  const expH1 = t.query(0, Number.MAX_SAFE_INTEGER).filter(row => row.host === 'h1');
+  const gotH1 = t.scan({ where: [{ field: 'host', op: 'eq', value: 'h1' }] });
+  assert(gotH1.length === expH1.length && expH1.length === 10,
+    `mixed: where host=h1 полон (${gotH1.length}/${expH1.length})`);
+
+  // сайдкар: удалить .meta — при загрузке сегмента meta (включая dims)
+  // восстанавливается из сегмента идентично
+  const clusteredId = clustered.replace(/\.seg$/, '');
+  const dimsBefore = JSON.stringify((segStore.metaOf(clusteredId) as { dims?: unknown } | undefined)?.dims ?? null);
+  assert(dimsBefore !== 'null' && dimsBefore.includes('h0'), 'mixed: dims в памяти до удаления сайдкара');
+  for (const f of fs.readdirSync(jdir)) if (f.endsWith('.meta')) fs.rmSync(path.join(jdir, f));
+  t.close();
+  const store3 = new Store(dir);
+  const t3 = store3.open('events');
+  const j3 = t3.journal(0) as unknown as { store: { loadClosed(id: string): unknown; metaOf(id: string): { dims?: unknown } | undefined } };
+  j3.store.loadClosed(clusteredId);
+  const dimsAfter = JSON.stringify(j3.store.metaOf(clusteredId)?.dims ?? null);
+  assert(dimsAfter === dimsBefore, 'mixed: .meta восстановлен из сегмента идентично (dims)');
+  const gotH1b = t3.scan({ where: [{ field: 'host', op: 'eq', value: 'h1' }] });
+  assert(gotH1b.length === expH1.length, 'mixed после reopen: скан полон');
+
+  // смена spec: старый clusterKey ≠ нового — компакция переписывает по новому
+  t3.setCluster(['metric']);
+  t3.clusterCompact();
+  const segs = segFiles(path.join(dir, 'journals', 'events')).map(f =>
+    SegmentFileV3.decode(fs.readFileSync(path.join(dir, 'journals', 'events', f))));
+  assert(segs.every(s => s.clusterKey?.join(',') === 'metric'),
+    'смена spec: все сегменты переписаны под cluster=metric');
+  assert(canon(t3.allRows()) === canon(t3.query(0, Number.MAX_SAFE_INTEGER)) && t3.allRows().length === 30,
+    'смена spec: данные целы (30 строк)');
+  const mH1 = t3.scan({ where: [{ field: 'host', op: 'eq', value: 'h1' }] });
+  assert(mH1.length === expH1.length, 'смена spec: скан по не-cluster полю корректен');
+  t3.close();
+}
+
 console.log(`\nТесты кластеризации: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

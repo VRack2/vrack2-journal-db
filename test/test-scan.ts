@@ -606,5 +606,51 @@ function assertAggSets(got: Row[], want: Row[], msg: string, keyFields: string[]
   k.close();
 }
 
+
+// --------------------------------------------------
+// Фаза C: dims-скипы на уровне Journal.scan без ts-фильтра
+// --------------------------------------------------
+{
+  const dir = path.join(baseDir, 'dimsskip');
+  fs.mkdirSync(dir, { recursive: true });
+  const j = new Journal(dir, { rowsPerSegment: 20 });
+  j.open('dimskip', SCHEMA, { _cluster: ['host'] });
+  for (let i = 0; i < 60; i++) j.append({ ts: base + i * 1000, value: i, host: 'h' + (i % 4) });
+  j.flush();
+  j.compact(); // ≥2 закрытых сегментов → merge // cluster-метаданные → сегмент кластеризован, dims в .meta
+  const all = j.allRows();
+  j.close();
+  // холодный кеш: загрузка сегментов идёт через loadClosed
+  j.open('dimskip', SCHEMA, { _cluster: ['host'] });
+  const store = (j as unknown as { store: { loadClosed(id: string): unknown } }).store;
+  let loads = 0;
+  const origLoad = store.loadClosed.bind(store);
+  store.loadClosed = (id: string) => { loads++; return origLoad(id); };
+
+  // eq по значению вне dims-набора, НЕТ start/end — сегменты скипаются по dims
+  const miss = j.scan({ where: [{ field: 'host', op: 'eq', value: 'zz' }] });
+  assert(miss.length === 0 && loads === 0, `dims-skip без ts-фильтра: eq zz → пусто, загрузок ${loads}`);
+
+  // ne никогда не skip: грузим и фильтруем построчно
+  loads = 0;
+  const neAll = j.scan({ where: [{ field: 'host', op: 'ne', value: 'zz' }] });
+  assert(neAll.length === 60 && loads > 0, `ne — не skip: 60 строк, загрузок ${loads}`);
+
+  // in без пересечения — тоже skip
+  loads = 0;
+  const inMiss = j.scan({ where: [{ field: 'host', op: 'in', value: ['zz', 'yy'] }] });
+  assert(inMiss.length === 0 && loads === 0, `dims-skip: in без пересечения → загрузок ${loads}`);
+
+  // положительный случай: eq h1 — не skip, результат точен
+  loads = 0;
+  const h1 = j.scan({ where: [{ field: 'host', op: 'eq', value: 'h1' }] });
+  const want = all.filter(r => r.host === 'h1');
+  assert(h1.length === 15 && h1.every(r => r.host === 'h1') && loads > 0,
+    `eq h1: 15 строк, загрузок ${loads}`);
+  assert(want.length === 15, 'brute-force: 15 строк h1');
+  store.loadClosed = origLoad;
+  j.close();
+}
+
 console.log(`\nТесты scan: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
