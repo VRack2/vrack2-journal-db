@@ -287,6 +287,10 @@ export class RetentionEngine {
     for (const f of fields) {
       if (f === tsField) continue;
       if (!segment.columns[f]) continue;
+      // Declared type prunes obviously non-numeric columns; 'raw'/'auto' still
+      // need sampling (flexible schemas can hold mixed values).
+      const declared = segment.schema[f];
+      if (declared !== 'raw' && declared !== 'auto' && declared !== 'delta' && declared !== 'rle') continue;
       let numeric = true, seen = false;
       const n = Math.min(segment.rowCount, 64);
       for (let i = 0; i < n; i++) {

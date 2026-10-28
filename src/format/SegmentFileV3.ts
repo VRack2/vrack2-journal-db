@@ -1,11 +1,13 @@
-// SegmentFileV3.ts — Binary segment format v3 (Phase 2).
+// SegmentFileV3.ts — Binary segment format v3 (Phase 2). Container only:
+// header, blob framing, compression and CRC32 live here; per-column value
+// encoding lives in Column.encodeBlob/decodeBlob (single codec layer).
 //
 //   [0..3]     "JSDB"
 //   [4]        3  (version)
 //   [5..7]     0
 //   [8..11]    headerLen (u32 LE)
-//   [12 ..]    header JSON (UTF-8): schema, summaries, rowMap, column codec,
-//              column order, compression method
+//   [12 ..]    header JSON (UTF-8): schema, summaries, rowMap, column kind/
+//              codec/type, column order, compression method
 //   then, for each column (in columnOrder):
 //     [blobLen u32]
 //     [compressed blob]   (gzip by default, zstd — option)
@@ -20,13 +22,13 @@
 
 import zlib from 'node:zlib';
 import { Segment } from './Segment.ts';
-import { RawColumn } from './columns/RawColumn.ts';
+import { ColumnFactory } from './columns/ColumnFactory.ts';
+import type { BlobKind } from './columns/Column.ts';
 import { Compression } from '../core/Compression.ts';
-import { NumCodecs } from './numcodecs/NumCodecs.ts';
 import type {
   ColumnSummary,
+  ColumnType,
   CompressionKind,
-  JsonValue,
   Metadata,
   Schema,
 } from '../core/types.ts';
@@ -49,8 +51,12 @@ export interface V3EncodeOptions {
 }
 
 interface V3ColSpec {
-  kind: 'numeric' | 'dict';
+  kind: BlobKind;
   codec?: string;
+  /** Schema column type of this field (declared representation).
+   *  Absent in files written before this field existed — decode falls
+   *  back to the header schema / 'auto'. */
+  type?: ColumnType;
 }
 
 interface V3Header {
@@ -87,20 +93,9 @@ export class SegmentFileV3 {
     for (let ci = 0; ci < columnOrder.length; ci++) {
       const field = columnOrder[ci];
       const col = segment.columns[field];
-      const values: JsonValue[] = new Array(segment.physicalRowCount);
-      for (let i = 0; i < segment.physicalRowCount; i++) values[i] = col.get(i);
-
-      const kind = this.pickKind(values);
-      if (kind === 'numeric') {
-        const numeric = values.filter((v): v is number => typeof v === 'number');
-        const requested = opts.codecs?.[field] ?? NumCodecs.autoPick(numeric);
-        const { buf, codecUsed } = this.encodeNumericBlob(values, requested);
-        specs[field] = { kind: 'numeric', codec: codecUsed };
-        blobs[ci] = Compression.compress(buf, compression);
-      } else {
-        specs[field] = { kind: 'dict' };
-        blobs[ci] = Compression.compress(this.encodeDictBlob(values), compression);
-      }
+      const blob = col.encodeBlob({ codec: opts.codecs?.[field] });
+      specs[field] = { kind: blob.kind, codec: blob.codecUsed, type: segment.schema[field] };
+      blobs[ci] = Compression.compress(blob.buf, compression);
     }
 
     const header: V3Header = {
@@ -187,149 +182,14 @@ export class SegmentFileV3 {
     for (const field of header.columnOrder) {
       const spec = header.columns[field];
       const blob = blobMap.get(field)!;
-      const values = spec.kind === 'numeric'
-        ? this.decodeNumericBlob(blob, spec.codec ?? 'f64', header.physicalRowCount)
-        : this.decodeDictBlob(blob);
-
-      const col = new RawColumn();
-      for (const v of values) col.append(v);
+      // Recreate the column with its declared type (header "type"; old files
+      // without it fall back to the header schema, then 'auto').
+      const declared: ColumnType | undefined = spec.type ?? header.schema[field] ?? 'auto';
+      const col = ColumnFactory.create(declared);
       seg.columns[field] = col;
+      col.decodeBlob(spec.kind, blob, spec.codec, header.physicalRowCount);
     }
 
     return seg;
-  }
-
-  // --------------------------------------------------
-  // Column classification and dictionary key
-  // --------------------------------------------------
-
-  private static pickKind(values: JsonValue[]): 'numeric' | 'dict' {
-    if (values.length === 0) return 'numeric';
-    for (const v of values) {
-      if (v === null || v === undefined) continue;
-      if (typeof v !== 'number' || !Number.isFinite(v)) return 'dict';
-    }
-    return 'numeric';
-  }
-
-  private static dictKey(v: JsonValue): string {
-    if (v === null || v === undefined) return '\0null';
-    if (typeof v === 'object') return 'o' + JSON.stringify(v);
-    return typeof v + ':' + String(v);
-  }
-
-  // --------------------------------------------------
-  // Column blob encoding
-  // --------------------------------------------------
-
-  private static encodeNumericBlob(
-    values: JsonValue[],
-    codecName: string
-  ): { buf: Buffer; codecUsed: string } {
-    const n = values.length;
-    const maskBytes = Math.ceil(n / 8);
-    const mask = new Uint8Array(maskBytes);
-    const nonNull: number[] = [];
-    for (let i = 0; i < n; i++) {
-      const v = values[i];
-      if (v === null || v === undefined) {
-        mask[i >> 3] |= 1 << (7 - (i & 7));
-      } else {
-        nonNull.push(v as number);
-      }
-    }
-
-    // Unknown codec name — error (typos must not silently fall into f64).
-    const codec = NumCodecs.get(codecName);
-    // Requested codec didn't fit the data (e.g. rle on fractions — throws) →
-    // fall back to f64 and record the ACTUALLY USED codec in the schema.
-    let codecUsed = codecName;
-    let codecBuf: Buffer;
-    try {
-      codecBuf = codec.encode(nonNull);
-    } catch {
-      codecUsed = 'f64';
-      codecBuf = NumCodecs.get('f64').encode(nonNull);
-    }
-
-    const head = Buffer.alloc(4);
-    head.writeUInt32LE(nonNull.length, 0);
-    const buf = Buffer.concat([head, Buffer.from(mask), codecBuf]);
-    return { buf, codecUsed };
-  }
-
-  private static encodeDictBlob(values: JsonValue[]): Buffer {
-    const dict: JsonValue[] = [];
-    const map = new Map<string, number>();
-    const indices: number[] = new Array(values.length);
-    for (let i = 0; i < values.length; i++) {
-      const v = values[i] === undefined ? null : values[i];
-      const key = this.dictKey(v);
-      let idx = map.get(key);
-      if (idx === undefined) {
-        idx = dict.length;
-        dict.push(v);
-        map.set(key, idx);
-      }
-      indices[i] = idx;
-    }
-
-    const parts: Buffer[] = [];
-    const head = Buffer.alloc(8);
-    head.writeUInt32LE(values.length, 0);
-    head.writeUInt32LE(dict.length, 4);
-    parts.push(head);
-    for (const entry of dict) {
-      const enc = Buffer.from(JSON.stringify(entry), 'utf-8');
-      const len = Buffer.alloc(4);
-      len.writeUInt32LE(enc.length, 0);
-      parts.push(len, enc);
-    }
-    const idxBuf = Buffer.alloc(indices.length * 4);
-    for (let i = 0; i < indices.length; i++) idxBuf.writeUInt32LE(indices[i], i * 4);
-    parts.push(idxBuf);
-    return Buffer.concat(parts);
-  }
-
-  // --------------------------------------------------
-  // Column blob decoding
-  // --------------------------------------------------
-
-  private static decodeNumericBlob(blob: Buffer, codecName: string, physicalRowCount: number): JsonValue[] {
-    let off = 0;
-    const nonNullCount = blob.readUInt32LE(off); off += 4;
-    const maskBytes = Math.ceil(physicalRowCount / 8);
-    const mask = blob.subarray(off, off + maskBytes); off += maskBytes;
-    const codecBuf = blob.subarray(off);
-
-    const codec = NumCodecs.get(codecName);
-    const vals = codec.decode(codecBuf, nonNullCount);
-
-    const out: JsonValue[] = new Array(physicalRowCount);
-    let vi = 0;
-    for (let i = 0; i < physicalRowCount; i++) {
-      const isNull = (mask[i >> 3] >> (7 - (i & 7))) & 1;
-      if (isNull) out[i] = null;
-      else out[i] = vals[vi++];
-    }
-    return out;
-  }
-
-  private static decodeDictBlob(blob: Buffer): JsonValue[] {
-    let off = 0;
-    const rowCnt = blob.readUInt32LE(off); off += 4;
-    const dictCnt = blob.readUInt32LE(off); off += 4;
-    const dict: JsonValue[] = new Array(dictCnt);
-    for (let i = 0; i < dictCnt; i++) {
-      const len = blob.readUInt32LE(off); off += 4;
-      dict[i] = JSON.parse(blob.subarray(off, off + len).toString('utf-8'));
-      off += len;
-    }
-    const out: JsonValue[] = new Array(rowCnt);
-    for (let i = 0; i < rowCnt; i++) {
-      const idx = blob.readUInt32LE(off); off += 4;
-      out[i] = dict[idx];
-    }
-    return out;
   }
 }

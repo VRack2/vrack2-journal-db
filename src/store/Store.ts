@@ -17,10 +17,8 @@ import type { Segment } from '../format/Segment.ts';
 import { LRUCache } from '../core/LRUCache.ts';
 import { SegmentFile } from '../format/SegmentFile.ts';
 import { Compression } from '../core/Compression.ts';
-import { ColumnFactory } from '../format/columns/ColumnFactory.ts';
 import { Table } from '../table/Table.ts';
 import type {
-  ColumnType,
   CompressionMode,
   LockMode,
   Metadata,
@@ -266,18 +264,9 @@ export class Store {
       throw ErrorManager.make('STO_TABLE_NOT_FOUND', { name });
     }
     const seg = SegmentFile.read(fs.readFileSync(path.join(dir, files[0])));
-    const columns: Schema = {};
-    for (const [f, col] of Object.entries(seg.columns)) {
-      columns[f] = this._typeOfColumn(col);
-    }
-    return { kind: 'log', name, columns };
-  }
-
-  private _typeOfColumn(col: unknown): ColumnType {
-    for (const [t, C] of Object.entries(ColumnFactory.types)) {
-      if (col instanceof C) return t as ColumnType;
-    }
-    return 'auto';
+    // Segment.schema carries the declared column types (both v2 and v3
+    // headers store it) — no runtime class sniffing needed.
+    return { kind: 'log', name, columns: { ...seg.schema } };
   }
 
   /** Runtime stats of the journal directories (including tiers `<name>/r*`). */
