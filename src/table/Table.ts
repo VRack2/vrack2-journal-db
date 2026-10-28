@@ -43,10 +43,10 @@ import type {
 import type { AnyTableDef } from '../compaction/define.ts';
 import { Descriptor, ENGINE_META_KEY } from '../compaction/Descriptor.ts';
 import { RetentionEngine } from '../journal/RetentionEngine.ts';
-import type { ApplyReport, ConversionPlan, ScanWhere, TierStatus } from '../core/types.ts';
+import type { ApplyReport, ConversionPlan, TierStatus } from '../core/types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 import { Aggregation } from '../metric/Aggregation.ts';
-import { isScanOp, whereOne } from '../journal/scan/plan.ts';
+import { isScanOp } from '../journal/scan/plan.ts';
 import { TableDef } from './TableDef.ts';
 import { RollupManager } from './RollupManager.ts';
 import { Maintenance, DEFAULT_MAINTENANCE_INTERVAL_MS } from './Maintenance.ts';
@@ -392,10 +392,16 @@ export class Table {
     if (opts.agg || opts.groupBy) {
       throw ErrorManager.make('TBL_SCAN_AGG');
     }
-    let rows = this.query(start, end);
+    // where/select/limit pushed down to each tier journal, tiers merged by ts.
+    // The journal applies `where` before projection, so no Table-level re-filter
+    // (it would drop rows whose where-field is not in select). Validate ops here
+    // to keep the tiered-mode error contract (TBL_WHERE_OP) unchanged.
     if (opts.where && opts.where.length > 0) {
-      rows = rows.filter(r => opts.where!.every(w => Table._matchWhere(r, w)));
+      for (const w of opts.where) {
+        if (!isScanOp(w.op)) throw ErrorManager.make('TBL_WHERE_OP', { op: String(w.op) });
+      }
     }
+    let rows = this.tiered.scan(start, end, now, opts);
     // Sort before offset/limit — same order of operations as Journal.scan.
     if (opts.order === 'desc') {
       rows.sort((a, b) => TieredQuery.tsCmp(b, a));
@@ -416,11 +422,6 @@ export class Table {
     if (opts.offset) out = out.slice(opts.offset);
     if (opts.limit !== undefined && opts.limit >= 0) out = out.slice(0, opts.limit);
     return out;
-  }
-
-  private static _matchWhere(row: Row, w: ScanWhere): boolean {
-    if (!isScanOp(w.op)) throw ErrorManager.make('TBL_WHERE_OP', { op: String(w.op) });
-    return whereOne(row[w.field], w.op, w.value ?? null);
   }
 
   /** Dense buckets [start, end] (one per interval) with row counters. */

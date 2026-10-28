@@ -27,7 +27,36 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
   if (!plan.agg) rawRows = [];
 
   const rawNeed = plan.limit !== null ? plan.offset + plan.limit : Infinity;
-  const canEarlyStop = !plan.agg && plan.order === 1;
+  // Early stop trusts journal invariants and safe plan shapes. Invariant:
+  // appends arrive ts-nondecreasing (rows inside a segment, and segment
+  // ranges, follow real chronological order — documented in README).
+  // Safe gate: the plan sorts by ts itself (not by a select field); every
+  // closed segment publishes numeric .meta bounds with NON-OVERLAPPING
+  // ranges (a meta-less segment sorts LAST in sortedIds() regardless of its
+  // real ts range, and overlapping ranges let the break cut smaller ts from
+  // a later segment); and rows without a numeric ts cannot steal the
+  // collection budget — either the ts window rejects them, or every scanned
+  // source has tsCount === rowCount (no ts-less rows anywhere).
+  const closedIds = src.sortedClosedIds();
+  let rangesDisjoint = true;
+  let allTsCovered = true;
+  for (let i = 0; i < closedIds.length; i++) {
+    const m = src.metaOf(closedIds[i]);
+    if (!m || typeof m.minTs !== 'number' || typeof m.maxTs !== 'number' || m.tsCount !== m.rowCount) {
+      allTsCovered = false;
+      if (!m || typeof m.minTs !== 'number' || typeof m.maxTs !== 'number') rangesDisjoint = false;
+      continue;
+    }
+    if (i > 0) {
+      const prev = src.metaOf(closedIds[i - 1]);
+      if (prev && typeof prev.maxTs === 'number' && !(prev.maxTs < m.minTs)) rangesDisjoint = false;
+    }
+  }
+  const activeSeg = src.activeSegment;
+  if (activeSeg && activeSeg.rowCount > 0 && activeSeg.tsCount !== activeSeg.rowCount) allTsCovered = false;
+  const canEarlyStop = !plan.agg && plan.order === 1 && plan.limit !== null
+    && plan.sortKey === 'ts' && rangesDisjoint
+    && (plan.hasTsFilter || allTsCovered);
 
   const getGroup = (key: string, row: Row): { row: Row; accs: Record<string, AggAcc> } => {
     let g = groups.get(key);
@@ -153,9 +182,11 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
 
   if (plan.agg && plan.groupBy.length === 0) getGroup('', {});
 
-  for (const id of src.sortedClosedIds()) {
+  for (const id of closedIds) {
     const meta = src.metaOf(id);
     if (plan.start !== null && plan.end !== null && SegmentMeta.skips(meta?.minTs ?? null, meta?.maxTs ?? null, plan.start, plan.end, true)) continue;
+    // Zone-map pushdown: skip segments whose column summaries rule out every row.
+    if (plan.where.length > 0 && SegmentMeta.skipsWhere(meta ?? null, plan.where, plan.hasTsFilter)) continue;
     processSegment(src.loadClosed(id));
     if (canEarlyStop && rawRows!.length >= rawNeed) break;
   }

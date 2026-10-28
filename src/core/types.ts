@@ -78,6 +78,9 @@ export interface SerializedSegment {
   /** How many rows carry a numeric ts (rows without ts are not counted).
    *  Optional: absent in files before this field version. */
   tsCount?: number;
+  /** WAL watermark: highest WAL sequence covered by this segment's rows.
+   *  Optional: absent before WAL seq watermarking (treated as 0). */
+  walSeq?: number;
   minTs: number | null;
   maxTs: number | null;
   rowMap: number[];
@@ -217,6 +220,14 @@ export interface TimelineBucket {
 /** Strategy for locking a journal by a single owner. */
 export type LockMode = 'pid' | 'off';
 
+/** Write-ahead log strategy:
+ * - `'off'` (default) — no WAL: rows sit in the in-memory active segment
+ *   until flush. Zero extra writes per row (half the SSD wear), but a process
+ *   crash loses everything not yet flushed.
+ * - `'on'` — every row is WAL-logged (batched) before the segment append;
+ *   a process crash replays the WAL on the next open (no row loss). */
+export type WalMode = 'on' | 'off';
+
 /** Segment file format: v1/v2 (gzip+JSON) or v3 (binary column blobs).
  *  Reading is transparent — any format can be read; writing goes into the chosen format. */
 export type SegmentFormat = 'v2' | 'v3';
@@ -355,6 +366,10 @@ export interface JournalOptions {
    *  of the "crossing" segment during purge/compact. */
   rowsPerSegment?: number;
   maxCachedSegments?: number;
+  /** WAL strategy (default `'off'` — see `WalMode`). `'on'`: rows are
+   *  WAL-logged before the segment append and replayed after a process crash;
+   *  costs ~1 extra (unflushed) copy of every row. */
+  wal?: WalMode;
   /** WAL batch size: how many rows to accumulate in memory before writing to disk.
    *  1 — write every row immediately (maximum crash resistance, slower). */
   walBatchSize?: number;
@@ -390,6 +405,8 @@ export interface StoreOptions {
   defaultRowsPerSegment?: number;
   /** Default `'pid'` — see `JournalOptions.lock`. */
   lock?: LockMode;
+  /** Default WAL strategy for all journals (default `'off'` — see `WalMode`). */
+  wal?: WalMode;
   /** Segment file format for all journals (default `'v2'`). */
   format?: SegmentFormat;
   /** Blob compression in v3 (default `'zstd'` on Node ≥ 23.8, otherwise `'gzip'`). */
@@ -408,6 +425,8 @@ export interface OpenJournalOptions {
   maxCachedSegments?: number;
   /** Overrides `lock` from StoreOptions for this journal. */
   lock?: LockMode;
+  /** Overrides `wal` from StoreOptions for this journal. */
+  wal?: WalMode;
   /** Overrides `format` from StoreOptions for this journal. */
   format?: SegmentFormat;
   /** Overrides `compression` from StoreOptions. */

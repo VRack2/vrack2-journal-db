@@ -325,7 +325,7 @@ export class RetentionEngine {
       const head = Buffer.alloc(12);
       const n = fs.readSync(fd, head, 0, 12, 0);
       if (n < 12) return NOT_V3;
-      if (!head.subarray(0, 4).equals(Buffer.from('JSDB', 'ascii')) || head[4] !== 3) {
+      if (!SegmentFileV3.isV3(head)) {
         return NOT_V3;
       }
       const headerLen = head.readUInt32LE(8);

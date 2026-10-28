@@ -46,7 +46,7 @@ import { Purge } from './Purge.ts';
 import { Shutdown } from './Shutdown.ts';
 import type {
   AggregateExpr, AggFn, CompactResult, CompressionMode,
-  DownsampleBucket, JournalOptions, JournalStats, LockMode,
+  DownsampleBucket, JournalOptions, JournalStats, LockMode, WalMode,
   Metadata, PurgeResult, RetentionTier, Row, ScanOptions,
   Schema, SegmentFormat, TimelineBucket,
 } from '../core/types.ts';
@@ -85,6 +85,9 @@ export class Journal {
 
   /** WAL batch: rows buffered in memory before disk write. */
   readonly walBatchSize: number;
+
+  /** WAL strategy ('on' | 'off'): off = no per-row WAL (see JournalOptions.wal). */
+  readonly walMode: WalMode;
 
   /** Single-owner lock strategy ('pid' | 'off'). */
   readonly lockMode: LockMode;
@@ -125,6 +128,10 @@ export class Journal {
     if (!Number.isInteger(batch) || batch < 1) throw ErrorManager.make('JRN_OPT_WAL_BATCH');
     this.walBatchSize = batch;
 
+    const wal = opts.wal ?? 'off';
+    if (wal !== 'on' && wal !== 'off') throw ErrorManager.make('JRN_OPT_WAL');
+    this.walMode = wal;
+
     const lock = opts.lock ?? 'pid';
     if (lock !== 'pid' && lock !== 'off') throw ErrorManager.make('JRN_OPT_LOCK');
     this.lockMode = lock;
@@ -153,6 +160,7 @@ export class Journal {
       () => this.store.newId(),
       this.rowsPerSegment,
       batch,
+      this.walMode,
       (seg) => this.store.persist(seg),
     );
     this.reader = new JournalReader(
@@ -190,11 +198,13 @@ export class Journal {
 
     try {
       this.store.scanDir(journalPath);
+      const walLines = this.writer.wal.readLines();
+      if (walLines.length > 0) this.store.repairMissingMeta();
+      this.writer.seedWalSeq(this.store.maxWalSeq());
       this.writer.createActiveSegment();
       this.isOpen = true;
       Shutdown.track(this);
-      const walLines = this.writer.wal.readLines();
-      if (walLines.length > 0) this.writer.replay(walLines);
+      if (walLines.length > 0) this.writer.replay(walLines, this.store.maxWalSeq());
     } catch (e) {
       JournalLock.release(this._lockPath(), this.lockMode);
       throw e;

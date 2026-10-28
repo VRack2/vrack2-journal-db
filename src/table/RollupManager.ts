@@ -9,7 +9,7 @@ import type { Journal } from '../journal/Journal.ts';
 import { Rollup } from '../metric/Rollup.ts';
 import type { RollupConfig } from '../metric/Rollup.ts';
 import { AtomicJson } from '../core/AtomicJson.ts';
-import type { AggFn, ResolutionTier, RollupReport, Row } from '../core/types.ts';
+import type { AggFn, ResolutionTier, RollupReport } from '../core/types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('Table', [
@@ -179,12 +179,10 @@ export class RollupManager {
     let cursor = range === null ? maxRollable : Math.max(cp, range[0] - 1);
     while (cursor < maxRollable) {
       const pageEnd = Math.min(cursor + res, maxRollable);
-      let page: Row[];
-      try {
-        page = fine.scan({ start: cursor, end: pageEnd });
-      } catch {
-        page = [];
-      }
+      // No error swallowing: a failed page must abort the rollup BEFORE the
+      // checkpoint advances, otherwise the window's rows are lost while the
+      // watermark claims they were promoted.
+      const page = fine.scan({ start: cursor, end: pageEnd });
       for (const r of page) {
         const ts = r['ts'];
         if (typeof ts === 'number' && Number.isFinite(ts) && ts > cursor && ts <= pageEnd) {

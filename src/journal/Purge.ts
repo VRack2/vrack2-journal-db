@@ -69,6 +69,7 @@ export class Purge {
       removedRows += dropped;
       const fresh = new Segment(seg.id, this.schemaProvider(), this.metadataProvider() ?? {});
       for (const row of kept) fresh.append(row);
+      fresh.walSeq = seg.walSeq;
       this.store.persist(fresh, undefined, this.store.fileOf(id) ?? null);
       rewrittenSegments++;
     }

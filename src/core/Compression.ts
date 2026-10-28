@@ -18,6 +18,17 @@ export class Compression {
     return 'gzip';
   }
 
+  /**
+   * The kind that compress() will ACTUALLY apply for the requested mode.
+   * A header must record this resolved kind, never the requested one —
+   * otherwise a file written as gzip (zstd unavailable) would claim 'zstd'
+   * and fail to open on a Node that has zstd.
+   */
+  static resolve(mode: CompressionKind): CompressionKind {
+    if (mode === 'zstd' && !this.zstdAvailable()) return 'gzip';
+    return mode;
+  }
+
   /** Compress a buffer with the selected method ('none' — as-is). */
   static compress(buf: Buffer, mode: CompressionKind): Buffer {
     if (mode === 'none') return buf;

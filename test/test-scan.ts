@@ -467,5 +467,144 @@ function assertAggSets(got: Row[], want: Row[], msg: string, keyFields: string[]
   j.close();
 }
 
+// --------------------------------------------------
+// Зональная фильтрация по .meta (skipsWhere): сегменты с непересекающимися
+// summary пропускаются целиком; результат совпадает с полным фильтром.
+// --------------------------------------------------
+{
+  const j = new Journal(baseDir, { rowsPerSegment: 25 });
+  j.open('zonemap', SCHEMA);
+  for (let i = 0; i < 100; i++) j.append({ ts: i, value: i, host: 'h' + (i % 2) });
+  j.close();
+
+  const k = new Journal(baseDir);
+  k.open('zonemap', SCHEMA);
+  // ts-фильтр включает hasTsFilter → числовые операторы дают право на skip.
+  const none = k.scan({ start: 0, end: 1000, where: [{ field: 'value', op: 'gt', value: 1000 }] });
+  assert(none.length === 0, `zonemap: gt за максимумом — 0 строк (получено ${none.length})`);
+  const low = k.scan({ start: 0, end: 1000, where: [{ field: 'value', op: 'lt', value: 10 }] });
+  assert(low.length === 10 && low.every(r => (r.value as number) < 10),
+    `zonemap: lt 10 → ровно 10 строк (получено ${low.length})`);
+  const mid = k.scan({ start: 0, end: 1000, where: [{ field: 'value', op: 'ge', value: 60 }] });
+  assert(mid.length === 40 && mid.every(r => (r.value as number) >= 60),
+    `zonemap: ge 60 → ровно 40 строк (получено ${mid.length})`);
+  const eq = k.scan({ start: 0, end: 1000, where: [{ field: 'value', op: 'eq', value: 37 }] });
+  assert(eq.length === 1 && (eq[0].value as number) === 37, `zonemap: eq 37 → 1 строка (получено ${eq.length})`);
+  // Без ts-фильтра skip запрещён — результат всё равно корректен.
+  const noTs = k.scan({ where: [{ field: 'value', op: 'gt', value: 1000 }] });
+  assert(noTs.length === 0, `zonemap: без ts-фильтра — тоже 0 (получено ${noTs.length})`);
+  k.close();
+}
+
+// --------------------------------------------------
+// Ранний стоп: разрешён только при сортировке самим ts, неперекрывающихся
+// числовых .meta-границах закрытых сегментов и либо ts-окне (отсекает строки
+// без ts), либо полном ts-покрытии всех источников (tsCount === rowCount).
+// Иначе — полный скан с сортировкой.
+// --------------------------------------------------
+{
+  const j = new Journal(baseDir, { rowsPerSegment: 5 });
+  j.open('earlystop', SCHEMA);
+  for (let i = 0; i < 5; i++) j.append({ ts: 100 + i, value: 100 + i, host: 'a' });
+  for (let i = 0; i < 5; i++) j.append({ ts: i, value: i, host: 'b' });
+  j.close();
+
+  // У сегмента с ранними ts (minTs=0) забираем .meta: без границ он уезжает
+  // в КОНЕЦ sortedIds — ранний стоп тогда отрезал бы настоящие первые строки.
+  const dir = path.join(baseDir, 'journals', 'earlystop');
+  for (const f of fs.readdirSync(dir)) {
+    if (!f.endsWith('.meta')) continue;
+    const m = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf-8'));
+    if (m.minTs === 0) fs.rmSync(path.join(dir, f));
+  }
+  const k = new Journal(baseDir);
+  k.open('earlystop', SCHEMA);
+  const got = k.scan({ start: 0, end: 1000, select: ['ts'], order: 'asc', limit: 5 });
+  assert(got.length === 5 && got.every((r, i) => (r.ts as number) === i),
+    `early stop без .meta: ts=0..4 (получено ${got.map(r => r.ts).join(',')})`);
+  k.close();
+}
+
+{
+  const j = new Journal(baseDir, { rowsPerSegment: 5 });
+  j.open('earlysort', SCHEMA);
+  for (let i = 0; i < 10; i++) j.append({ ts: i, value: 10 - i, host: 'a' });
+  j.close();
+  const k = new Journal(baseDir);
+  k.open('earlysort', SCHEMA);
+  const got = k.scan({ start: 0, end: 100, select: ['value'], order: 'asc', limit: 3 });
+  assert(JSON.stringify(got.map(r => r.value)) === JSON.stringify([1, 2, 3]),
+    `early stop выключен при sortKey!=ts: value=[1,2,3] (получено ${JSON.stringify(got.map(r => r.value))})`);
+  k.close();
+}
+
+{
+  const j = new Journal(baseDir);
+  j.open('earlynull', SCHEMA_RAW_TS);
+  j.append({ ts: 5, value: 5, host: 'a' });
+  j.append({ host: 'a', value: 9 }); // без ts: сортируется последней, но идёт в середине сегмента
+  j.append({ ts: 1, value: 1, host: 'a' });
+  const got = j.scan({ select: ['ts'], order: 'asc', limit: 2 });
+  assert(got.length === 2 && (got[0].ts as number) === 1 && (got[1].ts as number) === 5,
+    `early stop выключен без ts-окна: ts=[1,5] (получено ${JSON.stringify(got.map(r => r.ts))})`);
+  j.close();
+}
+
+// --------------------------------------------------
+// Перекрывающиеся диапазоны закрытых сегментов — ранний стоп выключен:
+// break по rawNeed отрезал бы меньшие ts из последующего сегмента.
+// --------------------------------------------------
+{
+  const j = new Journal(baseDir, { rowsPerSegment: 2 });
+  j.open('earlyoverlap', SCHEMA);
+  j.append({ ts: 100, value: 100, host: 'a' });
+  j.append({ ts: 50, value: 50, host: 'a' });  // seg1: диапазон [50,100]
+  j.append({ ts: 60, value: 60, host: 'a' });
+  j.append({ ts: 70, value: 70, host: 'a' });  // seg2: [60,70] — перекрывает seg1
+  j.close();
+  const k = new Journal(baseDir);
+  k.open('earlyoverlap', SCHEMA);
+  const got = k.scan({ start: 0, end: 1000, select: ['ts'], order: 'asc', limit: 1 });
+  assert(got.length === 1 && (got[0].ts as number) === 50,
+    `overlap-гейт: минимальный ts=50, не 100 (получено ${got.map(r => r.ts).join(',')})`);
+  k.close();
+}
+
+// --------------------------------------------------
+// Top-k БЕЗ окна разрешён, когда покрыт весь ts (tsCount===rowCount у всех
+// источников) и диапазоны не перекрываются; закрытый сегмент со строками
+// без ts это по-прежнему отключает.
+// --------------------------------------------------
+{
+  const j = new Journal(baseDir, { rowsPerSegment: 2 });
+  j.open('earlyfull', SCHEMA);
+  for (const ts of [10, 11, 20, 21]) j.append({ ts, value: ts, host: 'a' });
+  j.close();
+  const k = new Journal(baseDir);
+  k.open('earlyfull', SCHEMA);
+  const got = k.scan({ select: ['ts'], order: 'asc', limit: 2 });
+  assert(got.length === 2 && (got[0].ts as number) === 10 && (got[1].ts as number) === 11,
+    `top-k без окна (полный ts): [10,11] (получено ${got.map(r => r.ts).join(',')})`);
+  const desc = k.scan({ select: ['ts'], order: 'asc', limit: 2, offset: 2 });
+  assert(desc.length === 2 && (desc[0].ts as number) === 20 && (desc[1].ts as number) === 21,
+    `top-k без окна offset=2: [20,21] (получено ${desc.map(r => r.ts).join(',')})`);
+  k.close();
+}
+
+{
+  const j = new Journal(baseDir, { rowsPerSegment: 3 });
+  j.open('earlynullclosed', SCHEMA_RAW_TS);
+  j.append({ ts: 5, value: 5, host: 'a' });
+  j.append({ host: 'a', value: 9 }); // строка без ts в ЗАКРЫТОМ сегменте: tsCount < rowCount
+  j.append({ ts: 1, value: 1, host: 'a' });
+  j.close();
+  const k = new Journal(baseDir);
+  k.open('earlynullclosed', SCHEMA_RAW_TS);
+  const got = k.scan({ select: ['ts'], order: 'asc', limit: 2 });
+  assert(got.length === 2 && (got[0].ts as number) === 1 && (got[1].ts as number) === 5,
+    `закрытый сегмент без ts: ранний стоп выключен, ts=[1,5] (получено ${JSON.stringify(got.map(r => r.ts))})`);
+  k.close();
+}
+
 console.log(`\nТесты scan: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

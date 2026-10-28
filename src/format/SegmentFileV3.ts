@@ -3,15 +3,21 @@
 // encoding lives in Column.encodeBlob/decodeBlob (single codec layer).
 //
 //   [0..3]     "JSDB"
-//   [4]        3  (version)
+//   [4]        4  (version; 3 = older v3 files, still readable)
 //   [5..7]     0
 //   [8..11]    headerLen (u32 LE)
-//   [12 ..]    header JSON (UTF-8): schema, summaries, rowMap, column kind/
-//              codec/type, column order, compression method
+//   [12 ..]    header JSON (UTF-8): schema, summaries, column kind/codec/type,
+//              column order, compression method, rowMap encoding
 //   then, for each column (in columnOrder):
 //     [blobLen u32]
 //     [compressed blob]   (gzip by default, zstd — option)
+//   then (when header.rowMapLen is set):
+//     [rowMapLen × u32 LE]  — binary logical→physical map
 //   [N-4..N-1] CRC32 of all preceding bytes
+//   (version-3 files store rowMap as a JSON array in the header instead —
+//    they are read unchanged; the version byte went 3→4 when the binary
+//    rowMap tail + walSeq appeared, so older readers reject these files
+//    with a clean "not a v3 segment" instead of a delayed decode error)
 //
 // Columns:
 //   numeric — null mask + numeric codec (f64|doubleDelta|gorilla|rle)
@@ -38,15 +44,19 @@ ErrorManager.registerMany('SegmentFileV3', [
   { short: 'SFW3_NOT_V3', description: 'decodeV3: buffer is not a v3 segment' },
   { short: 'SFW3_TOO_SMALL', description: 'Corrupted v3 segment: file too small' },
   { short: 'SFW3_CRC', description: 'Corrupted v3 segment: checksum mismatch' },
+  { short: 'SFW3_NO_ROWMAP', description: 'Corrupted v4 segment: binary rowMap tail missing from header' },
+  { short: 'SFW3_ZSTD_REQUIRED', description: 'v3 segment uses zstd: requires Node.js >= 23.8' },
 ]);
 
 const V3 = 3;
+/** Version 4 = binary rowMap tail + walSeq header (written now); 3 = JSON rowMap (read-only legacy). */
+const V4 = 4;
 
 export interface V3EncodeOptions {
   /** Blob compression: 'zstd' (default on Node ≥ 23.8) or 'gzip'. */
   compression?: CompressionKind;
   /** Explicit numeric codec for a column (field → codec name).
-   *  Omitted columns — auto-picked from data (NumCodecs.autoPick). */
+   *  Omitted columns — every codec is tried and the smallest result is kept. */
   codecs?: Record<string, string>;
 }
 
@@ -60,16 +70,21 @@ interface V3ColSpec {
 }
 
 interface V3Header {
-  v: 3;
+  v: number;
   id: string;
   schema: Schema;
   metadata: Metadata;
   rowCount: number;
   physicalRowCount: number;
   tsCount: number;
+  /** WAL watermark (highest WAL seq covered); 0/absent = unwatermarked. */
+  walSeq?: number;
   minTs: number | null;
   maxTs: number | null;
-  rowMap: number[];
+  /** Logical→physical map. New writes use the binary tail (rowMapLen);
+   *  old files carry it as a JSON array here. */
+  rowMap?: number[];
+  rowMapLen?: number;
   summaries: Record<string, ColumnSummary>;
   compression: CompressionKind;
   columnOrder: string[];
@@ -77,14 +92,18 @@ interface V3Header {
 }
 
 export class SegmentFileV3 {
-  /** Whether the buffer is a v3 segment (by magic bytes and version). */
+  /** Whether the buffer is a v3-generation segment (magic + version 3 or 4). */
   static isV3(buf: Buffer): boolean {
-    return buf.length >= 5 && buf.subarray(0, 4).equals(Buffer.from('JSDB', 'ascii')) && buf[4] === V3;
+    return buf.length >= 5 && buf.subarray(0, 4).equals(Buffer.from('JSDB', 'ascii'))
+      && (buf[4] === V3 || buf[4] === V4);
   }
 
   /** Serialize a segment to a v3 buffer (binary blobs + compression + CRC32). */
   static encode(segment: Segment, opts: V3EncodeOptions = {}): Buffer {
-    const compression: CompressionKind = opts.compression ?? Compression.default();
+    // Record the kind actually applied — an explicit 'zstd' on a Node without
+    // zstd compresses as gzip, and the header must say 'gzip' so any Node
+    // can read the file back.
+    const compression: CompressionKind = Compression.resolve(opts.compression ?? Compression.default());
     const columnOrder = Object.keys(segment.schema);
 
     const specs: Record<string, V3ColSpec> = {};
@@ -99,16 +118,17 @@ export class SegmentFileV3 {
     }
 
     const header: V3Header = {
-      v: 3,
+      v: V4,
       id: segment.id,
       schema: segment.schema,
       metadata: segment.metadata,
       rowCount: segment.rowCount,
       physicalRowCount: segment.physicalRowCount,
       tsCount: segment.tsCount,
+      walSeq: segment.walSeq,
       minTs: segment.minTs,
       maxTs: segment.maxTs,
-      rowMap: segment.rowMap,
+      rowMapLen: segment.rowMap.length,
       summaries: segment.summaries,
       compression,
       columnOrder,
@@ -121,7 +141,7 @@ export class SegmentFileV3 {
 
     const magic = Buffer.alloc(8);
     magic.write('JSDB', 0, 'ascii');
-    magic[4] = V3;
+    magic[4] = V4;
 
     const parts: Buffer[] = [magic, headLen, headerBuf];
     for (let ci = 0; ci < columnOrder.length; ci++) {
@@ -129,6 +149,11 @@ export class SegmentFileV3 {
       len.writeUInt32LE(blobs[ci].length, 0);
       parts.push(len, blobs[ci]);
     }
+
+    // Binary rowMap tail: one u32 per logical row (JSON numbers cost ~4x).
+    const rowMapBuf = Buffer.alloc(segment.rowMap.length * 4);
+    for (let i = 0; i < segment.rowMap.length; i++) rowMapBuf.writeUInt32LE(segment.rowMap[i], i * 4);
+    parts.push(rowMapBuf);
 
     const body = Buffer.concat(parts);
     const crc = zlib.crc32(body) >>> 0;
@@ -160,11 +185,29 @@ export class SegmentFileV3 {
     let off = 12 + headerLen;
 
     const compression: CompressionKind = header.compression ?? 'gzip';
+    if (compression === 'zstd' && !Compression.zstdAvailable()) {
+      throw ErrorManager.make('SFW3_ZSTD_REQUIRED');
+    }
     const blobMap = new Map<string, Buffer>();
     for (const field of header.columnOrder) {
       const blobLen = buf.readUInt32LE(off); off += 4;
       const blobBuf = buf.subarray(off, off + blobLen); off += blobLen;
       blobMap.set(field, Compression.decompress(blobBuf, compression));
+    }
+
+    // rowMap: v4 always stores it as a binary u32 tail; v3 (legacy) carries a
+    // JSON array in the header. Branch on the version byte, not on header
+    // presence, so a v4 file with a missing tail is caught as corruption.
+    const version = buf[4];
+    let rowMap: number[];
+    if (version === V4) {
+      if (typeof header.rowMapLen !== 'number') {
+        throw ErrorManager.make('SFW3_NO_ROWMAP');
+      }
+      rowMap = new Array<number>(header.rowMapLen);
+      for (let i = 0; i < header.rowMapLen; i++) { rowMap[i] = buf.readUInt32LE(off); off += 4; }
+    } else {
+      rowMap = Array.isArray(header.rowMap) ? header.rowMap : [];
     }
 
     const seg = new Segment(header.id, header.schema, header.metadata);
@@ -174,7 +217,8 @@ export class SegmentFileV3 {
     seg.maxTs = header.maxTs;
     // v3 writes always store tsCount and summaries (see encode) — no fallback needed
     seg.tsCount = typeof header.tsCount === 'number' ? header.tsCount : 0;
-    seg.rowMap = header.rowMap;
+    seg.walSeq = typeof header.walSeq === 'number' ? header.walSeq : 0;
+    seg.rowMap = rowMap;
     seg.summaries = header.summaries && typeof header.summaries === 'object'
       ? header.summaries
       : {};

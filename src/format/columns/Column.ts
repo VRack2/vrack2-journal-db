@@ -47,9 +47,11 @@ export abstract class Column {
     for (let i = 0; i < this._length; i++) values[i] = this.get(i);
 
     if (Column.pickKind(values) === 'numeric') {
-      const numeric = values.filter((v): v is number => typeof v === 'number');
-      const requested = opts.codec ?? NumCodecs.autoPick(numeric);
-      const { buf, codecUsed } = Column.encodeNumericBlob(values, requested);
+      const nonNull: number[] = [];
+      for (const v of values) if (typeof v === 'number') nonNull.push(v);
+      const { buf, codecUsed } = opts.codec !== undefined
+        ? Column.encodeNumericBlob(values, opts.codec)
+        : Column.encodeNumericBlobProbed(values, nonNull);
       return { kind: 'numeric', buf, codecUsed };
     }
     return { kind: 'dict', buf: Column.encodeDictBlob(values) };
@@ -82,18 +84,7 @@ export abstract class Column {
     values: JsonValue[],
     codecName: string
   ): { buf: Buffer; codecUsed: string } {
-    const n = values.length;
-    const maskBytes = Math.ceil(n / 8);
-    const mask = new Uint8Array(maskBytes);
-    const nonNull: number[] = [];
-    for (let i = 0; i < n; i++) {
-      const v = values[i];
-      if (v === null || v === undefined) {
-        mask[i >> 3] |= 1 << (7 - (i & 7));
-      } else {
-        nonNull.push(v as number);
-      }
-    }
+    const { head, mask, nonNull } = Column.buildNumericFrame(values);
 
     // Unknown codec name — error (typos must not silently fall into f64).
     const codec = NumCodecs.get(codecName);
@@ -108,10 +99,82 @@ export abstract class Column {
       codecBuf = NumCodecs.get('f64').encode(nonNull);
     }
 
-    const head = Buffer.alloc(4);
-    head.writeUInt32LE(nonNull.length, 0);
     const buf = Buffer.concat([head, Buffer.from(mask), codecBuf]);
     return { buf, codecUsed };
+  }
+
+  /**
+   * No explicit codec — pick the codec with the smallest result and encode
+   * once. Codecs that reject the data (rle on fractions) are skipped.
+   * Columns longer than PROBE_SAMPLE values are ranked on a evenly-spaced
+   * sample (first/last included), so the probe costs O(sample) encodes
+   * instead of full-column encodes per codec — a probe is a heuristic for
+   * size anyway. The winning codec then encodes the full column once; if it
+   * rejects data the sample didn't contain, fall back to f64.
+   */
+  private static readonly PROBE_SAMPLE = 512;
+
+  private static encodeNumericBlobProbed(
+    values: JsonValue[],
+    nonNull: number[]
+  ): { buf: Buffer; codecUsed: string } {
+    const { head, mask } = Column.buildNumericFrame(values);
+
+    const sample = nonNull.length > Column.PROBE_SAMPLE ? Column.spacedSample(nonNull) : nonNull;
+    let bestName: string | null = null;
+    let bestLen = Infinity;
+    for (const name of Object.keys(NumCodecs.registry)) {
+      let len: number;
+      try {
+        len = NumCodecs.registry[name].encode(sample).length;
+      } catch {
+        continue; // codec rejects these values — not a candidate
+      }
+      if (len < bestLen) {
+        bestLen = len;
+        bestName = name;
+      }
+    }
+    if (bestName === null) bestName = 'f64';
+
+    let codecBuf: Buffer;
+    try {
+      codecBuf = NumCodecs.get(bestName).encode(nonNull);
+    } catch {
+      bestName = 'f64';
+      codecBuf = NumCodecs.get('f64').encode(nonNull);
+    }
+
+    const buf = Buffer.concat([head, Buffer.from(mask), codecBuf]);
+    return { buf, codecUsed: bestName };
+  }
+
+  /** Evenly-spaced sample keeping both endpoints. */
+  private static spacedSample(values: number[]): number[] {
+    const n = values.length;
+    const size = Column.PROBE_SAMPLE;
+    const out: number[] = new Array(size);
+    const stride = (n - 1) / (size - 1);
+    for (let i = 0; i < size; i++) out[i] = values[Math.round(i * stride)];
+    return out;
+  }
+
+  /** null-bitmask + non-null numeric list + count header shared by both paths. */
+  private static buildNumericFrame(values: JsonValue[]): { head: Buffer; mask: Uint8Array; nonNull: number[] } {
+    const n = values.length;
+    const mask = new Uint8Array(Math.ceil(n / 8));
+    const nonNull: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const v = values[i];
+      if (v === null || v === undefined) {
+        mask[i >> 3] |= 1 << (7 - (i & 7));
+      } else {
+        nonNull.push(v as number);
+      }
+    }
+    const head = Buffer.alloc(4);
+    head.writeUInt32LE(nonNull.length, 0);
+    return { head, mask, nonNull };
   }
 
   private static encodeDictBlob(values: JsonValue[]): Buffer {

@@ -6,6 +6,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { Journal } from '../src/journal/Journal.ts';
 import { Segment } from '../src/format/Segment.ts';
@@ -85,7 +86,8 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   assert(files.length === 1, `один v3-сегмент на диске (факт ${files.length})`);
 
   const buf = fs.readFileSync(path.join(dir, files[0]));
-  assert(SegmentFileV3.isV3(buf), 'файл — сегмент v3 (магические байты + версия 3)');
+  assert(SegmentFileV3.isV3(buf), 'файл — сегмент v3-семейства (магические байты + версия)');
+  assert(buf[4] === 4, 'записан контейнер версии 4 (бинарный rowMap-хвост)');
 
   // codec value зафиксирован в схеме как gorilla (явный выбор)
   const h = v3Header(buf);
@@ -294,6 +296,118 @@ fs.rmSync(baseDir, { recursive: true, force: true });
     'значения совпадают'
   );
   j2.close();
+}
+
+// --------------------------------------------------
+// 8. Версия контейнера: записи — v4; легаси v3 (JSON rowMap в шапке)
+//    читается прозрачно; v4-файл с потерянным rowMap-хвостом → явная ошибка.
+// --------------------------------------------------
+{
+  const schema: Schema = { ts: 'raw', value: 'raw' };
+
+  // 8a. Легаси v3: JSON rowMap в шапке, версия 3 — декодируется как раньше.
+  {
+    const seg = new Segment('legacy', schema);
+    for (let i = 0; i < 20; i++) seg.append({ ts: i * 100, value: i });
+    const rowMap = Array.from(seg.rowMap);
+    // Собираем контейнер «по-старому»: header c rowMap JSON (без rowMapLen), без бинарного хвоста.
+    const spec: Record<string, { kind: string; codec?: string; type?: string }> = {};
+    const blobs: Buffer[] = [];
+    const order = Object.keys(schema);
+    for (const f of order) {
+      const b = seg.columns[f].encodeBlob({});
+      spec[f] = { kind: b.kind, codec: b.codecUsed, type: schema[f] };
+      blobs.push(Compression.compress(b.buf, 'gzip'));
+    }
+    const header = {
+      v: 3, id: seg.id, schema, metadata: seg.metadata,
+      rowCount: seg.rowCount, physicalRowCount: seg.physicalRowCount, tsCount: seg.tsCount,
+      minTs: seg.minTs, maxTs: seg.maxTs, rowMap, summaries: seg.summaries,
+      compression: 'gzip', columnOrder: order, columns: spec,
+    };
+    const hbuf = Buffer.from(JSON.stringify(header), 'utf-8');
+    const headLen = Buffer.alloc(4); headLen.writeUInt32LE(hbuf.length, 0);
+    const magic = Buffer.alloc(8); magic.write('JSDB', 0, 'ascii'); magic[4] = 3;
+    const parts: Buffer[] = [magic, headLen, hbuf];
+    for (const bl of blobs) { const l = Buffer.alloc(4); l.writeUInt32LE(bl.length, 0); parts.push(l, bl); }
+    const body = Buffer.concat(parts);
+    const crc = Buffer.alloc(4); crc.writeUInt32LE(zlib.crc32(body) >>> 0, 0);
+    const buf = Buffer.concat([body, crc]);
+
+    assert(SegmentFileV3.isV3(buf), 'легаси v3 (версия 3) распознаётся');
+    const dec = SegmentFileV3.decode(buf);
+    let ok = dec.rowCount === 20;
+    for (let i = 0; i < 20 && ok; i++) {
+      const r = dec.getRow(i);
+      if (r.ts !== i * 100 || r.value !== i) ok = false;
+    }
+    assert(ok, 'легаси v3 с JSON rowMap — lossless-декод (20 строк)');
+  }
+
+  // 8b. v4-шапка без rowMapLen (урезан хвост) → явная ошибка, а не тихий пустой rowMap.
+  {
+    const seg = new Segment('v4cut', schema);
+    for (let i = 0; i < 10; i++) seg.append({ ts: i, value: i });
+    const buf = SegmentFileV3.encode(seg, { compression: 'gzip' });
+    const h = v3Header(buf);
+    assert(h.v === 4 && typeof h.rowMapLen === 'number', 'записан v4 с rowMapLen');
+    delete h.rowMapLen;
+    const hbuf = Buffer.from(JSON.stringify(h), 'utf-8');
+    const headLen = Buffer.alloc(4); headLen.writeUInt32LE(hbuf.length, 0);
+    const magic = Buffer.alloc(8); magic.write('JSDB', 0, 'ascii'); magic[4] = 4;
+    // только шапка + блобы (без хвоста), затем честный CRC этого урезанного тела
+    const oldHeadLen = buf.readUInt32LE(8);
+    const body = Buffer.concat([magic, headLen, hbuf, buf.subarray(12 + oldHeadLen, buf.length - 4)]);
+    const crc = Buffer.alloc(4); crc.writeUInt32LE(zlib.crc32(body) >>> 0, 0);
+    const cutBuf = Buffer.concat([body, crc]);
+    let threw = false;
+    try { SegmentFileV3.decode(cutBuf); } catch (e) {
+      threw = ErrorManager.isCode(e, 'SFW3_NO_ROWMAP');
+    }
+    assert(threw, 'v4 без rowMap-хвоста → SFW3_NO_ROWMAP (не тихая потеря)');
+  }
+}
+
+// --------------------------------------------------
+// 9. Codec-probe на выборке: >512 значений → ранжируется по равномерной
+//    выборке, победитель кодирует весь столбец; lossless.
+// --------------------------------------------------
+{
+  const schema: Schema = { ts: 'raw', cpu: 'raw', host: 'raw' };
+  const seg = new Segment('probe', schema);
+  const N = 5000;
+  for (let i = 0; i < N; i++) {
+    seg.append({ ts: i * 1000, cpu: Math.sin(i / 15) * 50, host: (i % 2 === 0 ? 'a' : 'b') });
+  }
+  const buf = SegmentFileV3.encode(seg, { compression: 'gzip' }); // без явных кодеков → probe
+  const h = v3Header(buf);
+  // Свойство: ранжирование по равномерной выборке даёт того же победителя,
+  // что и полный прогон кодеков по всему столбцу.
+  const fullWinner = (values: number[]): string => {
+    let best = 'f64';
+    let bestLen = Infinity;
+    for (const name of Object.keys(NumCodecs.registry)) {
+      try {
+        const l = NumCodecs.get(name).encode(values).length;
+        if (l < bestLen) { bestLen = l; best = name; }
+      } catch { /* reject */ }
+    }
+    return best;
+  }
+  const tsVals: number[] = [];
+  const cpuVals: number[] = [];
+  for (let i = 0; i < N; i++) { tsVals.push(i * 1000); cpuVals.push(Math.sin(i / 15) * 50); }
+  assert(h.columns.ts.codec === fullWinner(tsVals),
+    `probe (>512): победитель ts по выборке = победитель полного прогона (${h.columns.ts.codec})`);
+  assert(h.columns.cpu.codec === fullWinner(cpuVals),
+    `probe (>512): победитель cpu по выборке = победитель полного прогона (${h.columns.cpu.codec})`);
+  const dec = SegmentFileV3.decode(buf);
+  let ok = dec.rowCount === N;
+  for (let i = 0; i < N && ok; i++) {
+    const r = dec.getRow(i);
+    if (r.ts !== i * 1000 || r.cpu !== Math.sin(i / 15) * 50 || r.host !== (i % 2 === 0 ? 'a' : 'b')) ok = false;
+  }
+  assert(ok, `probe на выборке: ${N} строк lossless`);
 }
 
 console.log(`\nТесты формата v3: ${passed} passed, ${failed} failed`);

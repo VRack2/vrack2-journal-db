@@ -11,6 +11,7 @@ import { Store } from '../src/store/Store.ts';
 import { Table, parseRetention } from '../src/table/Table.ts';
 import { Rollup } from '../src/metric/Rollup.ts';
 import { defineLogTable, defineUpsertTable } from '../src/compaction/define.ts';
+import ErrorManager from '../src/errors/ErrorManager.ts';
 import type { Row } from '../src/core/types.ts';
 
 let passed = 0;
@@ -332,6 +333,43 @@ console.log('\nПредсказуемый размер (100 строк в одн
   assert(st[0].bytes > 0 && st[0].bytes < 100 * 1000, `тир0: bytes в разумных пределах (${st[0].bytes})`);
 
   t.close();
+  store.closeAll();
+}
+
+// ============================================================================
+console.log('\nСайдкар .meta: bytes + listTables без разжатия сегментов:');
+// ============================================================================
+{
+  const dir = tmpDir();
+  const store = new Store(dir, { autoCompact: false });
+  const t = store.create(defineLogTable({
+    name: 'metab',
+    columns: { ts: 'delta', value: 'auto' },
+    retention: '5s:1d',
+    agg: { value: 'avg' },
+    nowProvider: () => NOW,
+    autoRollup: false, autoPurge: false,
+  }));
+  for (let i = 0; i < 20; i++) t.append({ ts: NOW - 2 * DAY + i * 1000, value: i });
+  t.flush();
+  t.close();
+
+  const jdir = path.join(dir, 'journals', 'metab', 'r5000');
+  const segs = fs.readdirSync(jdir).filter(f => f.endsWith('.seg') || f.endsWith('.json'));
+  const metas = fs.readdirSync(jdir).filter(f => f.endsWith('.meta'));
+  assert(segs.length >= 1 && metas.length === segs.length, `каждый сегмент с .meta (сегментов=${segs.length}, мета=${metas.length})`);
+  let bytesOk = metas.length === segs.length;
+  for (const mf of metas) {
+    const m = JSON.parse(fs.readFileSync(path.join(jdir, mf), 'utf-8'));
+    const size = fs.statSync(path.join(jdir, mf.slice(0, -'.meta'.length))).size;
+    if (m.bytes !== size) bytesOk = false;
+  }
+  assert(bytesOk, '.meta содержит bytes = реальному размеру файла сегмента');
+
+  // Бьём сегмент: строки всё равно считаются из .meta (сегмент не разжимается).
+  fs.writeFileSync(path.join(jdir, segs[0]), 'not-a-segment');
+  const desc = store.describe().find(d => d.name === 'metab');
+  assert(!!desc && desc.rows === 20, `listTables: 20 строк из .meta несмотря на битый сегмент (got ${desc ? desc.rows : 'нет таблицы'})`);
   store.closeAll();
 }
 
@@ -732,6 +770,66 @@ console.log('\ntruncate: полная очистка таблицы:');
   const coarse = t.journal(1).allRows();
   assert(coarse.length === 1 && coarse[0].value === 20,
     `тир: новый агрегат avg(20)=20, got ${JSON.stringify(coarse)}`);
+
+  t.close();
+  store.closeAll();
+}
+
+// ============================================================================
+console.log('\nscan() в тир-режиме: pushdown where/select/limit во все тиры:');
+// ============================================================================
+{
+  const dir = tmpDir();
+  const store = new Store(dir, { autoCompact: false });
+  const t = store.create(defineLogTable({
+    name: 'scan-tiers',
+    columns: { ts: 'delta', value: 'auto', host: 'dictionary' },
+    retention: '5s:1d,15s:1w,1m:1mon',
+    agg: { value: 'avg' },
+    nowProvider: () => NOW,
+    autoRollup: false, autoPurge: false,
+  }));
+
+  const B = Math.floor((NOW - 2 * DAY) / 15000) * 15000;
+  t.append({ ts: B + 5000, value: 10, host: 'a' });
+  t.append({ ts: B + 10000, value: 20, host: 'b' });
+  t.append({ ts: B + 15000, value: 30, host: 'a' });
+  t.rollup(); // оба тира с данными (окно 1d..1w)
+
+  const win = { start: B - 1000, end: B + 30000 };
+
+  // where по полю вне select + select — классический регресс pushdown'а:
+  // фильтр обязан применяться до проекции (иначе хост уже не виден).
+  const ws = t.scan({ ...win, where: [{ field: 'host', op: 'eq', value: 'a' }], select: ['value'], order: 'asc' });
+  assert(JSON.stringify(ws) === JSON.stringify([{ value: 10 }, { value: 30 }]),
+    `where(host=a)+select(value): [10,30], got ${JSON.stringify(ws)}`);
+
+  // where по полю ВНУТРИ select — тоже корректно.
+  const ws2 = t.scan({ ...win, where: [{ field: 'value', op: 'ge', value: 20 }], select: ['value', 'host'], order: 'asc' });
+  assert(JSON.stringify(ws2) === JSON.stringify([{ value: 20, host: 'b' }, { value: 30, host: 'a' }]),
+    `where(value>=20)+select: got ${JSON.stringify(ws2)}`);
+
+  // where + desc + limit/offset по смерженному потоку.
+  const desc = t.scan({ ...win, where: [{ field: 'host', op: 'eq', value: 'a' }], order: 'desc', limit: 1 });
+  assert(desc.length === 1 && desc[0].value === 30,
+    `where+desc+limit: первая 30, got ${JSON.stringify(desc)}`);
+  const off = t.scan({ ...win, where: [{ field: 'host', op: 'eq', value: 'a' }], order: 'asc', offset: 1, limit: 1 });
+  assert(off.length === 1 && off[0].value === 30,
+    `where+asc+offset: вторая 30, got ${JSON.stringify(off)}`);
+
+  // Числовой оператор по ts-подобному полю без select — без изменений семантики.
+  const nsel = t.scan({ ...win, where: [{ field: 'value', op: 'lt', value: 15 }], order: 'asc' });
+  assert(nsel.length === 1 && nsel[0].value === 10,
+    `where(value<15) без select: got ${JSON.stringify(nsel)}`);
+
+  // Невалидный op — прежний контракт TBL_WHERE_OP.
+  let threw = false;
+  try {
+    t.scan({ ...win, where: [{ field: 'host', op: 'zzz' as never, value: 'a' }] });
+  } catch (e) {
+    threw = ErrorManager.isCode(e, 'TBL_WHERE_OP');
+  }
+  assert(threw, 'невалидный op в where → TBL_WHERE_OP');
 
   t.close();
   store.closeAll();

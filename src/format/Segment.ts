@@ -43,6 +43,11 @@ export class Segment {
    *  lying entirely inside the range. */
   summaries: Record<string, ColumnSummary> = {};
 
+  /** WAL watermark: the highest WAL sequence covered by this segment's rows.
+   *  Replay skips WAL lines with seq <= the max watermark across closed
+   *  segments, so a crash between persist and WAL truncate cannot duplicate. */
+  walSeq = 0;
+
   /** Name of the "catch-all" field (catchall type) for fields outside the schema, or null */
   private _catchAllField: string | null = null;
 
@@ -187,7 +192,8 @@ export class Segment {
       maxTs: this.maxTs,
       rowMap: this.rowMap,
       columns: serializedColumns,
-      summaries: this.summaries
+      summaries: this.summaries,
+      walSeq: this.walSeq
     };
   }
 
@@ -215,6 +221,7 @@ export class Segment {
     segment.summaries = (data.summaries && typeof data.summaries === 'object')
       ? data.summaries
       : segment._computeSummaries();
+    segment.walSeq = typeof data.walSeq === 'number' ? data.walSeq : 0;
     return segment;
   }
 

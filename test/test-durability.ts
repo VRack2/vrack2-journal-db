@@ -35,7 +35,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
 // --------------------------------------------------
 {
   // Дочерний процесс пишет 5 строк и «крашится» (без close)
-  execFileSync(process.execPath, ['--experimental-strip-types', helperPath, baseDir, 'wal-crash', '5']);
+  execFileSync(process.execPath, ['--experimental-strip-types', helperPath, baseDir, 'wal-crash', '5', 'on']);
 
   const dir = path.join(baseDir, 'journals', 'wal-crash');
   assert(fs.existsSync(path.join(dir, 'wal.log')), 'WAL существует после «краха» (строки не сфлашены)');
@@ -194,7 +194,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
 // --------------------------------------------------
 {
   // Путь 1: строка ещё в буфере (дефолтный walBatchSize)
-  const j = new Journal(baseDir);
+  const j = new Journal(baseDir, { wal: 'on' });
   j.open('wal-rollback', schema);
   let rejected = false;
   try {
@@ -214,7 +214,7 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   j2.close();
 
   // Путь 2: строка уже на диске (walBatchSize=1 — каждый append дренирует буфер)
-  const k = new Journal(baseDir, { walBatchSize: 1 });
+  const k = new Journal(baseDir, { walBatchSize: 1, wal: 'on' });
   k.open('wal-rollback-disk', schema);
   let rejected2 = false;
   try {
@@ -232,6 +232,214 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   assert(rows2.length === 1 && rows2[0].val === 'ok',
     `после reopen (запись на диске): только валидная строка (факт ${rows2.length})`);
   k2.close();
+}
+
+// --------------------------------------------------
+// 7. WAL watermark: уже покрытые seq не воспроизводятся повторно.
+//    Имитируем крах между persist сегмента и усечением WAL: сегмент
+//    с walSeq на диске + wal.log с покрытыми и непокрытой строками.
+// --------------------------------------------------
+{
+  const j = new Journal(baseDir, { wal: 'on' });
+  j.open('wal-watermark', schema);
+  for (let i = 0; i < 3; i++) j.append({ ts: i, val: `m${i}` });
+  j.close(); // сегмент с walSeq=3, WAL усечён
+
+  const dir = path.join(baseDir, 'journals', 'wal-watermark');
+  // «Порванный» WAL: покрытые seq 1..3 (дубли) + свежая seq 4
+  fs.writeFileSync(path.join(dir, 'wal.log'),
+    '1 {"ts":0,"val":"m0"}\n2 {"ts":1,"val":"m1"}\n3 {"ts":2,"val":"m2"}\n4 {"ts":99,"val":"late"}\n',
+    'utf-8');
+
+  const j2 = new Journal(baseDir, { wal: 'on' });
+  j2.open('wal-watermark', schema);
+  const rows = j2.allRows();
+  assert(rows.length === 4, `watermark: без дублей — 3+1 строка (факт ${rows.length})`);
+  assert(rows.some(r => r.val === 'late'), 'watermark: непокрытая строка восстановлена');
+  assert(rows.filter(r => r.val === 'm0').length === 1, 'watermark: покрытая строка не задублирована');
+  j2.close();
+
+  const j3 = new Journal(baseDir, { wal: 'on' });
+  j3.open('wal-watermark', schema);
+  assert(j3.allRows().length === 4, `watermark: повторный reopen — те же 4 строки (факт ${j3.allRows().length})`);
+  j3.close();
+}
+
+// --------------------------------------------------
+// 7b. WAL выключен (дефолт): «крах» роняет несфлашенные строки,
+//     wal.log вообще не создаётся; закрытие и flush работают как раньше.
+// --------------------------------------------------
+{
+  execFileSync(process.execPath, ['--experimental-strip-types', helperPath, baseDir, 'wal-off-crash', '5', 'off']);
+
+  const dir = path.join(baseDir, 'journals', 'wal-off-crash');
+  assert(!fs.existsSync(path.join(dir, 'wal.log')), 'off: wal.log не создан');
+  assert(
+    fs.readdirSync(dir).filter(f => f.endsWith('.json')).length === 0,
+    'off: сегментов нет (нет и строки с ними)'
+  );
+
+  const j = new Journal(baseDir);
+  j.open('wal-off-crash', schema);
+  assert(j.allRows().length === 0, `off: после «краха» несфлашенных строк нет (факт ${j.allRows().length})`);
+
+  // нормальный путь не меняется: append → close → reopen сохраняет
+  for (let i = 0; i < 3; i++) j.append({ ts: i, val: `d${i}` });
+  j.close();
+  const j2 = new Journal(baseDir);
+  j2.open('wal-off-crash', schema);
+  assert(j2.allRows().length === 3, `off: чистое закрытие сохраняет 3 строки (факт ${j2.allRows().length})`);
+  j2.close();
+
+  // невалидное значение опции
+  let threw = false;
+  try {
+    new Journal(baseDir, { wal: 'bogus' as never });
+  } catch (e) {
+    threw = ErrorManager.isCode(e, 'JRN_OPT_WAL');
+  }
+  assert(threw, "wal: невалидное значение → JRN_OPT_WAL");
+}
+
+// --------------------------------------------------
+// 8. Tolerant tail: оборванная ПОСЛЕДНЯЯ строка WAL отбрасывается,
+//    журнал открывается и остаётся рабочим.
+// --------------------------------------------------
+{
+  const dir = path.join(baseDir, 'journals', 'wal-tail');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'wal.log'),
+    '1 {"ts":0,"val":"a"}\n2 {"ts":1,"val":"b"}\n3 {"ts":2,"va', // оборванный хвост
+    'utf-8');
+
+  const j = new Journal(baseDir);
+  j.open('wal-tail', schema);
+  const rows = j.allRows();
+  assert(rows.length === 2 && rows[0].val === 'a' && rows[1].val === 'b',
+    `tolerant tail: 2 целые строки, хвост отброшен (факт ${rows.length})`);
+  j.append({ ts: 3, val: 'c' });
+  j.close();
+
+  const j2 = new Journal(baseDir);
+  j2.open('wal-tail', schema);
+  assert(j2.allRows().length === 3, `tolerant tail: журнал рабочий после reopen (факт ${j2.allRows().length})`);
+  j2.close();
+}
+
+// --------------------------------------------------
+// 9. Порча СЕРЕДИНЫ WAL — явная ошибка (не тихая потеря данных).
+// --------------------------------------------------
+{
+  const dir = path.join(baseDir, 'journals', 'wal-midcorrupt');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'wal.log'),
+    '1 {"ts":0,"val":"a"}\n2 {"ts":1,"va//}\n3 {"ts":2,"val":"c"}\n', // битая в середине
+    'utf-8');
+
+  let threw = false;
+  try {
+    const j = new Journal(baseDir);
+    j.open('wal-midcorrupt', schema);
+    j.close();
+  } catch (e) {
+    threw = true;
+    assert(ErrorManager.isCode(e, 'JRN_WAL_CORRUPT'), 'середина WAL: ошибка JRN_WAL_CORRUPT');
+  }
+  assert(threw, 'середина WAL: open бросает ошибку, а не теряет строки молча');
+
+  // Блокировка снята — журнал можно починить и открыть
+  fs.writeFileSync(path.join(dir, 'wal.log'), '1 {"ts":0,"val":"a"}\n', 'utf-8');
+  const j2 = new Journal(baseDir);
+  j2.open('wal-midcorrupt', schema);
+  assert(j2.allRows().length === 1, 'после ручной починки WAL журнал открывается');
+  j2.close();
+}
+
+// --------------------------------------------------
+// 10. Легаси WAL: строки без seq-префикса (до watermark-фичи) —
+//     воспроизводятся целиком, а не отбрасываются и не роняют open().
+// --------------------------------------------------
+{
+  const dir = path.join(baseDir, 'journals', 'wal-legacy');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'wal.log'),
+    '{"ts":0,"val":"a"}\n{"ts":1,"val":"b"}\n', 'utf-8');
+
+  const j = new Journal(baseDir);
+  j.open('wal-legacy', schema);
+  const rows = j.allRows();
+  assert(rows.length === 2 && rows[0].val === 'a' && rows[1].val === 'b',
+    `легаси WAL: обе строки восстановлены (факт ${rows.length})`);
+  j.close();
+
+  const j2 = new Journal(baseDir);
+  j2.open('wal-legacy', schema);
+  assert(j2.allRows().length === 2, `легаси WAL: после reopen те же 2 строки (факт ${j2.allRows().length})`);
+  j2.close();
+}
+
+// --------------------------------------------------
+// 11. Некорректный seq-префикс (не безопасное целое / немонотонный) —
+//     явная порча, а не отравление watermark'а.
+// --------------------------------------------------
+{
+  const dir = path.join(baseDir, 'journals', 'wal-badseq');
+  fs.mkdirSync(dir, { recursive: true });
+
+  fs.writeFileSync(path.join(dir, 'wal.log'),
+    '1 {"ts":0,"val":"a"}\n99999999999999999999 {"ts":1,"val":"b"}\n2 {"ts":2,"val":"c"}\n', 'utf-8');
+  let threw = false;
+  try {
+    const j = new Journal(baseDir);
+    j.open('wal-badseq', schema);
+    j.close();
+  } catch (e) {
+    threw = ErrorManager.isCode(e, 'JRN_WAL_CORRUPT');
+  }
+  assert(threw, 'seq > 2^53 в середине → JRN_WAL_CORRUPT (watermark не отравлен)');
+
+  fs.writeFileSync(path.join(dir, 'wal.log'),
+    '5 {"ts":0,"val":"a"}\n3 {"ts":1,"val":"b"}\n', 'utf-8');
+  threw = false;
+  try {
+    const j = new Journal(baseDir);
+    j.open('wal-badseq', schema);
+    j.close();
+  } catch (e) {
+    threw = ErrorManager.isCode(e, 'JRN_WAL_CORRUPT');
+  }
+  assert(threw, 'немонотонный seq (после 5 идёт 3) → JRN_WAL_CORRUPT');
+
+  fs.writeFileSync(path.join(dir, 'wal.log'), '1 {"ts":0,"val":"a"}\n2 {"ts":1,"val":"b"}\n', 'utf-8');
+  const j2 = new Journal(baseDir);
+  j2.open('wal-badseq', schema);
+  assert(j2.allRows().length === 2, 'после ручной починки WAL журнал открывается');
+  j2.close();
+}
+
+// --------------------------------------------------
+// 12. Рваный .meta при непустом wal.log: мета восстанавливается из
+//     сегмента ДО замера watermark — уже сохранённые строки не дублируются.
+// --------------------------------------------------
+{
+  const j = new Journal(baseDir, { wal: 'on' });
+  j.open('wal-tornmeta', schema);
+  for (let i = 0; i < 3; i++) j.append({ ts: i, val: `m${i}` });
+  j.close(); // сегмент с walSeq=3 + .meta на диске
+
+  const dir = path.join(baseDir, 'journals', 'wal-tornmeta');
+  const metaFile = fs.readdirSync(dir).find(f => f.endsWith('.meta'));
+  assert(!!metaFile, 'рваный .meta: сайдкар существует');
+  fs.writeFileSync(path.join(dir, metaFile!), '{broken', 'utf-8'); // «порванный» сайдкар
+  fs.writeFileSync(path.join(dir, 'wal.log'),
+    '1 {"ts":0,"val":"m0"}\n2 {"ts":1,"val":"m1"}\n3 {"ts":2,"val":"m2"}\n', 'utf-8'); // крах до усечения WAL
+
+  const j2 = new Journal(baseDir, { wal: 'on' });
+  j2.open('wal-tornmeta', schema);
+  assert(j2.allRows().length === 3, `рваный .meta: без дублей — 3 строки (факт ${j2.allRows().length})`);
+  const info = j2.closedSegmentInfo(j2.closedSegmentIds()[0]);
+  assert(!!info && info.rowCount === 3, 'рваный .meta: bounds/counts восстановлены из сегмента');
+  j2.close();
 }
 
 console.log(`\nТесты надёжности: ${passed} passed, ${failed} failed`);

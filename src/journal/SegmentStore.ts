@@ -9,7 +9,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { Segment } from '../format/Segment.ts';
 import { LRUCache } from '../core/LRUCache.ts';
-import { AtomicJson } from '../core/AtomicJson.ts';
 import { SegmentFile } from '../format/SegmentFile.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 import type { Row } from '../core/types.ts';
@@ -134,21 +133,16 @@ export class SegmentStore {
     if (!fileName) throw ErrorManager.make('JRN_SEG_UNKNOWN', { id });
 
     let seg: Segment;
+    let bytes: number | null = null;
     try {
       const buf = fs.readFileSync(path.join(this.pathOf(), fileName));
+      bytes = buf.length;
       seg = SegmentFile.read(buf);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       throw ErrorManager.make('JRN_SEG_READ', { file: fileName, message: String(message) });
     }
-    this.meta.set(id, {
-      minTs: seg.minTs,
-      maxTs: seg.maxTs,
-      rowCount: seg.rowCount,
-      physicalRowCount: seg.physicalRowCount || seg.rowCount,
-      tsCount: seg.tsCount,
-      summaries: seg.summaries
-    });
+    this.meta.set(id, SegmentMeta.fromSegment(seg, bytes));
     this.cache.set(id, seg);
     return seg;
   }
@@ -193,9 +187,10 @@ export class SegmentStore {
   ): void {
     const fileName = `${seg.id}${ext}`;
     const filePath = path.join(this.pathOf(), fileName);
-    fs.writeFileSync(`${filePath}.tmp`, encode(seg));
+    const buf = encode(seg);
+    fs.writeFileSync(`${filePath}.tmp`, buf);
     fs.renameSync(`${filePath}.tmp`, filePath);
-    this.writeMeta(seg, fileName);
+    this.writeMeta(seg, fileName, buf.length);
     this.cache.set(seg.id, seg);
     this.index.set(seg.id, fileName);
     if (oldFile && oldFile !== fileName) {
@@ -204,18 +199,39 @@ export class SegmentStore {
     }
   }
 
-  private writeMeta(seg: Segment, fileName: string): void {
-    const meta: SegmentMeta = {
-      minTs: seg.minTs,
-      maxTs: seg.maxTs,
-      rowCount: seg.rowCount,
-      physicalRowCount: seg.physicalRowCount || seg.rowCount,
-      tsCount: seg.tsCount,
-      summaries: seg.summaries
-    };
+  private writeMeta(seg: Segment, fileName: string, bytes: number): void {
+    const meta = SegmentMeta.fromSegment(seg, bytes);
     this.meta.set(seg.id, meta);
-    const metaPath = path.join(this.pathOf(), `${fileName}${META_SUFFIX}`);
-    AtomicJson.write(metaPath, meta);
+    // .meta is derived data — loadClosed rebuilds it from the segment file — so
+    // it needs no tmp+rename: one write per sidecar instead of write+rename.
+    fs.writeFileSync(path.join(this.pathOf(), `${fileName}${META_SUFFIX}`), JSON.stringify(meta));
+  }
+
+  /**
+   * Rebuild missing/corrupt .meta sidecars from the segment files. Called
+   * before a WAL replay: maxWalSeq() reads the sidecars without loading
+   * files, so a torn/absent meta would undercount the watermark and replay
+   * would re-append rows already durable inside that segment. Cost is
+   * bounded by the number of meta-less segments (normally zero).
+   */
+  repairMissingMeta(): number {
+    let repaired = 0;
+    for (const id of this.index.keys()) {
+      if (!this.meta.has(id)) {
+        this.loadClosed(id);
+        repaired++;
+      }
+    }
+    return repaired;
+  }
+
+  /** Highest WAL watermark among indexed (closed) segments — replay skips seqs <= this. */
+  maxWalSeq(): number {
+    let max = 0;
+    for (const m of this.meta.values()) {
+      if (m.walSeq !== null && m.walSeq > max) max = m.walSeq;
+    }
+    return max;
   }
 
   /** Remove a closed segment (file + .meta) and all its in-memory state. */
@@ -251,17 +267,20 @@ export class SegmentStore {
   ): MergeResult {
     let logicalRows = 0;
     let physicalBefore = 0;
+    let walSeq = 0;
     const rows: Row[] = [];
     for (const id of ids) {
       const seg = this.loadClosed(id);
       for (let i = 0; i < seg.rowCount; i++) rows.push(seg.getRow(i));
       logicalRows += seg.rowCount;
       physicalBefore += seg.physicalRowCount;
+      if (seg.walSeq > walSeq) walSeq = seg.walSeq;
     }
 
     const kept = transform(rows);
     const merged = this.makeSegment(this.newId());
     for (const row of kept) merged.append(row);
+    merged.walSeq = walSeq;
 
     this.persist(merged, encode, null, ext);
     for (const id of ids) this.drop(id);
@@ -277,8 +296,8 @@ export class SegmentStore {
     const file = this.index.get(id);
     const meta = this.meta.get(id) ?? null;
     if (!file && !meta) return null;
-    let bytes: number | null = null;
-    if (file) {
+    let bytes: number | null = meta?.bytes ?? null;
+    if (bytes === null && file) {
       try { bytes = fs.statSync(path.join(this.pathOf(), file)).size; } catch { bytes = null; }
     }
     return {

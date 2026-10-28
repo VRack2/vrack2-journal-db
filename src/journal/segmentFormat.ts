@@ -14,6 +14,6 @@ export function detectSegmentFormat(filePath: string): DetectedFormat {
       if (fs.readSync(fd, buf, 0, 5, 0) < 5) return 'v1';
     } finally { fs.closeSync(fd); }
   } catch { return 'v1'; }
-  if (buf.subarray(0, 4).toString('ascii') === 'JSDB') return buf[4] === 3 ? 'v3' : 'v2';
+  if (buf.subarray(0, 4).toString('ascii') === 'JSDB') return (buf[4] === 3 || buf[4] === 4) ? 'v3' : 'v2';
   return 'v1';
 }

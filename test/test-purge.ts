@@ -101,7 +101,7 @@ const segFiles = (name: string): string[] =>
 {
   // flush не сработает (rowsPerSegment=1000), а walBatchSize=1 — каждая строка
   // сразу уходит в wal.log: строки реально «только в WAL» до purge.
-  const j = new Journal(baseDir, { rowsPerSegment: 1000, walBatchSize: 1 });
+  const j = new Journal(baseDir, { rowsPerSegment: 1000, walBatchSize: 1, wal: 'on' });
   j.open('wal', schema);
   for (let i = 0; i < 5; i++) j.append({ ts: i, val: 'w' });
   const dir = path.join(baseDir, 'journals', 'wal');

@@ -13,6 +13,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Journal, DEFAULT_ROWS_PER_SEGMENT, DEFAULT_COMPACT_MIN_SEGMENTS, isSegmentFile, idFromFile } from '../journal/Journal.ts';
+import { META_SUFFIX } from '../journal/constants.ts';
+import { SegmentMeta } from '../journal/SegmentMeta.ts';
 import type { Segment } from '../format/Segment.ts';
 import { LRUCache } from '../core/LRUCache.ts';
 import { SegmentFile } from '../format/SegmentFile.ts';
@@ -28,6 +30,7 @@ import type {
   SegmentFormat,
   StoreOptions,
   StoreStats,
+  WalMode,
 } from '../core/types.ts';
 import { ENGINE_META_KEY } from '../compaction/Descriptor.ts';
 import { engineDescriptorOf } from '../compaction/define.ts';
@@ -49,6 +52,8 @@ export class Store {
   readonly maxCacheSize: number;
   readonly defaultRowsPerSegment: number;
   readonly lockMode: LockMode;
+  /** Default WAL strategy for journals (validated by the Journal constructor). */
+  readonly walMode: WalMode;
   readonly format: SegmentFormat;
   readonly compression: CompressionMode;
   readonly codecs: Record<string, string>;
@@ -74,6 +79,7 @@ export class Store {
       throw ErrorManager.make('STO_LOCK', { lock: String(lock) });
     }
     this.lockMode = lock;
+    this.walMode = opts.wal ?? 'off';
     this.format = opts.format ?? 'v2';
     // zstd by default on Node >= 23.8; an explicit opts.compression wins.
     this.compression = opts.compression ?? Compression.default();
@@ -121,6 +127,7 @@ export class Store {
       rowsPerSegment: opts.rowsPerSegment ?? this.defaultRowsPerSegment,
       maxCachedSegments: opts.maxCachedSegments ?? this.maxCacheSize,
       lock: opts.lock ?? this.lockMode,
+      wal: opts.wal ?? this.walMode,
       format: opts.format ?? this.format,
       compression: opts.compression ?? this.compression,
       codecs: opts.codecs ?? this.codecs,
@@ -286,17 +293,30 @@ export class Store {
           const full = path.join(dir, f);
           bytes += fs.statSync(full).size;
           segments++;
-          try {
-            rows += SegmentFile.read(fs.readFileSync(full)).rowCount;
-          } catch {
-            // corrupt/unreadable segment — do not break the stats
-          }
+          rows += this._segmentRowCount(full);
         }
       } catch {
         // directory missing — stats are zero
       }
     }
     return { rows, segments, sizeBytes: bytes };
+  }
+
+  /**
+   * Row count of a closed segment straight from its .meta sidecar; decodes the
+   * segment file only when the sidecar is missing or corrupt.
+   */
+  private _segmentRowCount(segPath: string): number {
+    try {
+      const m = SegmentMeta.parse(JSON.parse(fs.readFileSync(`${segPath}${META_SUFFIX}`, 'utf-8')));
+      if (m) return m.rowCount;
+    } catch { /* no .meta — fall back to decoding the segment */ }
+    try {
+      return SegmentFile.read(fs.readFileSync(segPath)).rowCount;
+    } catch {
+      // corrupt/unreadable segment — do not break the stats
+      return 0;
+    }
   }
 
   // --------------------------------------------------
