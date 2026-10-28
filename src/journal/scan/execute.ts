@@ -4,8 +4,8 @@
 import type { Column } from '../../format/columns/Column.ts';
 import type { Segment } from '../../format/Segment.ts';
 import type { Row } from '../../core/types.ts';
-import { addSummary, addValue, aggValue, newAcc, scanAggregate, type AggAcc } from '../Aggregation.ts';
-import { metaSkips } from '../SegmentMeta.ts';
+import { Aggregation, type AggAcc } from '../../metric/Aggregation.ts';
+import { SegmentMeta } from '../SegmentMeta.ts';
 import type { SegmentSource } from '../segmentSource.ts';
 import { keyOf, whereOne, type ScanPlan } from './plan.ts';
 
@@ -33,7 +33,7 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
     let g = groups.get(key);
     if (!g) {
       const accs: Record<string, AggAcc> = {};
-      for (const spec of plan.aggSpec) accs[spec.field] = newAcc();
+      for (const spec of plan.aggSpec) accs[spec.field] = Aggregation.newAcc();
       g = { row, accs };
       groups.set(key, g);
     }
@@ -49,12 +49,12 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
         const s = seg.summaries[spec.field];
         if (s && s.count > 0) {
           const acc = groups.get('')!.accs[spec.field];
-          addSummary(acc, s);
+          Aggregation.addSummary(acc, s);
         } else {
           slow.push(spec.field);
         }
       }
-      if (slow.length > 0) scanAggregate(seg, plan.start!, plan.end!, slow, groups.get('')!.accs);
+      if (slow.length > 0) Aggregation.scanAggregate(seg, plan.start!, plan.end!, slow, groups.get('')!.accs);
       return;
     }
 
@@ -129,7 +129,7 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
           const f = spec[si].field;
           const col = cols[f];
           const v = col ? col.get(pi) : null;
-          if (typeof v === 'number' && Number.isFinite(v)) addValue(g.accs[f], v);
+          if (typeof v === 'number' && Number.isFinite(v)) Aggregation.addValue(g.accs[f], v);
         }
       }
     } else {
@@ -155,7 +155,7 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
 
   for (const id of src.sortedClosedIds()) {
     const meta = src.metaOf(id);
-    if (plan.start !== null && plan.end !== null && metaSkips(meta?.minTs ?? null, meta?.maxTs ?? null, plan.start, plan.end, true)) continue;
+    if (plan.start !== null && plan.end !== null && SegmentMeta.skips(meta?.minTs ?? null, meta?.maxTs ?? null, plan.start, plan.end, true)) continue;
     processSegment(src.loadClosed(id));
     if (canEarlyStop && rawRows!.length >= rawNeed) break;
   }
@@ -169,7 +169,7 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
       const row: Row = { ...g.row };
       for (const spec of plan.aggSpec) {
         const acc = g.accs[spec.field];
-        for (const fn of spec.fns) row[`${spec.field}_${fn}`] = aggValue(acc, fn);
+        for (const fn of spec.fns) row[`${spec.field}_${fn}`] = Aggregation.value(acc, fn);
       }
       out.push(row);
     }

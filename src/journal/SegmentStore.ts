@@ -14,7 +14,7 @@ import { SegmentFile } from '../format/SegmentFile.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 import type { Row } from '../core/types.ts';
 import { LOCK_FILE, META_SUFFIX, SEG_V3_EXT, WAL_FILE, idFromFile, isSegmentFile } from './constants.ts';
-import { parseSegmentMeta, type SegmentMeta } from './SegmentMeta.ts';
+import { SegmentMeta } from './SegmentMeta.ts';
 import type { SegmentEncoder } from './SegmentEncoder.ts';
 
 export interface MergeResult {
@@ -62,7 +62,7 @@ export class SegmentStore {
       this.index.set(id, file);
       try {
         const metaPath = path.join(journalPath, `${file}${META_SUFFIX}`);
-        const parsed = parseSegmentMeta(JSON.parse(fs.readFileSync(metaPath, 'utf-8')));
+        const parsed = SegmentMeta.parse(JSON.parse(fs.readFileSync(metaPath, 'utf-8')));
         if (parsed) this.meta.set(id, parsed);
       } catch { /* no .meta or corrupt */ }
     }

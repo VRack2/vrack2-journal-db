@@ -3,7 +3,7 @@
 
 import { Interval } from '../../core/Interval.ts';
 import ErrorManager from '../../errors/ErrorManager.ts';
-import { isAggFn } from '../Aggregation.ts';
+import { Aggregation } from '../../metric/Aggregation.ts';
 import type { AggFn, JsonValue, ScanOp, ScanOptions, Schema } from '../../core/types.ts';
 
 export interface ScanPlan {
@@ -80,7 +80,7 @@ export function compileScan(opts: ScanOptions, schema: Schema | null): ScanPlan 
       if (typeof field !== 'string' || field.length === 0) throw ErrorManager.make('JRN_SCAN_AGG_FIELD');
       if (!Array.isArray(fns) || fns.length === 0) throw ErrorManager.make('JRN_SCAN_AGG_FNS');
       for (const fn of fns) {
-        if (!isAggFn(fn)) throw ErrorManager.make('JRN_SCAN_AGG_FN', { fn: String(fn) });
+        if (!Aggregation.isAggFn(fn)) throw ErrorManager.make('JRN_SCAN_AGG_FN', { fn: String(fn) });
       }
       aggSpec.push({ field, fns });
       for (const fn of fns) aggKeys.push(`${field}_${fn}`);

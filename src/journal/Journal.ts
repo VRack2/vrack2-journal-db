@@ -43,7 +43,7 @@ import { AutoCompactor } from './AutoCompactor.ts';
 import { JournalLock } from './JournalLock.ts';
 import { Migration } from './Migration.ts';
 import { Purge } from './Purge.ts';
-import { trackJournal, untrackJournal } from './shutdown.ts';
+import { Shutdown } from './Shutdown.ts';
 import type {
   AggregateExpr, AggFn, CompactResult, CompressionMode,
   DownsampleBucket, JournalOptions, JournalStats, LockMode,
@@ -192,7 +192,7 @@ export class Journal {
       this.store.scanDir(journalPath);
       this.writer.createActiveSegment();
       this.isOpen = true;
-      trackJournal(this);
+      Shutdown.track(this);
       const walLines = this.writer.wal.readLines();
       if (walLines.length > 0) this.writer.replay(walLines);
     } catch (e) {
@@ -208,7 +208,7 @@ export class Journal {
     this.writer.end();
     this.isOpen = false;
     this.compactor.reset();
-    untrackJournal(this);
+    Shutdown.untrack(this);
     JournalLock.release(this._lockPath(), this.lockMode);
   }
 
@@ -405,7 +405,7 @@ export class Journal {
   }
 
   /** Drain the WAL buffer to disk (called from the process exit hook). */
-  _walDrain(): void {
+  walDrain(): void {
     this.writer.drain();
   }
 

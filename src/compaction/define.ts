@@ -20,7 +20,7 @@
 
 import type { AggFn, OpenJournalOptions, ResolutionTier, RetentionTier, Schema } from '../core/types.ts';
 import { Descriptor } from './Descriptor.ts';
-import { isAggFn } from '../journal/Aggregation.ts';
+import { Aggregation } from '../metric/Aggregation.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('define', [
@@ -181,7 +181,7 @@ function validateBase(cfg: BaseTableDef, kind: string): void {
       if (!(f in cfg.columns)) {
         throw ErrorManager.make('DEF_AGG_FIELD', { kind, field: f });
       }
-      if (!isAggFn(fn)) {
+      if (!Aggregation.isAggFn(fn)) {
         throw ErrorManager.make('DEF_AGG_FN', { kind, field: f, fn: String(fn) });
       }
     }

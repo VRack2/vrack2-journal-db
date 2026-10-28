@@ -6,14 +6,14 @@
 // serves the public Journal API and the reader object.
 
 import { Interval } from '../core/Interval.ts';
-import { Percentile } from '../metric/Percentile.ts';
+import { Percentile } from '../core/Percentile.ts';
 import type { Segment } from '../format/Segment.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 import type {
   AggregateExpr, AggFn, DownsampleBucket, TimelineBucket,
 } from '../core/types.ts';
-import { addSummary, addValue, aggValue, isAggFn, newAcc, scanAggregate, type AggAcc } from './Aggregation.ts';
-import { metaSkips, type SegmentMeta } from './SegmentMeta.ts';
+import { Aggregation, type AggAcc } from '../metric/Aggregation.ts';
+import { SegmentMeta } from './SegmentMeta.ts';
 import type { SegmentSource } from './segmentSource.ts';
 
 // Re-exported so callers can import the read surface from one place.
@@ -33,13 +33,13 @@ export function aggregate(
   const fields: string[] = [];
   for (const e of exprs) {
     if (typeof e.field !== 'string' || e.field.length === 0) throw ErrorManager.make('JRN_AGG_FIELD');
-    if (!isAggFn(e.fn)) throw ErrorManager.make('JRN_AGG_FN', { fn: String(e.fn) });
+    if (!Aggregation.isAggFn(e.fn)) throw ErrorManager.make('JRN_AGG_FN', { fn: String(e.fn) });
     if (!fields.includes(e.field)) fields.push(e.field);
   }
   const [start, end] = Interval.period(startTs, endTs);
 
   const accs: Record<string, AggAcc> = {};
-  for (const f of fields) accs[f] = newAcc();
+  for (const f of fields) accs[f] = Aggregation.newAcc();
 
   const foldSegment = (seg: Segment): void => {
     const minTs = seg.minTs;
@@ -49,25 +49,25 @@ export function aggregate(
       const slow: string[] = [];
       for (const f of fields) {
         const s = seg.summaries[f];
-        if (s && s.count > 0) addSummary(accs[f], s);
+        if (s && s.count > 0) Aggregation.addSummary(accs[f], s);
         else slow.push(f);
       }
-      if (slow.length > 0) scanAggregate(seg, start, end, slow, accs);
+      if (slow.length > 0) Aggregation.scanAggregate(seg, start, end, slow, accs);
       return;
     }
-    scanAggregate(seg, start, end, fields, accs);
+    Aggregation.scanAggregate(seg, start, end, fields, accs);
   };
 
   for (const id of src.sortedClosedIds()) {
     const meta = src.metaOf(id);
-    if (metaSkips(meta?.minTs ?? null, meta?.maxTs ?? null, start, end, true)) continue;
+    if (SegmentMeta.skips(meta?.minTs ?? null, meta?.maxTs ?? null, start, end, true)) continue;
     foldSegment(src.loadClosed(id));
   }
   const active = src.activeSegment;
   if (active && active.rowCount > 0) foldSegment(active);
 
   const out: Record<string, number | null> = {};
-  for (const e of exprs) out[`${e.field}_${e.fn}`] = aggValue(accs[e.field], e.fn);
+  for (const e of exprs) out[`${e.field}_${e.fn}`] = Aggregation.value(accs[e.field], e.fn);
   return out;
 }
 
@@ -88,7 +88,7 @@ export function downsample(
   if (typeof field !== 'string' || field.length === 0) throw ErrorManager.make('JRN_DS_FIELD');
   if (!Array.isArray(fns) || fns.length === 0) throw ErrorManager.make('JRN_DS_FNS');
   for (const fn of fns) {
-    if (!isAggFn(fn)) throw ErrorManager.make('JRN_DS_FN', { fn: String(fn) });
+    if (!Aggregation.isAggFn(fn)) throw ErrorManager.make('JRN_DS_FN', { fn: String(fn) });
   }
   let bucket: number;
   if (typeof bucketMs === 'string') {
@@ -103,13 +103,13 @@ export function downsample(
   const first = Math.floor(start / bucket) * bucket;
   const n = Math.max(1, Math.ceil((end - first) / bucket));
   const accs: AggAcc[] = new Array(n);
-  for (let i = 0; i < n; i++) accs[i] = newAcc();
+  for (let i = 0; i < n; i++) accs[i] = Aggregation.newAcc();
 
   const bin = (ts: number, v: number): void => {
     let i = Math.floor((ts - first) / bucket);
     if (i < 0) i = 0;
     if (i >= n) i = n - 1;
-    addValue(accs[i], v);
+    Aggregation.addValue(accs[i], v);
   };
 
   const scanSegment = (seg: Segment): void => {
@@ -124,7 +124,7 @@ export function downsample(
 
   for (const id of src.sortedClosedIds()) {
     const meta = src.metaOf(id);
-    if (metaSkips(meta?.minTs ?? null, meta?.maxTs ?? null, start, end, false)) continue;
+    if (SegmentMeta.skips(meta?.minTs ?? null, meta?.maxTs ?? null, start, end, false)) continue;
     scanSegment(src.loadClosed(id));
   }
   const active = src.activeSegment;
@@ -142,7 +142,7 @@ export function downsample(
     };
     for (const fn of fns) {
       if (fn === 'count') b.count = accs[i].count;
-      else b[fn] = aggValue(accs[i], fn);
+      else b[fn] = Aggregation.value(accs[i], fn);
     }
     out[i] = b;
   }
@@ -206,7 +206,7 @@ export function timeline(
 
   for (const id of src.sortedClosedIds()) {
     const meta = src.metaOf(id);
-    if (metaSkips(meta?.minTs ?? null, meta?.maxTs ?? null, start, end, false)) continue;
+    if (SegmentMeta.skips(meta?.minTs ?? null, meta?.maxTs ?? null, start, end, false)) continue;
     scanSegment(src.loadClosed(id));
   }
   const active = src.activeSegment;

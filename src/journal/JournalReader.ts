@@ -15,7 +15,7 @@ import type {
   AggregateExpr, AggFn, DownsampleBucket, Row, ScanOptions, Schema, TimelineBucket,
 } from '../core/types.ts';
 import { aggregate, downsample, percentileOf, timeline } from './aggregator.ts';
-import { metaSkips, type SegmentMeta } from './SegmentMeta.ts';
+import { SegmentMeta } from './SegmentMeta.ts';
 import type { SegmentSource } from './segmentSource.ts';
 import type { SegmentStore } from './SegmentStore.ts';
 import { compileScan, type ScanPlan } from './scan/plan.ts';
@@ -100,9 +100,9 @@ export class JournalReader implements SegmentSource {
 
     for (const id of this.sortedClosedIds()) {
       const meta = this.metaOf(id);
-      if (metaSkips(meta?.minTs ?? null, meta?.maxTs ?? null, start, end, true)) continue;
+      if (SegmentMeta.skips(meta?.minTs ?? null, meta?.maxTs ?? null, start, end, true)) continue;
       const seg = this.loadClosed(id);
-      if (metaSkips(seg.minTs, seg.maxTs, start, end, true)) continue;
+      if (SegmentMeta.skips(seg.minTs, seg.maxTs, start, end, true)) continue;
       for (let i = 0; i < seg.rowCount; i++) {
         const ts = seg.get('ts', i);
         if (typeof ts === 'number' && ts >= start && ts <= end) results.push(this.normalizeRow(schema, seg.getRow(i)));

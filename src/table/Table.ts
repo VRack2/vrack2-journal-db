@@ -21,7 +21,7 @@
 import path from 'node:path';
 import { Interval } from '../core/Interval.ts';
 import { Journal } from '../journal/Journal.ts';
-import { Percentile } from '../metric/Percentile.ts';
+import { Percentile } from '../core/Percentile.ts';
 import { Rollup } from '../metric/Rollup.ts';
 import type { RollupConfig } from '../metric/Rollup.ts';
 import type {
@@ -45,7 +45,7 @@ import { Descriptor, ENGINE_META_KEY } from '../compaction/Descriptor.ts';
 import { RetentionEngine } from '../journal/RetentionEngine.ts';
 import type { ApplyReport, ConversionPlan, ScanWhere, TierStatus } from '../core/types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
-import { isAggFn } from '../journal/Aggregation.ts';
+import { Aggregation } from '../metric/Aggregation.ts';
 import { isScanOp, whereOne } from '../journal/scan/plan.ts';
 import { TableDef } from './TableDef.ts';
 import { RollupManager } from './RollupManager.ts';
@@ -164,7 +164,7 @@ export class Table {
     }
     for (const [f, fn] of Object.entries(agg)) {
       if (!(f in schema)) throw ErrorManager.make('TBL_AGG_FIELD', { field: f });
-      if (!isAggFn(fn)) {
+      if (!Aggregation.isAggFn(fn)) {
         throw ErrorManager.make('TBL_AGG_FN', { field: f, fn: String(fn) });
       }
     }
@@ -454,7 +454,7 @@ export class Table {
       if (!e || typeof e.field !== 'string' || e.field.length === 0) {
         throw ErrorManager.make('TBL_AGG_FIELD_EMPTY');
       }
-      if (!isAggFn(e.fn)) {
+      if (!Aggregation.isAggFn(e.fn)) {
         throw ErrorManager.make('TBL_AGG_EXPR_FN', { fn: String(e.fn) });
       }
     }
