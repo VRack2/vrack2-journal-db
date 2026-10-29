@@ -958,5 +958,43 @@ console.log('\naggregate с where: single-journal и tiered (merge по тира
   store2.closeAll();
 }
 
+// --------------------------------------------------
+// Легаси .json в журнале: все точки входа сообщают JRN_LEGACY_FORMAT одинаково,
+// dropLegacyJournalFiles — восстановление без ручной работы с файловой системой.
+// --------------------------------------------------
+{
+  const dir = tmpDir();
+  const store = new Store(dir, { autoCompact: false });
+  const t = store.create(defineLogTable({ name: 'old', columns: { ts: 'raw', v: 'raw' } }));
+  for (let i = 0; i < 5; i++) t.append({ ts: i, v: 'x' });
+  t.close();
+  store.closeAll();
+  fs.writeFileSync(path.join(dir, 'journals', 'old', 'seg-old.json'), '{}');
+
+  const store3 = new Store(dir, { autoCompact: false });
+  const legacyCode = (fn: () => void): string => {
+    try { fn(); return 'none'; } catch (e) {
+      return ErrorManager.isCode(e, 'JRN_LEGACY_FORMAT') ? 'legacy' : `other:${String(e)}`;
+    }
+  };
+  assert(legacyCode(() => store3.open('old')) === 'legacy', 'open: легаси-каталог → JRN_LEGACY_FORMAT');
+  assert(legacyCode(() => store3.describe()) === 'legacy', 'describe: легаси-каталог → JRN_LEGACY_FORMAT, не пустая таблица');
+  assert(legacyCode(() => store3.getJournalMetadata('old')) === 'legacy', 'getJournalMetadata → JRN_LEGACY_FORMAT');
+  assert(legacyCode(() => store3.listSegments('old')) === 'legacy', 'listSegments → JRN_LEGACY_FORMAT');
+
+  assert(store3.dropLegacyJournalFiles('old') === 1, 'dropLegacyJournalFiles удалила легаси .json');
+  assert(store3.dropLegacyJournalFiles('old') === 0, 'dropLegacyJournalFiles идемпотентна');
+  const t3 = store3.open('old');
+  assert(t3.query(0, 1e12).length === 5, 'после drop таблица открывается и читается нормально');
+  t3.close();
+
+  let code = '';
+  try { store3.dropLegacyJournalFiles('nosuch'); } catch (e) {
+    code = ErrorManager.isCode(e, 'STO_TABLE_NOT_FOUND') ? 'notfound' : `other:${String(e)}`;
+  }
+  assert(code === 'notfound', 'dropLegacyJournalFiles по отсутствующей таблице → STO_TABLE_NOT_FOUND');
+  store3.closeAll();
+}
+
 console.log(`\nТесты table (Фазы 4-6): ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

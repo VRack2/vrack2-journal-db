@@ -170,7 +170,10 @@ export class Journal {
 
   get retention(): RetentionEngine {
     if (!this.retentionEngine) {
-      this.retentionEngine = new RetentionEngine(this.store, () => this.journalPath(), this.retentionTiers ?? undefined);
+      this.retentionEngine = new RetentionEngine(
+        this.store, () => this.journalPath(), this.retentionTiers ?? undefined,
+        undefined, () => this.clusterKey,
+      );
     }
     return this.retentionEngine;
   }
@@ -256,20 +259,22 @@ export class Journal {
    * passes; callers bound the id set to keep peak memory proportional to the
    * batch, not to the whole table.
    */
-  compactBatch(ids: string[]): CompactResult {
-    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
+  private mergeTransform(cluster: string[] | null): (rows: Row[]) => Row[] {
     const engineDesc = Descriptor.fromMeta((this.metadata as Record<string, unknown>)[ENGINE_META_KEY]);
-    const cluster = parseClusterKey((this.metadata as Record<string, unknown>)[CLUSTER_META_KEY]);
     const engineMerge = engineDesc
       ? (rows: Row[]) => makeEngine(engineDesc).merge(rows)
       : (rows: Row[]) => rows;
     // Clustered tables: the engine merge runs first (identity for log), then
     // rows are ordered by the cluster key so the new segment stores same-
     // dimension rows adjacently.
-    const transform = cluster
-      ? (rows: Row[]) => Cluster.sort(engineMerge(rows), cluster)
-      : engineMerge;
-    const { merged, logicalRows, physicalBefore, keptRows } = this.store.merge(ids, transform, undefined, undefined, cluster);
+    return cluster ? (rows: Row[]) => Cluster.sort(engineMerge(rows), cluster) : engineMerge;
+  }
+
+  compactBatch(ids: string[]): CompactResult {
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
+    const cluster = this.clusterKey;
+    const { merged, logicalRows, physicalBefore, keptRows }
+      = this.store.merge(ids, this.mergeTransform(cluster), undefined, undefined, cluster);
     return {
       mergedSegments: ids.length,
       logicalRows,
@@ -293,7 +298,7 @@ export class Journal {
    */
   clusterCompact(start?: number, end?: number): ClusterReport {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
-    const cluster = parseClusterKey((this.metadata as Record<string, unknown>)[CLUSTER_META_KEY]);
+    const cluster = this.clusterKey;
     if (!cluster) throw ErrorManager.make('JRN_NO_CLUSTER');
 
     const from = typeof start === 'number' ? start : Number.NEGATIVE_INFINITY;
@@ -306,10 +311,7 @@ export class Journal {
       candidates.push(id);
     }
 
-    const engineDesc = Descriptor.fromMeta((this.metadata as Record<string, unknown>)[ENGINE_META_KEY]);
-    const engineMerge = engineDesc
-      ? (rows: Row[]) => makeEngine(engineDesc).merge(rows)
-      : (rows: Row[]) => rows;
+    const transform = this.mergeTransform(cluster);
 
     const report: ClusterReport = { mergedSegments: 0, windows: 0, rows: 0 };
     if (candidates.length < 2) return report;
@@ -336,7 +338,6 @@ export class Journal {
     }
 
     for (const ids of batches) {
-      const transform = (rs: Row[]) => Cluster.sort(engineMerge(rs), cluster);
       const { logicalRows } = this.store.merge(ids, transform, undefined, undefined, cluster);
       report.mergedSegments += ids.length;
       report.windows++;
@@ -415,6 +416,11 @@ export class Journal {
 
   getMetadata(): Metadata {
     return { ...this.metadata };
+  }
+
+  /** The journal's cluster key (dimension fields), or null when not clustered. */
+  get clusterKey(): string[] | null {
+    return parseClusterKey((this.metadata as Record<string, unknown>)[CLUSTER_META_KEY]);
   }
 
   updateMetadata(newMetadata: Metadata): void {

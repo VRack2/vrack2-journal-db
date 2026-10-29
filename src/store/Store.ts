@@ -250,11 +250,76 @@ export class Store {
   }
 
   /**
+    * The journal directories of a table as `scanDir` sees them: tier subdirs
+    * (`<name>/r*`) for a tiered table, the table directory itself otherwise.
+    * A tiered table's top-level dir is not a journal — it may hold a live
+    * `_rollup.json` checkpoint, so legacy checks must not run against it.
+   */
+  private _journalDirsOf(name: string): string[] {
+    const tableDir = path.join(this.journalsDir, name);
+    const tiers: string[] = [];
+    try {
+      for (const d of fs.readdirSync(tableDir, { withFileTypes: true })) {
+        if (d.isDirectory() && d.name.startsWith('r')) tiers.push(path.join(tableDir, d.name));
+      }
+    } catch {
+      return [tableDir];
+    }
+    return tiers.length > 0 ? tiers : [tableDir];
+  }
+
+  /**
+    * Pre-v4 journals stored segments as `.json`. They are unreadable, and any
+    * view that silently skips them would report the table as empty — every
+    * directory-reading entry point must refuse it the same way `scanDir` does.
+   */
+  private _assertNoLegacy(journalPath: string): void {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(journalPath);
+    } catch {
+      return;
+    }
+    const legacy = entries.filter(f => f.endsWith('.json'));
+    if (legacy.length > 0) {
+      throw ErrorManager.make('JRN_LEGACY_FORMAT', { file: legacy[0], count: legacy.length });
+    }
+  }
+
+  /**
+    * Operator recovery from `JRN_LEGACY_FORMAT`: deletes the pre-v4 `.json`
+    * files in the table's journal dir and its tier subdirs (`r*`). Returns
+    * the number of files removed; after it returns, the table opens normally.
+   */
+  dropLegacyJournalFiles(name: string): number {
+    let removed = 0;
+    for (const dir of this._journalDirsOf(name)) {
+      let entries: string[];
+      try {
+        entries = fs.readdirSync(dir);
+      } catch {
+        continue;
+      }
+      for (const f of entries) {
+        if (f.endsWith('.json')) {
+          fs.rmSync(path.join(dir, f), { force: true });
+          removed++;
+        }
+      }
+    }
+    if (removed === 0 && !fs.existsSync(path.join(this.journalsDir, name))) {
+      throw ErrorManager.make('STO_TABLE_NOT_FOUND', { name });
+    }
+    return removed;
+  }
+
+  /**
     * Fallback description for a journal not in the manifest (old data):
     * a log table with the schema recovered from the first segment.
    */
   private _defFromDisk(name: string): LogTableDef {
     const dir = path.join(this.journalsDir, name);
+    this._assertNoLegacy(dir);
     let files: string[];
     try {
       files = fs.readdirSync(dir).filter(isSegmentFile).sort();
@@ -288,6 +353,7 @@ export class Store {
       // no top-level directory — look at <name> only
     }
     for (const dir of dirs) {
+      if (dirs.size === 1 || dir !== path.join(this.journalsDir, name)) this._assertNoLegacy(dir);
       try {
         for (const f of fs.readdirSync(dir)) {
           if (!isSegmentFile(f)) continue;
@@ -335,6 +401,7 @@ export class Store {
 
   getJournalMetadata(name: string): (Metadata & { name: string; segmentCount: number }) | null {
     const journalPath = path.join(this.journalsDir, name);
+    for (const dir of this._journalDirsOf(name)) this._assertNoLegacy(dir);
     try {
       const files = fs.readdirSync(journalPath).filter(isSegmentFile).sort();
       if (files.length === 0) return null;
@@ -366,6 +433,11 @@ export class Store {
 
   listSegments(journalName: string): string[] {
     const journalPath = path.join(this.journalsDir, journalName);
+    if (journalName.includes('/')) {
+      this._assertNoLegacy(journalPath); // a tier path (<name>/r*) is itself a journal dir
+    } else {
+      for (const dir of this._journalDirsOf(journalName)) this._assertNoLegacy(dir);
+    }
     try {
       return fs.readdirSync(journalPath).filter(isSegmentFile).sort().map(idFromFile);
     } catch {

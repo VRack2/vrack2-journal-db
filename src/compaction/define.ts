@@ -190,9 +190,12 @@ function validateBase(cfg: BaseTableDef, kind: string): void {
   // A single-tier retention ('res:ttl') is pure TTL: no rollup pair to merge
   // into a coarser tier, so no agg is required. Two or more tiers require agg.
   if (cfg.retention !== undefined || cfg.tiers !== undefined) {
+    // Tokenization must match TableDef.parseRetention exactly (trim + drop
+    // empty parts): a def rejected at define time must never parse as a
+    // different tier count when the Table opens.
     const tierCount = cfg.tiers !== undefined
       ? (Array.isArray(cfg.tiers) ? cfg.tiers.length : 0)
-      : String(cfg.retention).split(',').length;
+      : String(cfg.retention).split(',').map(p => p.trim()).filter(p => p.length > 0).length;
     if (tierCount > 1 && (!cfg.agg || Object.keys(cfg.agg).length === 0)) {
       throw ErrorManager.make('DEF_RETENTION_AGG', { kind });
     }

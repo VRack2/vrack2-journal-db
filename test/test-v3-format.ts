@@ -206,7 +206,8 @@ fs.rmSync(baseDir, { recursive: true, force: true });
 
 // --------------------------------------------------
 // 6. Легаси-файлы (.json v1/v2) больше не сегменты:
-//    журнал их не видит, read() отказывает кодовой ошибкой.
+//    журнал отказывается открывать каталог кодовой ошибкой
+//    (молча пустой журнал хуже), read() отказывает SFW3_NOT_V3.
 // --------------------------------------------------
 {
   const schema: Schema = { ts: 'raw', val: 'raw' };
@@ -228,10 +229,13 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   assert(threw, 'легаси JSON без магических байтов → SFW3_NOT_V3');
 
   const j2 = new Journal(baseDir);
-  j2.open('mixed', schema);
-  const rows = j2.allRows();
-  assert(rows.length === 3, `.json не считается сегментом: только v4-данные (факт ${rows.length})`);
-  j2.close();
+  let legacyThrew = false;
+  try {
+    j2.open('mixed', schema);
+  } catch (e) {
+    legacyThrew = ErrorManager.isCode(e, 'JRN_LEGACY_FORMAT');
+  }
+  assert(legacyThrew, 'легаси .json в журнале → JRN_LEGACY_FORMAT, а не тихо пустой журнал');
 }
 
 // --------------------------------------------------
@@ -262,6 +266,96 @@ fs.rmSync(baseDir, { recursive: true, force: true });
     assert(ErrorManager.isCode(e, 'JRN_SEG_READ'), 'ошибка упоминает контрольную сумму/повреждение');
   }
   assert(threw, 'чтение повреждённого v3-сегмента бросает ошибку');
+}
+
+// --------------------------------------------------
+// 7b. Некорректные длины в заголовке/фрейминге (CRC пересчитан — CRC32 не
+//     криптографический): кодовая ошибка до аллокаций, а не RangeError/OOM.
+// --------------------------------------------------
+{
+  const schema: Schema = { ts: 'raw', val: 'raw' };
+  const j = new Journal(baseDir);
+  j.open('bounds', schema);
+  for (let i = 0; i < 10; i++) j.append({ ts: i, val: 'a' });
+  j.close();
+  const bdir = path.join(baseDir, 'journals', 'bounds');
+  const file = fs.readdirSync(bdir).find(f => f.endsWith('.seg'))!;
+  const buf = fs.readFileSync(path.join(bdir, file));
+
+  const withHeader = (mut: (h: Record<string, unknown>) => void): Buffer => {
+    const headerLen = buf.readUInt32LE(8);
+    const h = JSON.parse(buf.subarray(12, 12 + headerLen).toString('utf-8')) as Record<string, unknown>;
+    mut(h);
+    const headerBuf = Buffer.from(JSON.stringify(h), 'utf-8');
+    const headLen = Buffer.alloc(4);
+    headLen.writeUInt32LE(headerBuf.length, 0);
+    const body = Buffer.concat([buf.subarray(0, 8), headLen, headerBuf, buf.subarray(12 + headerLen, buf.length - 4)]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32LE(zlib.crc32(body) >>> 0, 0);
+    return Buffer.concat([body, crc]);
+  };
+
+  let code = '';
+  try {
+    SegmentFileV3.decode(withHeader(h => { h.rowMapLen = 4_000_000_000; }));
+  } catch (e) {
+    code = ErrorManager.isCode(e, 'SFW3_TOO_SMALL') ? 'SFW3_TOO_SMALL' : `other:${String(e)}`;
+  }
+  assert(code === 'SFW3_TOO_SMALL', `rowMapLen за пределами файла → SFW3_TOO_SMALL (факт ${code})`);
+
+  code = '';
+  try {
+    // headerLen лжёт: больше файла → код до JSON.parse, не SyntaxError/RangeError
+    const patched = Buffer.from(buf);
+    patched.writeUInt32LE(patched.length, 8);
+    const body = patched.subarray(0, patched.length - 4);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32LE(zlib.crc32(body) >>> 0, 0);
+    crc.copy(patched, patched.length - 4);
+    SegmentFileV3.decode(patched);
+  } catch (e) {
+    code = ErrorManager.isCode(e, 'SFW3_TOO_SMALL') ? 'SFW3_TOO_SMALL' : `other:${String(e)}`;
+  }
+  assert(code === 'SFW3_TOO_SMALL', `headerLen больше файла → SFW3_TOO_SMALL (факт ${code})`);
+
+  code = '';
+  try {
+    const patched = Buffer.from(buf);
+    const headerLen = patched.readUInt32LE(8);
+    patched.writeUInt32LE(4_000_000_000, 12 + headerLen); // blobLen первой колонки за пределы файла
+    const body = patched.subarray(0, patched.length - 4);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32LE(zlib.crc32(body) >>> 0, 0);
+    crc.copy(patched, patched.length - 4);
+    SegmentFileV3.decode(patched);
+  } catch (e) {
+    code = ErrorManager.isCode(e, 'SFW3_TOO_SMALL') ? 'SFW3_TOO_SMALL' : `other:${String(e)}`;
+  }
+  assert(code === 'SFW3_TOO_SMALL', `blobLen за пределами файла → SFW3_TOO_SMALL (факт ${code})`);
+
+  code = '';
+  try {
+    // дробная rowMapLen: typeof==='number' проходит, но new Array(2.5) — RangeError
+    SegmentFileV3.decode(withHeader(h => { h.rowMapLen = 2.5; }));
+  } catch (e) {
+    code = ErrorManager.isCode(e, 'SFW3_TOO_SMALL') ? 'SFW3_TOO_SMALL' : `other:${String(e)}`;
+  }
+  assert(code === 'SFW3_TOO_SMALL', `дробная rowMapLen → SFW3_TOO_SMALL (факт ${code})`);
+
+  code = '';
+  try {
+    // headerLen = 0: JSON.parse('') дал бы SyntaxError вместо кодовой ошибки
+    const patched = Buffer.from(buf);
+    patched.writeUInt32LE(0, 8);
+    const body = patched.subarray(0, patched.length - 4);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32LE(zlib.crc32(body) >>> 0, 0);
+    crc.copy(patched, patched.length - 4);
+    SegmentFileV3.decode(patched);
+  } catch (e) {
+    code = ErrorManager.isCode(e, 'SFW3_TOO_SMALL') ? 'SFW3_TOO_SMALL' : `other:${String(e)}`;
+  }
+  assert(code === 'SFW3_TOO_SMALL', `headerLen = 0 → SFW3_TOO_SMALL (факт ${code})`);
 }
 
 // --------------------------------------------------

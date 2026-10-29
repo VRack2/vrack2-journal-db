@@ -1,6 +1,6 @@
 {
   "name": "vrack2-journal-db",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "description": "Append-only columnar journal DB for Node.js: gzip/zstd, dictionary/delta/RLE/numeric-codec columns, WAL with crash-safe flush, time-range queries that skip whole files via .meta sidecars, plus a metric engine: summaries, aggregate/timeline, vector scan, quantiles, and retention tiers with rollup and auto-maintenance (auto-compact, auto-rollup, auto-purge).",
   "keywords": [
     "database",

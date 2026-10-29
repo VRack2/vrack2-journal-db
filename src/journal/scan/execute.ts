@@ -46,7 +46,7 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
   let tsOrderedAll = true;
   for (let i = 0; i < closedIds.length; i++) {
     const m = src.metaOf(closedIds[i]);
-    if (m !== null && m !== undefined && m.tsOrdered === false) tsOrderedAll = false;
+    if (m && m.tsOrdered === false) tsOrderedAll = false;
     if (!m || typeof m.minTs !== 'number' || typeof m.maxTs !== 'number' || m.tsCount !== m.rowCount) {
       allTsCovered = false;
       if (!m || typeof m.minTs !== 'number' || typeof m.maxTs !== 'number') rangesDisjoint = false;

@@ -85,6 +85,9 @@ function scanDomain(col: Column): DimSummary | null {
     } else {
       nonNumeric = true;
     }
+    // Domain is provably unrepresentable once the set overflowed and a
+    // non-numeric value appeared: 'set' is gone, 'range' requires all-numeric.
+    if (setOverflow && nonNumeric) return null;
   }
   if (!setOverflow) return { t: 'set', v: [...set] };
   if (anyNumeric && !nonNumeric && min !== null && max !== null) return { t: 'range', min, max };
@@ -114,8 +117,14 @@ export class SegmentMeta {
   /**
    * Build a sidecar from an in-memory segment (used by both persist/writeMeta
    * and loadClosed so the on-disk and rebuilt-from-file shapes cannot drift).
+   * `reuseDims` lets a cold load keep the dims already validated from the
+   * sidecar instead of rescanning every cluster column.
    */
-  static fromSegment(seg: Segment, bytes: number): SegmentMeta {
+  static fromSegment(
+    seg: Segment,
+    bytes: number,
+    reuseDims?: Record<string, DimSummary> | null,
+  ): SegmentMeta {
     return {
       minTs: seg.minTs,
       maxTs: seg.maxTs,
@@ -127,7 +136,7 @@ export class SegmentMeta {
       bytes,
       cluster: seg.clusterKey ? seg.clusterKey.slice() : null,
       tsOrdered: seg.clusterKey === null,
-      dims: dimsOfSegment(seg),
+      dims: reuseDims !== undefined ? reuseDims : dimsOfSegment(seg),
     };
   }
 

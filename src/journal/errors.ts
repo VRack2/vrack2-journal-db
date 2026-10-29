@@ -40,6 +40,7 @@ ErrorManager.registerMany('Journal', [
   { short: 'JRN_SCAN_LIMIT', description: 'scan(): limit must be an integer >= 0' },
   { short: 'JRN_SCAN_OFFSET', description: 'scan(): offset must be an integer >= 0' },
   { short: 'JRN_SEG_UNKNOWN', description: 'Unknown segment', rules: { id: 'string' } },
+  { short: 'JRN_LEGACY_FORMAT', description: 'Journal directory contains pre-v4 (.json) segment files that are no longer readable: remove them with Store.dropLegacyJournalFiles(name) (or delete/convert by hand) before opening', rules: { file: 'string', count: 'number' } },
   { short: 'JRN_NO_CLUSTER', description: 'Journal has no cluster key: declare cluster in the table definition or call Table.setCluster()' },
   { short: 'JRN_SEG_READ', description: 'Failed to read segment', rules: { file: 'string', message: 'string' } },
   { short: 'JRN_LOCKED', description: "Journal locked by process. If no other owners exist, open with { lock: 'off' } or delete .lock", rules: { pid: 'number', lockPath: 'string' } },

@@ -29,12 +29,20 @@ import type {
   CompactTierReport,
   ConversionPlan,
   RetentionTier,
+  Row,
   SegmentEncoding,
   TierStatus,
 } from '../core/types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
+import { Cluster } from '../compaction/Cluster.ts';
 import { SEG_V3_EXT } from './constants.ts';
 import type { SegmentStore } from './SegmentStore.ts';
+
+function sameCluster(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
@@ -61,6 +69,9 @@ export class RetentionEngine {
   private readonly pathOf: () => string;
   readonly tiers: RetentionTier[];
   private readonly nowProvider: () => number;
+  /** Journal cluster key provider: merges must not relayout clustered
+   *  segments into ts order (see mergeTier) — null/absent = not clustered. */
+  private readonly clusterProvider: (() => string[] | null) | null;
   private readonly encCache = new Map<string, SegmentEncoding>();
 
   constructor(
@@ -68,10 +79,12 @@ export class RetentionEngine {
     pathOf: () => string,
     tiers?: RetentionTier[],
     nowProvider?: () => number,
+    clusterProvider?: () => string[] | null,
   ) {
     if (!store) throw ErrorManager.make('RET_HOST');
     this.store = store;
     this.pathOf = pathOf;
+    this.clusterProvider = clusterProvider ?? null;
     this.tiers = (tiers ?? RetentionEngine.defaultTiers())
       .slice()
       .sort((a, b) => a.from - b.from);
@@ -189,6 +202,47 @@ export class RetentionEngine {
     return plans;
   }
 
+  /**
+   * The cluster key a tier group's merge should stamp, taken from the source
+   * segments' own layout (sidecars — no segment loads), not from the journal's
+   * declaration: a cluster-declaring journal whose compaction/clusterCompact
+   * has not re-laid out its ts-ordered segments yet must merge them in ts
+   * order — sorting them by dimension would only add cost and permanently
+   * disable the scan early-stop on the merged segment. Missing or disagreeing
+   * sidecars fall back to the journal's provider: sorting by the declared key
+   * is always sound (rows are re-laid out before the key is stamped).
+   */
+  private groupCluster(ids: string[]): string[] | null {
+    const provider = () => (this.clusterProvider !== null ? this.clusterProvider() : null);
+    let key: string[] | null = null;
+    for (const id of ids) {
+      const m = this.store.metaOf(id);
+      if (!m || m.cluster === undefined) return provider();
+      if (m.cluster === null) {
+        if (key !== null) return provider(); // mixed layouts: re-sort by the declared key
+        continue;
+      }
+      if (key === null) key = m.cluster;
+      else if (!sameCluster(key, m.cluster)) return provider();
+    }
+    return key;
+  }
+
+  /**
+   * Merges one tier's blocks. A clustered journal's segments are in dimension
+   * order; plain concatenation would relayout them, so re-sort by the cluster
+   * key and hand the key to store.merge — otherwise the new segment loses its
+   * clusterKey and SegmentMeta stamps tsOrdered: true on non-ts-ordered rows,
+   * breaking the scan early-stop gate.
+   */
+  private mergeTierGroup(ids: string[], tier: RetentionTier): void {
+    const cluster = this.groupCluster(ids);
+    const transform = cluster
+      ? (rows: Row[]) => Cluster.sort(rows, cluster)
+      : (rows: Row[]) => rows;
+    this.store.merge(ids, transform, seg => this.encodeForTier(tier, seg), SEG_V3_EXT, cluster);
+  }
+
   /** Applies retention: re-encoding into tiers + block merging (1h → 1d). */
   apply(now?: number): ApplyReport {
     const t = now ?? this.now();
@@ -200,7 +254,7 @@ export class RetentionEngine {
     for (const g of groups) {
       if (g.ids.length >= 2) {
         // Merging the tier's blocks: dedup at boundaries + the tier's codec/compression
-        this.store.merge(g.ids, (rows) => rows, seg => this.encodeForTier(g.tier, seg), SEG_V3_EXT);
+        this.mergeTierGroup(g.ids, g.tier);
         merged++;
       } else {
         const id = g.ids[0];
@@ -230,7 +284,7 @@ export class RetentionEngine {
     const beforeSegments = this.store.sortedIds().length;
     for (const g of groups) {
       if (g.ids.length >= 2) {
-        this.store.merge(g.ids, (rows) => rows, seg => this.encodeForTier(tier, seg), SEG_V3_EXT);
+        this.mergeTierGroup(g.ids, tier);
         mergedGroups++;
       }
     }

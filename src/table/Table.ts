@@ -279,7 +279,10 @@ export class Table {
       : null;
 
     this.engines = def.storage
-      ? this.journals.map(j => new RetentionEngine(j.store, () => j.journalPath(), def.storage?.tiers))
+      ? this.journals.map(j => new RetentionEngine(
+          j.store, () => j.journalPath(), def.storage?.tiers,
+          undefined, () => j.clusterKey,
+        ))
       : [];
   }
 
@@ -387,6 +390,14 @@ export class Table {
     return this.allRows().slice(-count);
   }
 
+  /** Shared where-op validation for scan/aggregate (single rule source). */
+  private assertWhereOps(where: { op: string }[] | undefined): void {
+    if (!where) return;
+    for (const w of where) {
+      if (!isScanOp(w.op)) throw ErrorManager.make('TBL_WHERE_OP', { op: String(w.op) });
+    }
+  }
+
   scan(opts: ScanOptions): Row[] {
     this._assertOpen();
     if (!this.tiered) return this.journals[0].scan(opts);
@@ -400,11 +411,7 @@ export class Table {
     // The journal applies `where` before projection, so no Table-level re-filter
     // (it would drop rows whose where-field is not in select). Validate ops here
     // to keep the tiered-mode error contract (TBL_WHERE_OP) unchanged.
-    if (opts.where && opts.where.length > 0) {
-      for (const w of opts.where) {
-        if (!isScanOp(w.op)) throw ErrorManager.make('TBL_WHERE_OP', { op: String(w.op) });
-      }
-    }
+    this.assertWhereOps(opts.where);
     let rows = this.tiered.scan(start, end, now, opts);
     // Sort before offset/limit — same order of operations as Journal.scan.
     if (opts.order === 'desc') {
@@ -464,11 +471,7 @@ export class Table {
         throw ErrorManager.make('TBL_AGG_EXPR_FN', { fn: String(e.fn) });
       }
     }
-    if (where) {
-      for (const w of where) {
-        if (!isScanOp(w.op)) throw ErrorManager.make('TBL_WHERE_OP', { op: String(w.op) });
-      }
-    }
+    this.assertWhereOps(where);
     const [startTs, endTs] = Interval.period(start, end, this.now());
     const aggMap: Record<string, AggFn[]> = {};
     for (const e of exprs) {

@@ -186,6 +186,13 @@ export class SegmentFileV3 {
     }
 
     const headerLen = buf.readUInt32LE(8);
+    // Lengths below are attacker/corruption-controlled even when the CRC
+    // matches (CRC32 is not cryptographic): every framing length must stay
+    // inside the body before any allocation or read based on it.
+    const bodyLen = buf.length - 4;
+    if (headerLen === 0 || 12 + headerLen > bodyLen) {
+      throw ErrorManager.make('SFW3_TOO_SMALL');
+    }
     const headerBuf = buf.subarray(12, 12 + headerLen);
     const header = JSON.parse(headerBuf.toString('utf-8')) as V3Header;
     let off = 12 + headerLen;
@@ -196,7 +203,13 @@ export class SegmentFileV3 {
     }
     const blobMap = new Map<string, Buffer>();
     for (const field of header.columnOrder) {
+      if (off + 4 > bodyLen) {
+        throw ErrorManager.make('SFW3_TOO_SMALL');
+      }
       const blobLen = buf.readUInt32LE(off); off += 4;
+      if (blobLen > bodyLen - off) {
+        throw ErrorManager.make('SFW3_TOO_SMALL');
+      }
       const blobBuf = buf.subarray(off, off + blobLen); off += blobLen;
       blobMap.set(field, Compression.decompress(blobBuf, compression));
     }
@@ -205,6 +218,12 @@ export class SegmentFileV3 {
     // in the header); a missing tail is caught as corruption.
     if (typeof header.rowMapLen !== 'number') {
       throw ErrorManager.make('SFW3_NO_ROWMAP');
+    }
+    // Number.isInteger also rejects NaN/Infinity, which typeof alone admits;
+    // a fractional length would crash new Array() with an uncoded RangeError.
+    if (!Number.isInteger(header.rowMapLen) || header.rowMapLen < 0
+      || header.rowMapLen > Math.floor((bodyLen - off) / 4)) {
+      throw ErrorManager.make('SFW3_TOO_SMALL');
     }
     const rowMap = new Array<number>(header.rowMapLen);
     for (let i = 0; i < header.rowMapLen; i++) { rowMap[i] = buf.readUInt32LE(off); off += 4; }

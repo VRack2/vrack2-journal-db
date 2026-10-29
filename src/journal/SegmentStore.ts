@@ -11,7 +11,7 @@ import { Segment } from '../format/Segment.ts';
 import { LRUCache } from '../core/LRUCache.ts';
 import { SegmentFile } from '../format/SegmentFile.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
-import type { Row } from '../core/types.ts';
+import type { DimSummary, Row } from '../core/types.ts';
 import { LOCK_FILE, META_SUFFIX, SEG_V3_EXT, WAL_FILE, idFromFile, isSegmentFile } from './constants.ts';
 import { SegmentMeta } from './SegmentMeta.ts';
 import type { SegmentEncoder } from './SegmentEncoder.ts';
@@ -53,7 +53,15 @@ export class SegmentStore {
 
   /** Index all closed segments in the directory (index + .meta maps); returns the count. */
   scanDir(journalPath: string): number {
-    const files = fs.readdirSync(journalPath).filter(isSegmentFile).sort();
+    const all = fs.readdirSync(journalPath);
+    // Pre-v4 journals stored segments as .json: they are no longer readable,
+    // and silently ignoring them would make the journal look empty. Refuse
+    // loudly so the operator deletes or converts the stale files first.
+    const legacy = all.filter(f => f.endsWith('.json'));
+    if (legacy.length > 0) {
+      throw ErrorManager.make('JRN_LEGACY_FORMAT', { file: legacy[0], count: legacy.length });
+    }
+    const files = all.filter(isSegmentFile).sort();
     this.index.clear();
     this.meta.clear();
     for (const file of files) {
@@ -77,7 +85,7 @@ export class SegmentStore {
     const dir = this.pathOf();
     for (const f of fs.readdirSync(dir)) {
       if (f === LOCK_FILE) continue;
-      if (isSegmentFile(f) || f.endsWith(META_SUFFIX) || f.endsWith('.tmp') || f === WAL_FILE) {
+      if (isSegmentFile(f) || f.endsWith(META_SUFFIX) || f.endsWith('.tmp') || f === WAL_FILE || f.endsWith('.json')) {
         fs.rmSync(path.join(dir, f), { force: true });
       }
     }
@@ -142,9 +150,27 @@ export class SegmentStore {
       const message = e instanceof Error ? e.message : String(e);
       throw ErrorManager.make('JRN_SEG_READ', { file: fileName, message: String(message) });
     }
-    this.meta.set(id, SegmentMeta.fromSegment(seg, bytes));
+    this.meta.set(id, SegmentMeta.fromSegment(seg, bytes, this.reusableDims(id, seg)));
     this.cache.set(id, seg);
     return seg;
+  }
+
+  /**
+   * Dims already validated from this segment's parsed sidecar when the sidecar
+   * and the loaded segment agree on the cluster key: a cold cache load then
+   * skips the O(physicalRows × clusterFields) dimsOfSegment rescan. A sidecar
+   * written by the current writer with a matching cluster always carries the
+   * complete dims (or a truthful null), so reuse cannot fabricate a stale map.
+   */
+  private reusableDims(id: string, seg: Segment): Record<string, DimSummary> | null | undefined {
+    const prior = this.meta.get(id);
+    if (!prior) return undefined;
+    const a = prior.cluster;
+    const b = seg.clusterKey;
+    if (a === null && b === null) return prior.dims ?? null;
+    if (a === null || b === null || a.length !== b.length) return undefined;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return undefined;
+    return prior.dims ?? null;
   }
 
   /** The cached segment object, without touching disk — undefined if not cached. */

@@ -448,5 +448,111 @@ function canon(rows: Row[]): string {
   t3.close();
 }
 
+// --------------------------------------------------
+// 10. Пути перезаписи сохраняют порядок кластера:
+//     purge и retention-слияние не должны терять clusterKey
+//     (иначе сайдкар врёт tsOrdered=true, и early-stop съедает строки)
+// --------------------------------------------------
+{
+  const dir = freshDir('purge-keeps-cluster');
+  const store = new Store(dir);
+  const t = store.create(defineLogTable({
+    name: 'events', columns: schema, cluster: ['host'],
+    rowsPerSegment: 10, opts: { autoCompact: false },
+  }));
+  for (let i = 0; i < 30; i++) t.append(interleavedRow(i));
+  t.clusterCompact();
+  t.journal(0).purge(10); // сегмент [0..29] пересекает границу → перезапись
+
+  const jdir = path.join(dir, 'journals', 'events');
+  const segs = segFiles(jdir).map(f => SegmentFileV3.decode(fs.readFileSync(path.join(jdir, f))));
+  assert(segs.length === 1 && segs[0].clusterKey?.join(',') === 'host',
+    'purge: clusterKey пережит перезаписью сегмента');
+
+  const j = t.journal(0) as unknown as { store: { metaOf(id: string): { tsOrdered?: boolean; dims?: unknown } | undefined } };
+  const meta = j.store.metaOf(segs.length ? segFiles(jdir)[0].replace(/\.seg$/, '') : '');
+  assert(meta?.tsOrdered === false, 'purge: сайдкар tsOrdered=false (порядок dims сохранён)');
+  assert(meta?.dims != null, 'purge: dims восстановлены в сайдкаре перезаписанного сегмента');
+
+  // early-stop не должен срезать строки: top-5 по ts ↑ == наименьшие ts >= 10
+  const got = t.scan({ start: 0, end: 29, order: 'asc', limit: 5 });
+  const expTs = [10, 11, 12, 13, 14];
+  assert(got.length === 5 && got.every((r, i) => r.ts === expTs[i]),
+    `purge: asc+limit полон после перезаписи (факт ${JSON.stringify(got.map(r => r.ts))})`);
+  t.close();
+}
+{
+  const dir = freshDir('retention-keeps-cluster');
+  const store = new Store(dir);
+  const t = store.create(defineLogTable({
+    name: 'events', columns: schema, cluster: ['host'],
+    rowsPerSegment: 10, opts: { autoCompact: false },
+  }));
+  const HOUR = 3_600_000;
+  const base = 1_700_000_000_000 - (1_700_000_000_000 % HOUR); // выровнено по часу
+  for (let i = 0; i < 40; i++) t.append({ ts: base + i * 60_000, host: 'h' + (i % 3), metric: 'm', value: i });
+
+  // сначала кластеризация двумя окнами (граница 19.5 мин — между сегментами):
+  // получаются ДВА dims-упорядоченных сегмента (clusterKey ≠ null), которые затем
+  // сливает retention — этот CRITICAL-сценарий не должен терять clusterKey
+  const cA = t.clusterCompact(base, base + 19 * 60_000 + 30_000);
+  const cB = t.clusterCompact(base + 19 * 60_000 + 30_000, base + 40 * 60_000);
+  assert(cA.mergedSegments >= 2 && cB.mergedSegments >= 2,
+    `clusterCompact: два окна переложили сегменты (merged ${cA.mergedSegments} + ${cB.mergedSegments})`);
+
+  const rep = t.journal(0).retention.apply(base + HOUR);
+  assert(rep.merged >= 1, `retention: блоки слиты (merged ${rep.merged})`);
+
+  const jdir = path.join(dir, 'journals', 'events');
+  const withCluster = segFiles(jdir)
+    .map(f => SegmentFileV3.decode(fs.readFileSync(path.join(jdir, f))))
+    .filter(s => (s.clusterKey?.length ?? 0) > 0);
+  assert(withCluster.length >= 1, 'retention: слитый сегмент сохранил clusterKey');
+
+  const j = t.journal(0) as unknown as { store: { metaOf(id: string): { tsOrdered?: boolean } | undefined; sortedIds(): string[] } };
+  const mergedMeta = j.store.sortedIds()
+    .map(id => j.store.metaOf(id))
+    .filter(m => m && m.tsOrdered === false);
+  assert(mergedMeta.length >= 1, 'retention: сайдкар слитого сегмента tsOrdered=false');
+
+  const got = t.scan({ order: 'asc', limit: 3 });
+  assert(got.length === 3 && got[0].ts === base && got[1].ts === base + 60_000 && got[2].ts === base + 120_000,
+    `retention: asc+limit полон после слияния (факт ${JSON.stringify(got.map(r => r.ts))})`);
+  t.close();
+}
+{
+  const dir = freshDir('retention-keeps-tsorder');
+  const store = new Store(dir);
+  const t = store.create(defineLogTable({
+    name: 'events', columns: schema, cluster: ['host'],
+    rowsPerSegment: 10, opts: { autoCompact: false },
+  }));
+  const HOUR = 3_600_000;
+  const base = 1_700_000_000_000 - (1_700_000_000_000 % HOUR);
+  for (let i = 0; i < 30; i++) t.append({ ts: base + i * 60_000, host: 'h' + (i % 3), metric: 'm', value: i });
+
+  // cluster объявлен, но сегменты ещё не переложены (clusterCompact не запускался):
+  // retention-слияние не должно их сортировать по dims и терять tsOrdered=true
+  const rep = t.journal(0).retention.apply(base + HOUR);
+  assert(rep.merged >= 1, `retention (некластеризованные источники): блоки слиты (merged ${rep.merged})`);
+
+  const jdir = path.join(dir, 'journals', 'events');
+  const withCluster = segFiles(jdir)
+    .map(f => SegmentFileV3.decode(fs.readFileSync(path.join(jdir, f))))
+    .filter(s => (s.clusterKey?.length ?? 0) > 0);
+  assert(withCluster.length === 0, 'retention: ts-ordered источники не превращены в cluster-сегменты');
+
+  const j = t.journal(0) as unknown as { store: { metaOf(id: string): { tsOrdered?: boolean; cluster?: string[] | null } | undefined; sortedIds(): string[] } };
+  const ids = j.store.sortedIds();
+  const metas = ids.map(id => j.store.metaOf(id));
+  assert(ids.length >= 1 && metas.every(m => m && m.tsOrdered === true && (m.cluster === null || m.cluster === undefined)),
+    `retention: сайдкары слитых сегментов остались tsOrdered=true (факт ${JSON.stringify(metas.map(m => m && [m.tsOrdered, m.cluster]))})`);
+
+  const got = t.scan({ order: 'asc', limit: 3 });
+  assert(got.length === 3 && got[0].ts === base && got[1].ts === base + 60_000 && got[2].ts === base + 120_000,
+    `retention: asc+limit полон и с early-stop (факт ${JSON.stringify(got.map(r => r.ts))})`);
+  t.close();
+}
+
 console.log(`\nТесты кластеризации: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

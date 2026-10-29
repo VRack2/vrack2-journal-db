@@ -68,6 +68,12 @@ export class Purge {
 
       removedRows += dropped;
       const fresh = new Segment(seg.id, this.schemaProvider(), this.metadataProvider() ?? {});
+      // Kept rows preserve the source segment's physical order — a filtered
+      // subsequence of a dimension-sorted segment is still dimension-sorted —
+      // so carry the cluster key through. Without it SegmentMeta.fromSegment
+      // would stamp tsOrdered: true on a dimension-ordered segment and the
+      // scan early-stop would cut rows.
+      fresh.clusterKey = seg.clusterKey ? seg.clusterKey.slice() : null;
       for (const row of kept) fresh.append(row);
       fresh.walSeq = seg.walSeq;
       this.store.persist(fresh, undefined, this.store.fileOf(id) ?? null);
