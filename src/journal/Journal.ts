@@ -44,11 +44,12 @@ import { JournalReader } from './JournalReader.ts';
 import { AutoCompactor } from './AutoCompactor.ts';
 import { JournalLock } from './JournalLock.ts';
 import { Purge } from './Purge.ts';
+import { DeleteBy } from './DeleteBy.ts';
 import { Shutdown } from './Shutdown.ts';
 import type {
   AggregateExpr, AggFn, ClusterReport, CompactResult, CompressionMode,
   DownsampleBucket, JournalOptions, JournalStats, LockMode, WalMode,
-  Metadata, PurgeResult, RetentionTier, Row, ScanOptions,
+  Metadata, PurgeResult, RetentionTier, Row, ScanOptions, ScanWhere,
   Schema, TimelineBucket,
 } from '../core/types.ts';
 
@@ -107,6 +108,8 @@ export class Journal {
 
   /** Row-level purge before a timestamp (see journal/Purge.ts). */
   private readonly purgeOp: Purge;
+  /** Row-level delete by where-predicates (see journal/DeleteBy.ts). */
+  private readonly deleteByOp: DeleteBy;
 
   private readonly encoder: SegmentEncoder;
 
@@ -160,6 +163,7 @@ export class Journal {
       () => this.schema,
     );
     this.purgeOp = new Purge(this.store, this.writer, () => this.schema!, () => this.metadata);
+    this.deleteByOp = new DeleteBy(this.store, this.writer, () => this.schema!, () => this.metadata);
     this.compactor = new AutoCompactor(this.store, {
       minSegments: this.compactMinSegments,
       fallbackRows: this.rowsPerSegment,
@@ -287,6 +291,12 @@ export class Journal {
   purge(beforeTs: number | string): PurgeResult {
     if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
     return this.purgeOp.run(Interval.resolve(beforeTs));
+  }
+
+  /** Delete rows matching the given conditions (AND-joined). */
+  deleteBy(where: ScanWhere[]): PurgeResult {
+    if (!this.isOpen) throw ErrorManager.make('JRN_NOT_OPEN');
+    return this.deleteByOp.run(where);
   }
 
   /**

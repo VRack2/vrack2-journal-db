@@ -38,6 +38,7 @@ import type {
   RollupReport,
   Schema,
   ScanOptions,
+  ScanWhere,
   TableTierStat,
   TimelineBucket,
   TruncateResult,
@@ -609,6 +610,21 @@ export class Table {
     let rewrittenSegments = 0;
     for (const j of this.journals) {
       const r = j.purge(until);
+      removedRows += r.removedRows;
+      removedSegments += r.removedSegments;
+      rewrittenSegments += r.rewrittenSegments;
+    }
+    return { removedRows, removedSegments, rewrittenSegments };
+  }
+
+  /** Delete rows matching the given conditions (AND-joined) from all journals. */
+  deleteBy(where: ScanWhere[]): PurgeResult {
+    this._assertOpen();
+    let removedRows = 0;
+    let removedSegments = 0;
+    let rewrittenSegments = 0;
+    for (const j of this.journals) {
+      const r = j.deleteBy(where);
       removedRows += r.removedRows;
       removedSegments += r.removedSegments;
       rewrittenSegments += r.rewrittenSegments;

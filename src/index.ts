@@ -31,6 +31,7 @@ export type {
   RollupFn,
   Row,
   ScanOptions,
+  ScanWhere,
   Schema,
   StoreStats,
   TableTierStat,
