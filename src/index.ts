@@ -16,6 +16,8 @@ export {
   defineSummingTable,
   defineCollapsingTable
 } from './compaction/define.ts';
+export { Aggregation } from './metric/Aggregation.ts';
+export type { AggAcc } from './metric/Aggregation.ts';
 
 // --- types -----------------------------------------------------
 
@@ -26,6 +28,7 @@ export type {
   PurgeResult,
   ResolutionTier,
   RetentionTier,
+  RollupFn,
   Row,
   ScanOptions,
   Schema,

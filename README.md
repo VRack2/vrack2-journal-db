@@ -101,7 +101,7 @@ const cpu2 = store.open('cpu');  // → Table (та же таблица)
 |---|---|---|
 | `query(from, to)` | строки в диапазоне времени | `[{ ts, host, value }, …]` |
 | `tail(n)` | последние n строк | `[{ … }, …]` — последние n |
-| `aggregate(from, to, exprs)` | min / max / sum / avg / count за период | `{ value_avg: 42.3, value_max: 99.9, ts_count: 7184 }` |
+| `aggregate(from, to, exprs)` | min / max / sum / avg / count / last / first за период | `{ value_avg: 42.3, value_max: 99.9, ts_count: 7184 }` |
 | `timeline(interval, from, to)` | сколько строк в каждом интервале | `[{ start, end, count, hasData }, …]` |
 | `scan({ select, where, groupBy, order, limit })` | выбрать колонки, отфильтровать, сгруппировать | `[{ … }, …]`; со `groupBy` — по строке на группу |
 | `percentile(from, to, [0.5, 0.95])` | квантили p50 / p95 / … (колонка `value`) | `{ p50: 38.2, p95: 91.4 }` |
@@ -180,6 +180,28 @@ const cpu = store.create(defineLogTable({
 сгущают в более грубые бакеты и удаляют после TTL. Это происходит само по мере
 `append()` (rollup + purge), с троттлингом, чтобы не дёргать диск на каждую
 строку. Итоговый размер ограничен: `≤ Σ(TTL × разрешение)`.
+
+Можно хранить в сгущённых тирах сразу несколько агрегатов по полю — тогда
+`aggregate()` даёт честные min/max/sum/last/first на любом окне, глубже
+тонкого тира (иначе после сгущения остаётся только объявленное среднее):
+
+```ts
+const metrics = store.create(defineLogTable({
+  name: 'metrics',
+  columns: { ts: 'delta', dev: 'dictionary', met: 'dictionary', value: 'auto' },
+  retention: '5s:10m, 1m:2h, 15m:1d, 1h:1w',
+  agg: { value: ['min', 'max', 'sum', 'count', 'last', 'first'] },
+  dims: ['dev', 'met'],
+}));
+```
+
+В грубых тирах поле лежит в отдельных колонках `value_min`, `value_max`,
+`value_sum`, `value_count`, `value_last` (+ `value_last_ts`), `value_first`
+(+ `value_first_ts`) — все они ассоциативны при склейке тиров, поэтому
+«пик температуры за сутки» или «последнее значение счётчика» считаются
+точно, сколько бы данных ни уехало в грубые тир. Одиночная форма
+(`agg: { value: 'avg' }`) сохраняет прежний компактный формат — одна
+скалярная колонка на поле.
 
 Одна пара `res:ttl` — это чистый TTL без сгущения (агрегация не нужна):
 одно-тирной лог-таблице хватает `retention`, а `cluster` по измерениям даёт

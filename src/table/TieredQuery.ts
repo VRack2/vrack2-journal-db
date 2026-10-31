@@ -7,15 +7,18 @@
 import type { Journal } from '../journal/Journal.ts';
 import { keyOf } from '../journal/scan/plan.ts';
 import { Aggregation, type AggAcc } from '../metric/Aggregation.ts';
-import type { AggFn, JsonValue, ResolutionTier, Row, ScanOptions, TimelineBucket } from '../core/types.ts';
+import type { AggFn, JsonValue, ResolutionTier, RollupFn, Row, ScanOptions, TimelineBucket } from '../core/types.ts';
 
 export class TieredQuery {
   private readonly journals: Journal[];
   private readonly tiers: ResolutionTier[];
+  /** Multi-agg fields (coarse tiers store `<field>_<fn>` rollup columns). */
+  private readonly multiFields: Record<string, RollupFn[]>;
 
-  constructor(journals: Journal[], tiers: ResolutionTier[]) {
+  constructor(journals: Journal[], tiers: ResolutionTier[], multiFields: Record<string, RollupFn[]> = {}) {
     this.journals = journals;
     this.tiers = tiers;
+    this.multiFields = multiFields;
   }
 
   /** Read [startTs, endTs] (inclusive), by ts ↑, from the right tiers. */
@@ -79,63 +82,104 @@ export class TieredQuery {
   }
 
   /**
-   * Aggregation over the tier windows: each tier journal runs an agg scan
-   * (segment summaries fast path included), then identical groups are merged
-   * through Aggregation accumulators — min/max/sum/count are additive, avg is
-   * rebuilt from sum/count. Output shape matches a journal scan-agg row
-   * (`<field>_<fn>` columns: one row per group, or a single row without groupBy).
+   * Aggregation over the tier windows. Two fold paths:
+   *  - multi-agg tables: raw rows are read from every tier window and folded
+   *    through Aggregation accumulators — raw rows add their value, coarse-tier
+   *    rollup rows merge through their `<field>_<fn>` columns (associative:
+   *    min/max/sum/count, last/first via the (value, ts) pair), so aged-out
+   *    buckets stay honest for every declared function;
+   *  - legacy single-fn tables: each tier journal runs an agg scan (segment
+   *    summaries fast path included), then identical groups are merged through
+   *    Aggregation accumulators — min/max/sum/count are additive, avg is
+   *    rebuilt from sum/count.
+   * Output shape matches a journal scan-agg row (`<field>_<fn>` columns: one
+   * row per group, or a single row without groupBy).
    */
   aggregate(
     startTs: number, endTs: number, now: number,
-    agg: Record<string, AggFn[]>,
+    agg: Record<string, (AggFn | 'last' | 'first')[]>,
     where?: ScanOptions['where'],
     groupBy?: string[],
   ): Row[] {
     const gb = groupBy ?? [];
-    // 'count' is always requested per field — the merge needs per-tier counts
-    // to fold partial min/max/sum correctly; avg additionally needs 'sum'.
-    const req: Record<string, AggFn[]> = {};
-    for (const [field, fns] of Object.entries(agg)) {
-      const set = new Set<AggFn>(fns);
-      set.add('count');
-      if (set.has('avg')) set.add('sum');
-      req[field] = [...set];
-    }
+    const multi = Object.keys(this.multiFields).length > 0;
+    // last/first cannot come from a journal agg-scan — fold raw/rollup rows.
+    const foldPath = multi || Object.values(agg).some(fns => fns.some(fn => fn === 'last' || fn === 'first'));
 
     const groups = new Map<string, { row: Row; accs: Record<string, AggAcc> }>();
-    for (let i = 0; i < this.tiers.length; i++) {
-      const win = this.window(i, startTs, endTs, now);
-      if (win === null) continue;
-      const rows = this.journals[i].scan({
-        start: win.start,
-        end: win.end,
-        ...(where && where.length > 0 ? { where } : {}),
-        ...(gb.length > 0 ? { groupBy: gb } : {}),
-        agg: req,
-      });
-      for (const r of rows) {
-        let key = '';
-        for (const g of gb) key += (key ? '\u0000' : '') + keyOf(r[g] as JsonValue);
-        let g = groups.get(key);
-        if (g === undefined) {
-          const accs: Record<string, AggAcc> = {};
-          for (const f of Object.keys(req)) accs[f] = Aggregation.newAcc();
-          const grow: Row = {};
-          for (const f of gb) grow[f] = r[f] ?? null;
-          g = { row: grow, accs };
-          groups.set(key, g);
+    const getGroup = (r: Row): { row: Row; accs: Record<string, AggAcc> } => {
+      let key = '';
+      for (const g of gb) key += (key ? '\u0000' : '') + keyOf(r[g] as JsonValue);
+      let g = groups.get(key);
+      if (g === undefined) {
+        const accs: Record<string, AggAcc> = {};
+        for (const f of Object.keys(agg)) accs[f] = Aggregation.newAcc();
+        const grow: Row = {};
+        for (const f of gb) grow[f] = r[f] ?? null;
+        g = { row: grow, accs };
+        groups.set(key, g);
+      }
+      return g;
+    };
+
+    if (foldPath) {
+      // Fold raw + rollup rows directly: coarse tiers carry the per-fn columns.
+      for (let i = 0; i < this.tiers.length; i++) {
+        const win = this.window(i, startTs, endTs, now);
+        if (win === null) continue;
+        const rows = this.journals[i].scan({
+          start: win.start,
+          end: win.end,
+          ...(where && where.length > 0 ? { where } : {}),
+        });
+        for (const r of rows) {
+          const g = getGroup(r);
+          const ts = TieredQuery.tsOf(r);
+          for (const field of Object.keys(agg)) {
+            if (Aggregation.hasRollupCols(r, field)) {
+              const o = Aggregation.fromRollupRow(r, field);
+              if (o !== null) Aggregation.merge(g.accs[field], o);
+            } else if (ts !== null) {
+              const v = r[field];
+              if (typeof v === 'number' && Number.isFinite(v)) Aggregation.addValue(g.accs[field], v, ts);
+            }
+          }
         }
-        for (const field of Object.keys(req)) {
-          const ct = typeof r[`${field}_count`] === 'number' ? (r[`${field}_count`] as number) : 0;
-          if (ct <= 0) continue;
-          const acc = g.accs[field];
-          const mn = r[`${field}_min`];
-          const mx = r[`${field}_max`];
-          const sm = r[`${field}_sum`];
-          if (typeof mn === 'number' && mn < acc.min) acc.min = mn;
-          if (typeof mx === 'number' && mx > acc.max) acc.max = mx;
-          if (typeof sm === 'number') acc.sum += sm;
-          acc.count += ct;
+      }
+    } else {
+      // 'count' is always requested per field — the merge needs per-tier counts
+      // to fold partial min/max/sum correctly; avg additionally needs 'sum'.
+      const req: Record<string, AggFn[]> = {};
+      for (const [field, fns] of Object.entries(agg)) {
+        const set = new Set<AggFn>(fns as AggFn[]);
+        set.add('count');
+        if (set.has('avg')) set.add('sum');
+        req[field] = [...set];
+      }
+      for (let i = 0; i < this.tiers.length; i++) {
+        const win = this.window(i, startTs, endTs, now);
+        if (win === null) continue;
+        const rows = this.journals[i].scan({
+          start: win.start,
+          end: win.end,
+          ...(where && where.length > 0 ? { where } : {}),
+          ...(gb.length > 0 ? { groupBy: gb } : {}),
+          agg: req,
+        });
+        for (const r of rows) {
+          const g = getGroup(r);
+          for (const field of Object.keys(req)) {
+            const ct = typeof r[`${field}_count`] === 'number' ? (r[`${field}_count`] as number) : 0;
+            if (ct <= 0) continue;
+            const acc = g.accs[field];
+            const mn = r[`${field}_min`];
+            const mx = r[`${field}_max`];
+            const sm = r[`${field}_sum`];
+            if (typeof mn === 'number' && mn < acc.min) acc.min = mn;
+            if (typeof mx === 'number' && mx > acc.max) acc.max = mx;
+            if (typeof sm === 'number') acc.sum += sm;
+            acc.count += ct;
+          }
         }
       }
     }

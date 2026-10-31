@@ -9,7 +9,7 @@ import type { Journal } from '../journal/Journal.ts';
 import { Rollup } from '../metric/Rollup.ts';
 import type { RollupConfig } from '../metric/Rollup.ts';
 import { AtomicJson } from '../core/AtomicJson.ts';
-import type { AggFn, ResolutionTier, RollupReport } from '../core/types.ts';
+import type { AggFn, ResolutionTier, RollupFn, RollupReport } from '../core/types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 ErrorManager.registerMany('Table', [
@@ -34,7 +34,7 @@ interface RollupManagerOptions {
   journals: Journal[];
   /** null — table without retention. */
   tiers: ResolutionTier[] | null;
-  agg: Record<string, AggFn>;
+  agg: Record<string, AggFn | 'last' | 'first' | RollupFn[]>;
   dims: string[];
   /** Checkpoint file path ('' for non-tier tables). */
   cpPath: string;
@@ -44,7 +44,7 @@ interface RollupManagerOptions {
 export class RollupManager {
   private readonly journals: Journal[];
   private readonly tiers: ResolutionTier[] | null;
-  private readonly agg: Record<string, AggFn>;
+  private readonly agg: Record<string, AggFn | 'last' | 'first' | RollupFn[]>;
   private readonly dims: string[];
   private readonly cpPath: string;
   private readonly nowProvider: () => number;
@@ -168,7 +168,7 @@ export class RollupManager {
    * Pages are (cursor, end] with the inclusive scan bounds, so no row is counted
    * twice and none is missed. Promotes the resulting buckets to `coarse`.
    */
-  private rollupWindow(fine: Journal, coarse: Journal, cp: number, maxRollable: number, res: number, agg: Record<string, AggFn>, dims: string[]): { sourceRows: number; promotedRows: number } {
+  private rollupWindow(fine: Journal, coarse: Journal, cp: number, maxRollable: number, res: number, agg: Record<string, AggFn | 'last' | 'first' | RollupFn[]>, dims: string[]): { sourceRows: number; promotedRows: number } {
     const acc = Rollup.accumulate({ agg, dims, res });
     let sourceRows = 0;
     // Fresh table (no checkpoint): start at the oldest fine-tier row, not the

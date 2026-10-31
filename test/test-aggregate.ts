@@ -102,7 +102,7 @@ function expectedAggregate(rows: Row[], start: number, end: number, exprs: Aggre
   const result: Record<string, number | null> = {};
   for (const e of exprs) {
     const a = accs[e.field];
-    let value: number | null;
+    let value: number | null = null;
     switch (e.fn) {
       case 'count': value = a.count; break;
       case 'sum': value = a.count > 0 ? a.sum : null; break;

@@ -33,6 +33,7 @@ import type {
   OpenJournalOptions,
   PurgeResult,
   ResolutionTier,
+  RollupFn,
   Row,
   RollupReport,
   Schema,
@@ -47,7 +48,7 @@ import { validateClusterFields } from '../compaction/define.ts';
 import { RetentionEngine } from '../journal/RetentionEngine.ts';
 import type { ApplyReport, ConversionPlan, TierStatus } from '../core/types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
-import { Aggregation } from '../metric/Aggregation.ts';
+import { Aggregation, type AggAcc } from '../metric/Aggregation.ts';
 import { isScanOp } from '../journal/scan/plan.ts';
 import { TableDef } from './TableDef.ts';
 import { RollupManager } from './RollupManager.ts';
@@ -67,7 +68,7 @@ ErrorManager.registerMany('Table', [
   { short: 'TBL_KEY_EMPTY', description: 'Table: def.key: non-empty array of key fields', rules: { kind: 'string' } },
   { short: 'TBL_KEY_NOT_IN_SCHEMA', description: 'Table: key not in schema', rules: { kind: 'string', field: 'string' } },
   { short: 'TBL_AGG_FIELD', description: 'Table: agg — field not found in columns', rules: { field: 'string' } },
-  { short: 'TBL_AGG_FN', description: 'Table: agg — fn min|max|sum|avg|count', rules: { field: 'string', fn: 'string' } },
+  { short: 'TBL_AGG_FN', description: 'Table: agg — fn min|max|sum|avg|count|last|first or a non-empty list of them', rules: { field: 'string', fn: 'string' } },
   { short: 'TBL_DIMS_FIELD', description: 'Table: dims — field not found in columns', rules: { field: 'string' } },
   { short: 'TBL_MAINT_MIN_INTERVAL', description: 'Table: maintenanceMinIntervalMs — a number >= 0' },
   { short: 'TBL_AGG_NEED_FIELDS', description: 'Table: non-ts fields are required for aggregation', rules: { kind: 'string' } },
@@ -78,7 +79,7 @@ ErrorManager.registerMany('Table', [
   { short: 'TBL_TL_INTERVAL', description: 'Table: timeline — interval: a number in ms > 0 or a string like "15m"' },
   { short: 'TBL_AGG_EXPRS', description: 'Table: aggregate() — exprs: non-empty array { field, fn }' },
   { short: 'TBL_AGG_FIELD_EMPTY', description: 'Table: aggregate() — expr.field: non-empty field name' },
-  { short: 'TBL_AGG_EXPR_FN', description: 'Table: aggregate() — expr.fn: min|max|sum|avg|count', rules: { fn: 'string' } },
+  { short: 'TBL_AGG_EXPR_FN', description: 'Table: aggregate() — expr.fn: min|max|sum|avg|count|last|first', rules: { fn: 'string' } },
   { short: 'TBL_PCTL_LEVEL', description: 'Table: percentile() — level: a number in (0, 1)', rules: { level: 'string' } },
   { short: 'TBL_NO_STORAGE', description: 'Table: def.storage is not set (no storage retention tiers)' },
 ]);
@@ -108,7 +109,11 @@ export class Table {
   readonly kind: 'log' | 'upsert' | 'summing' | 'collapsing';
   /** null — single journal, no retention. */
   readonly tiers: ResolutionTier[] | null;
-  readonly agg: Record<string, AggFn>;
+  /** Rollup declaration as given: field → fn or fn list (validated). */
+  readonly agg: Record<string, AggFn | 'last' | 'first' | RollupFn[]>;
+  /** Fields stored in the multi-column rollup format (list form or last/first):
+   *  field → its fn list. Their coarse-tier rows carry `<field>_<fn>` columns. */
+  readonly multiFields: Record<string, RollupFn[]>;
   readonly dims: string[];
 
   private readonly nowProvider: () => number;
@@ -165,13 +170,22 @@ export class Table {
     if (!agg || Object.keys(agg).length === 0) {
       agg = Table._defaultAgg(this.kind, schema, def);
     }
+    const multiFields: Record<string, RollupFn[]> = {};
     for (const [f, fn] of Object.entries(agg)) {
       if (!(f in schema)) throw ErrorManager.make('TBL_AGG_FIELD', { field: f });
-      if (!Aggregation.isAggFn(fn)) {
+      if (Array.isArray(fn)) {
+        if (fn.length === 0 || !fn.every(x => Aggregation.isRollupFn(x))) {
+          throw ErrorManager.make('TBL_AGG_FN', { field: f, fn: JSON.stringify(fn) });
+        }
+        multiFields[f] = fn.slice();
+      } else if (Aggregation.isRollupFn(fn)) {
+        if (fn === 'last' || fn === 'first') multiFields[f] = [fn];
+      } else {
         throw ErrorManager.make('TBL_AGG_FN', { field: f, fn: String(fn) });
       }
     }
     this.agg = agg;
+    this.multiFields = multiFields;
 
     if (def.dims && def.dims.length > 0) {
       for (const f of def.dims) {
@@ -222,7 +236,7 @@ export class Table {
     if (def.rowsPerSegment !== undefined) opts.rowsPerSegment = def.rowsPerSegment;
     Object.assign(opts, def.opts ?? {});
     // Rollup rows may carry null — agg fields in tier mode are written as 'auto'.
-    const tierSchema = this.tiers ? Table._tierSchema(schema, this.agg) : schema;
+    const tierSchema = this.tiers ? Table._tierSchema(schema, this.agg, this.multiFields) : schema;
 
     let cpPath = '';
     if (this.tiers) {
@@ -264,7 +278,7 @@ export class Table {
       cpPath,
       nowProvider: this.nowProvider,
     });
-    this.tiered = this.tiers ? new TieredQuery(this.journals, this.tiers) : null;
+    this.tiered = this.tiers ? new TieredQuery(this.journals, this.tiers, this.multiFields) : null;
     this.maintenance = this.tiers
       ? new Maintenance({
         name: this.name,
@@ -286,10 +300,27 @@ export class Table {
       : [];
   }
 
-  private static _tierSchema(schema: Schema, agg: Record<string, AggFn>): Schema {
+  private static _tierSchema(
+    schema: Schema,
+    agg: Record<string, AggFn | 'last' | 'first' | RollupFn[]>,
+    multiFields: Record<string, RollupFn[]>,
+  ): Schema {
     const out = { ...schema };
     for (const f of Object.keys(agg)) out[f] = 'auto';
+    for (const [f, fns] of Object.entries(multiFields)) {
+      for (const c of Aggregation.rollupColumnsOf(f, fns)) out[c] = 'auto';
+    }
     return out;
+  }
+
+  /**
+   * Rollup column names a coarse tier stores for `field` (multi-agg tables;
+   * [] for legacy single-fn tables). Read paths select these columns to fold
+   * aged-out buckets without materializing raw rows.
+   */
+  rollupColumns(field: string): string[] {
+    const fns = this.multiFields[field];
+    return fns ? Aggregation.rollupColumnsOf(field, fns) : [];
   }
 
   private static _defaultAgg(
@@ -467,28 +498,37 @@ export class Table {
       if (!e || typeof e.field !== 'string' || e.field.length === 0) {
         throw ErrorManager.make('TBL_AGG_FIELD_EMPTY');
       }
-      if (!Aggregation.isAggFn(e.fn)) {
+      if (!Aggregation.isAggFn(e.fn) && e.fn !== 'last' && e.fn !== 'first') {
         throw ErrorManager.make('TBL_AGG_EXPR_FN', { fn: String(e.fn) });
       }
     }
     this.assertWhereOps(where);
     const [startTs, endTs] = Interval.period(start, end, this.now());
-    const aggMap: Record<string, AggFn[]> = {};
+    const aggMap: Record<string, (AggFn | 'last' | 'first')[]> = {};
     for (const e of exprs) {
       const fns = (aggMap[e.field] ??= []);
       if (!fns.includes(e.fn)) fns.push(e.fn);
     }
+    const needsFold = Object.values(aggMap).some(fns => fns.some(fn => fn === 'last' || fn === 'first'));
     // Aggregation runs where it lives: journal scan-agg (segment summaries
     // fast path) for single-journal tables; per-tier agg scans merged through
-    // Aggregation accumulators in tier mode.
+    // Aggregation accumulators in tier mode. last/first (and multi-agg tier
+    // tables) fold raw/rollup rows instead — the agg-scan cannot compute them.
     let row: Row;
     if (!this.tiered) {
-      const rows = this.journals[0].scan({
-        start: startTs, end: endTs,
-        ...(where && where.length > 0 ? { where } : {}),
-        agg: aggMap,
-      });
-      row = rows[0] ?? {};
+      if (needsFold) {
+        row = Table._foldAggregate(this.journals[0].scan({
+          start: startTs, end: endTs,
+          ...(where && where.length > 0 ? { where } : {}),
+        }), aggMap);
+      } else {
+        const rows = this.journals[0].scan({
+          start: startTs, end: endTs,
+          ...(where && where.length > 0 ? { where } : {}),
+          agg: aggMap as Record<string, AggFn[]>,
+        });
+        row = rows[0] ?? {};
+      }
     } else {
       const rows = this.tiered.aggregate(startTs, endTs, this.now(), aggMap, where);
       row = rows[0] ?? {};
@@ -499,6 +539,29 @@ export class Table {
       out[`${e.field}_${e.fn}`] = typeof v === 'number' ? v : (e.fn === 'count' ? 0 : null);
     }
     return out;
+  }
+
+  /** Fold raw rows into a single aggregate row (`<field>_<fn>` shape). */
+  private static _foldAggregate(rows: Row[], aggMap: Record<string, (AggFn | 'last' | 'first')[]>): Row {
+    const accs: Record<string, AggAcc> = {};
+    for (const f of Object.keys(aggMap)) accs[f] = Aggregation.newAcc();
+    for (const r of rows) {
+      const ts = TieredQuery.tsOf(r);
+      for (const field of Object.keys(aggMap)) {
+        if (Aggregation.hasRollupCols(r, field)) {
+          const o = Aggregation.fromRollupRow(r, field);
+          if (o !== null) Aggregation.merge(accs[field], o);
+        } else if (ts !== null) {
+          const v = r[field];
+          if (typeof v === 'number' && Number.isFinite(v)) Aggregation.addValue(accs[field], v, ts);
+        }
+      }
+    }
+    const row: Row = {};
+    for (const [field, fns] of Object.entries(aggMap)) {
+      for (const fn of fns) row[`${field}_${fn}`] = Aggregation.value(accs[field], fn);
+    }
+    return row;
   }
 
   /** Percentiles of `value` in [start, end] (linear interpolation). */

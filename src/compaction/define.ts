@@ -18,7 +18,7 @@
 // Validation runs at the define* call — errors are visible at the declaration
 // site, not at the first compact().
 
-import type { AggFn, OpenJournalOptions, ResolutionTier, RetentionTier, Schema } from '../core/types.ts';
+import type { AggFn, OpenJournalOptions, ResolutionTier, RetentionTier, RollupFn, Schema } from '../core/types.ts';
 import { Descriptor } from './Descriptor.ts';
 import { Aggregation } from '../metric/Aggregation.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
@@ -28,12 +28,12 @@ ErrorManager.registerMany('define', [
   { short: 'DEF_NAME_SLASH', description: 'name must not contain "/"', rules: { kind: 'string' } },
   { short: 'DEF_COLUMNS_OBJECT', description: 'columns must be an object "field → column type"', rules: { kind: 'string' } },
   { short: 'DEF_COLUMNS_EMPTY', description: 'columns must be a non-empty schema', rules: { kind: 'string' } },
-  { short: 'DEF_RETENTION_AGG', description: 'retention/tiers requires an explicit agg (field → min|max|sum|avg|count)', rules: { kind: 'string' } },
+  { short: 'DEF_RETENTION_AGG', description: 'retention/tiers requires an explicit agg (field → min|max|sum|avg|count|last|first or a list of them)', rules: { kind: 'string' } },
   { short: 'DEF_TIERS_EMPTY', description: 'tiers must be a non-empty array of { resMs, ttlMs }', rules: { kind: 'string' } },
   { short: 'DEF_TIERS_POSITIVE', description: 'tiers resMs/ttlMs must be > 0', rules: { kind: 'string' } },
   { short: 'DEF_TIERS_ORDER', description: 'tiers resMs and ttlMs must not decrease (fine → coarse)', rules: { kind: 'string' } },
   { short: 'DEF_AGG_FIELD', description: 'agg field not found in columns', rules: { kind: 'string', field: 'string' } },
-  { short: 'DEF_AGG_FN', description: 'agg fn must be min|max|sum|avg|count', rules: { kind: 'string', field: 'string', fn: 'string' } },
+  { short: 'DEF_AGG_FN', description: 'agg fn must be min|max|sum|avg|count|last|first (or a non-empty list of them)', rules: { kind: 'string', field: 'string', fn: 'string' } },
   { short: 'DEF_DIMS_EMPTY', description: 'dims must be a non-empty array of fields', rules: { kind: 'string' } },
   { short: 'DEF_DIMS_FIELD', description: 'dims field not found in columns', rules: { kind: 'string', field: 'string' } },
   { short: 'DEF_STORAGE_TIERS', description: 'storage.tiers must be objects { id, from, to, … }', rules: { kind: 'string' } },
@@ -74,8 +74,11 @@ interface BaseTableDef {
   /** Explicit tier array (fine to coarse). Takes precedence over `retention`.
    *  One tier — TTL only; two or more — rollup, requires an explicit `agg`. */
   tiers?: ResolutionTier[];
-  /** Rollup aggregation: field → fn (min|max|sum|avg|count). Required with `retention`. */
-  agg?: Record<string, AggFn>;
+  /** Rollup aggregation: field → fn or fn list (min|max|sum|avg|count|last|first).
+   *  Required with `retention`. A single fn keeps the legacy rollup format (one
+   *  value column); a list stores one column per fn (`<field>_min`, `value_last`
+   *  + `value_last_ts`, …) so min/max/sum/last/first survive tier merging. */
+  agg?: Record<string, AggFn | 'last' | 'first' | RollupFn[]>;
   /** Rollup dimension fields (group-by). Default: the engine key (without ts) or schema − ts − agg. */
   dims?: string[];
   /** Cluster key for compaction: dimension fields a compacted segment is sorted
@@ -220,7 +223,11 @@ function validateBase(cfg: BaseTableDef, kind: string): void {
       if (!(f in cfg.columns)) {
         throw ErrorManager.make('DEF_AGG_FIELD', { kind, field: f });
       }
-      if (!Aggregation.isAggFn(fn)) {
+      if (Array.isArray(fn)) {
+        if (fn.length === 0 || !fn.every(x => Aggregation.isRollupFn(x))) {
+          throw ErrorManager.make('DEF_AGG_FN', { kind, field: f, fn: JSON.stringify(fn) });
+        }
+      } else if (!Aggregation.isRollupFn(fn)) {
         throw ErrorManager.make('DEF_AGG_FN', { kind, field: f, fn: String(fn) });
       }
     }

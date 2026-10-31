@@ -71,10 +71,21 @@ export type SerializedColumn =
 /** Supported aggregate functions. */
 export type AggFn = 'min' | 'max' | 'sum' | 'avg' | 'count';
 
-/** Aggregation expression: field + function. */
+/**
+ * Table-declaration aggregate vocabulary: AggFn plus the merge-safe
+ * time-positioned functions 'last'/'first'. A rollup tier stores them as
+ * `<field>_<fn>` columns (plus `<field>_last_ts`/`<field>_first_ts`), so
+ * they survive tier-to-tier merging; the scan-API (AggFn) computes them
+ * from raw rows instead.
+ */
+export type RollupFn = AggFn | 'last' | 'first';
+
+/** Aggregation expression: field + function. 'last'/'first' are supported by
+ *  Table.aggregate (folded from raw rows / multi-agg rollup columns); the
+ *  journal scan-API accepts only AggFn. */
 export interface AggregateExpr {
   field: string;
-  fn: AggFn;
+  fn: AggFn | 'last' | 'first';
 }
 
 /** Comparison operator in a scan where() condition. */
