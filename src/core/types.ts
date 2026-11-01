@@ -89,7 +89,7 @@ export interface AggregateExpr {
 }
 
 /** Comparison operator in a scan where() condition. */
-export type ScanOp = 'eq' | 'ne' | 'lt' | 'le' | 'gt' | 'ge' | 'in' | 'nin' | 'isNull' | 'isNotNull';
+export type ScanOp = 'eq' | 'ne' | 'lt' | 'le' | 'gt' | 'ge' | 'in' | 'nin' | 'isNull' | 'isNotNull' | 'startsWith';
 
 /** One scan() filter condition: field + operator + value.
  *  Conditions are joined with AND. For in/nin the value is an array;

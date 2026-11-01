@@ -996,5 +996,51 @@ console.log('\naggregate с where: single-journal и tiered (merge по тира
   store3.closeAll();
 }
 
+// --------------------------------------------------
+// lookupBy + startsWith
+// --------------------------------------------------
+{
+  const dir = path.join(baseDir, 'lookup');
+  fs.rmSync(dir, { recursive: true, force: true });
+  const store = new Store(dir);
+  const t = store.create(defineLogTable({
+    name: 'tasks',
+    columns: { ts: 'delta', taskId: 'dictionary', app: 'dictionary', status: 'raw' },
+  }));
+
+  const now = Date.now();
+  t.append({ ts: now - 5000, taskId: 'task-001', app: 'mysql-db', status: 'done' });
+  t.append({ ts: now - 4000, taskId: 'task-002', app: 'mysql-replica', status: 'running' });
+  t.append({ ts: now - 3000, taskId: 'task-003', app: 'postgres-main', status: 'done' });
+  t.append({ ts: now - 2000, taskId: 'task-001', app: 'mysql-db', status: 'reopened' });
+  t.append({ ts: now - 1000, taskId: 'task-004', app: 'redis-cache', status: 'pending' });
+  t.flush();
+
+  // lookupBy: finds latest (order desc)
+  const row = t.lookupBy('taskId', 'task-001');
+  assert(row !== null, 'lookupBy: found task-001');
+  assert(row!.status === 'reopened', `lookupBy: latest version (got ${row!.status})`);
+
+  // lookupBy: returns null for missing
+  assert(t.lookupBy('taskId', 'nonexistent') === null, 'lookupBy: null for missing');
+
+  // startsWith: prefix filter
+  const mysql = t.scan({ where: [{ field: 'app', op: 'startsWith', value: 'mysql' }] });
+  assert(mysql.length === 3, `startsWith 'mysql' → 3 rows (got ${mysql.length})`);
+
+  const pg = t.scan({ where: [{ field: 'app', op: 'startsWith', value: 'postgres' }] });
+  assert(pg.length === 1, `startsWith 'postgres' → 1 row (got ${pg.length})`);
+
+  const none = t.scan({ where: [{ field: 'app', op: 'startsWith', value: 'zzz' }] });
+  assert(none.length === 0, `startsWith 'zzz' → 0 rows (got ${none.length})`);
+
+  // startsWith with empty prefix matches all
+  const all = t.scan({ where: [{ field: 'app', op: 'startsWith', value: '' }] });
+  assert(all.length === 5, `startsWith '' → 5 rows (got ${all.length})`);
+
+  t.close();
+  store.closeAll();
+}
+
 console.log(`\nТесты table (Фазы 4-6): ${passed} passed, ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

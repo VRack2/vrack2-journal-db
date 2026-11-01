@@ -79,6 +79,7 @@ function refWhereOne(value: unknown, op: ScanOp, target: unknown): boolean {
     case 'nin': return Array.isArray(target) && !target.includes(value);
     case 'isNull': return value === null || value === undefined;
     case 'isNotNull': return value !== null && value !== undefined;
+    case 'startsWith': return typeof value === 'string' && typeof target === 'string' && value.startsWith(target);
   }
   return false;
 }
@@ -273,6 +274,9 @@ function assertAggSets(got: Row[], want: Row[], msg: string, keyFields: string[]
   assert(cnt([{ field: 'host', op: 'nin', value: ['a', 'b'] }]) === 1, 's4 nin [a,b] → 1 (c)');
   assert(cnt([{ field: 'value', op: 'isNull' }]) === 1, 's4 isNull value → 1');
   assert(cnt([{ field: 'value', op: 'isNotNull' }]) === 4, 's4 isNotNull value → 4');
+  assert(cnt([{ field: 'host', op: 'startsWith', value: 'a' }]) === 2, 's4 startsWith a → 2');
+  assert(cnt([{ field: 'host', op: 'startsWith', value: 'b' }]) === 2, 's4 startsWith b → 2');
+  assert(cnt([{ field: 'host', op: 'startsWith', value: 'x' }]) === 0, 's4 startsWith x → 0');
   j.close();
 }
 

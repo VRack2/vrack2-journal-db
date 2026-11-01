@@ -29,6 +29,7 @@ import type {
   AggregateExpr,
   ClusterReport,
   CompactResult,
+  JsonValue,
   Metadata,
   OpenJournalOptions,
   PurgeResult,
@@ -51,6 +52,7 @@ import type { ApplyReport, ConversionPlan, TierStatus } from '../core/types.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 import { Aggregation, type AggAcc } from '../metric/Aggregation.ts';
 import { isScanOp } from '../journal/scan/plan.ts';
+import { parseSql } from '../sql/index.ts';
 import { TableDef } from './TableDef.ts';
 import { RollupManager } from './RollupManager.ts';
 import { Maintenance, DEFAULT_MAINTENANCE_INTERVAL_MS } from './Maintenance.ts';
@@ -450,6 +452,61 @@ export class Table {
       rows.sort((a, b) => TieredQuery.tsCmp(b, a));
     }
     return Table._applyScanOptions(rows, opts);
+  }
+
+  /**
+   * Point-lookup: find the first (latest) row where `field === value`.
+   * Returns null when no match. For upsert tables returns the latest version
+   * (order: 'desc'). For log tables returns the most recent append.
+   */
+  lookupBy(field: string, value: JsonValue): Row | null {
+    this._assertOpen();
+    const rows = this.scan({
+      where: [{ field, op: 'eq', value }],
+      limit: 1,
+      order: 'desc',
+    });
+    return rows[0] ?? null;
+  }
+
+  /**
+   * Execute a SQL query against this table. The FROM clause is ignored
+   * (the table is already resolved). Supports SELECT and INSERT.
+   *
+   * ```ts
+   * cpu.sql("SELECT host, avg(value) FROM cpu WHERE ts >= 'now-1h' GROUP BY host ORDER BY avg_val DESC LIMIT 10")
+   * cpu.sql("INSERT INTO cpu (ts, host, value) VALUES (1700000000, 'web-1', 42.3)")
+   * ```
+   */
+  sql(query: string): Row[] {
+    this._assertOpen();
+    const parsed = parseSql(query);
+    if (parsed.kind === 'insert') {
+      const rows = parsed.positional
+        ? this.resolvePositional(parsed.rows)
+        : parsed.rows;
+      for (const row of rows) this.append(row);
+      return rows;
+    }
+    return this.scan(parsed.opts);
+  }
+
+  /** Resolve positional INSERT (no column list) using schema field order. */
+  resolvePositional(rows: Row[]): Row[] {
+    const fields = Object.keys(this.schema!);
+    return rows.map(r => {
+      const out: Row = {};
+      let i = 0;
+      for (const key of Object.keys(r)) {
+        if (key.startsWith('__pos')) {
+          out[fields[i]] = r[key];
+          i++;
+        } else {
+          out[key] = r[key];
+        }
+      }
+      return out;
+    });
   }
 
   private static _applyScanOptions(rows: Row[], opts: ScanOptions): Row[] {

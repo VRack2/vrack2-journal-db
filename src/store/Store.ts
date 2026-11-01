@@ -26,6 +26,7 @@ import type {
   LockMode,
   Metadata,
   OpenJournalOptions,
+  Row,
   Schema,
   StoreOptions,
   StoreStats,
@@ -35,6 +36,7 @@ import { ENGINE_META_KEY } from '../compaction/Descriptor.ts';
 import { engineDescriptorOf } from '../compaction/define.ts';
 import type { AnyTableDef, LogTableDef, TableDescription, TableRuntime } from '../compaction/define.ts';
 import type { EngineKind } from '../compaction/types.ts';
+import { parseSql } from '../sql/index.ts';
 import ErrorManager from '../errors/ErrorManager.ts';
 
 const MANIFEST_FILE = '_store.json';
@@ -215,6 +217,27 @@ export class Store {
   engineOf(name: string): EngineKind | undefined {
     const def = this._readManifest().tables[name];
     return def ? def.kind : undefined;
+  }
+
+  /**
+   * Execute a SQL query: resolves the table from FROM/INTO, opens it, and runs scan() or append().
+   *
+   * ```ts
+   * store.sql("SELECT host, avg(value) FROM cpu WHERE ts >= 'now-1h' GROUP BY host")
+   * store.sql("INSERT INTO cpu (ts, host, value) VALUES (1700000000, 'web-1', 42.3)")
+   * ```
+   */
+  sql(query: string): Row[] {
+    const parsed = parseSql(query);
+    const t = this.open(parsed.table);
+    if (parsed.kind === 'insert') {
+      const rows = parsed.positional
+        ? t.resolvePositional(parsed.rows)
+        : parsed.rows;
+      for (const row of rows) t.append(row);
+      return rows;
+    }
+    return t.scan(parsed.opts);
   }
 
   // --------------------------------------------------

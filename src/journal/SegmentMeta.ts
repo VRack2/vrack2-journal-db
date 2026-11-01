@@ -214,6 +214,10 @@ export class SegmentMeta {
             case 'isNull':
               if (!d.v.some((v) => v === null)) return true;
               break;
+            case 'startsWith':
+              if (typeof c.value === 'string'
+                && !d.v.some((v) => typeof v === 'string' && v.startsWith(c.value as string))) return true;
+              break;
           }
         } else {
           switch (c.op) {

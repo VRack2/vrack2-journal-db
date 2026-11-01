@@ -18,6 +18,8 @@ export {
 } from './compaction/define.ts';
 export { Aggregation } from './metric/Aggregation.ts';
 export type { AggAcc } from './metric/Aggregation.ts';
+export { parseSql, SqlSyntaxError } from './sql/index.ts';
+export type { SqlQuery, SqlSelectQuery, SqlInsertQuery } from './sql/index.ts';
 
 // --- types -----------------------------------------------------
 

@@ -22,7 +22,7 @@ export interface ScanPlan {
   sortKey: string;
 }
 
-const SCAN_OPS: readonly ScanOp[] = ['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'in', 'nin', 'isNull', 'isNotNull'];
+const SCAN_OPS: readonly ScanOp[] = ['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'in', 'nin', 'isNull', 'isNotNull', 'startsWith'];
 const SCAN_OP_SET: ReadonlySet<string> = new Set(SCAN_OPS);
 export function isScanOp(op: unknown): op is ScanOp {
   return typeof op === 'string' && SCAN_OP_SET.has(op);
@@ -52,6 +52,7 @@ export function whereOne(value: JsonValue, op: ScanOp, target: JsonValue): boole
     case 'nin':       return Array.isArray(target) && !target.includes(value);
     case 'isNull':    return value === null || value === undefined;
     case 'isNotNull': return value !== null && value !== undefined;
+    case 'startsWith': return typeof value === 'string' && typeof target === 'string' && value.startsWith(target);
   }
   return false;
 }

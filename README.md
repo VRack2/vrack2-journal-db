@@ -137,6 +137,101 @@ cpu.timeline('15m', 'now-1h', 'now');
 // → [{ start, end, count, hasData }, …] — 4 15-минутных бакета за час
 ```
 
+## SQL
+
+Помимо программного API, таблицы поддерживают SQL-запросы. Парсер покрывает
+подмножество, которое ложится 1:1 на `scan()` — без внешних зависимостей.
+
+```ts
+// Через Store — FROM определяет таблицу
+const rows = store.sql(`
+  SELECT host, avg(value), max(value)
+  FROM cpu
+  WHERE ts >= 'now-1h' AND host IN ('web-1', 'web-2')
+  GROUP BY host
+  ORDER BY avg DESC
+  LIMIT 10
+`);
+// → [{ host: 'web-1', value_avg: 42.3, value_max: 99.9 }, …]
+
+// Через Table — FROM игнорируется (таблица уже известна)
+const rows2 = cpu.sql("SELECT host, value FROM cpu WHERE value > 42");
+
+// INSERT — с явным списком колонок
+cpu.sql("INSERT INTO cpu (ts, host, value) VALUES (1700000000, 'web-1', 42.3)");
+
+// INSERT — несколько строк
+cpu.sql("INSERT INTO cpu (ts, host, value) VALUES (1, 'a', 10), (2, 'b', 20)");
+
+// INSERT — позиционный (порядок = порядок полей схемы)
+cpu.sql("INSERT INTO cpu VALUES (1700000000, 'web-1', 42.3)");
+```
+
+### Поддерживаемый синтаксис
+
+```
+SELECT col1, col2 | agg_fn(col) | *
+FROM table_name
+WHERE col op value [AND col op value …]
+GROUP BY col [, col …]
+ORDER BY col [ASC | DESC]
+LIMIT n [OFFSET m]
+
+INSERT INTO table [(col1, col2, …)] VALUES (v1, v2, …) [, (v1, v2, …) …]
+```
+
+| Конструкция | Пример | Маппится на |
+|---|---|---|
+| Проекция | `SELECT host, value` | `scan({ select: ['host','value'] })` |
+| Все колонки | `SELECT *` | `scan({})` — все поля схемы |
+| Агрегаты | `avg(value), max(value)` | `scan({ agg: { value: ['avg','max'] } })` |
+| Фильтры | `WHERE value > 42 AND host = 'web-1'` | `where: [{field,op,value}, …]` |
+| Диапазон ts | `WHERE ts >= 'now-1h' AND ts <= 'now'` | `start` / `end` (zone-map skipping) |
+| IN / NOT IN | `WHERE host IN ('a','b')` | `op: 'in'` / `op: 'nin'` |
+| IS NULL / IS NOT NULL | `WHERE value IS NULL` | `op: 'isNull'` / `op: 'isNotNull'` |
+| GROUP BY | `GROUP BY host` | `groupBy: ['host']` |
+| ORDER BY | `ORDER BY value DESC` | `order: 'desc'` |
+| LIMIT / OFFSET | `LIMIT 10 OFFSET 5` | `limit: 10, offset: 5` |
+| INSERT | `INSERT INTO t (a,b) VALUES (1,'x')` | `table.append({a:1, b:'x'})` |
+
+**Операторы:** `=` `!=` `<` `<=` `>` `>=` `IN` `NOT IN` `IS NULL` `IS NOT NULL`  
+**Агрегатные функции:** `avg` `sum` `min` `max` `count`
+
+Условия по `ts` с операторами `>=`, `>`, `<=`, `<` автоматически превращаются
+в `start`/`end` — сегменты вне диапазона не читаются с диска.
+
+### Только парсер
+
+Если нужна кастомная интеграция (например, свой роутинг по таблицам):
+
+```ts
+import { parseSql } from 'vrack2-journal-db';
+
+const { table, opts } = parseSql("SELECT host FROM cpu WHERE value > 42 LIMIT 5");
+// table = 'cpu'
+// opts  = { select: ['host'], where: [{field:'value',op:'gt',value:42}], limit: 5 }
+
+const t = store.open(table);
+const rows = t.scan(opts);
+```
+
+### Ошибки
+
+При некорректном синтаксисе бросается `SqlSyntaxError` с позицией в строке:
+
+```ts
+import { parseSql, SqlSyntaxError } from 'vrack2-journal-db';
+
+try {
+  parseSql("SELECT FROM cpu");
+} catch (e) {
+  if (e instanceof SqlSyntaxError) {
+    console.log(e.message); // "SQL syntax error at position 7: expected an identifier, got 'FROM'"
+    console.log(e.pos);     // 7
+  }
+}
+```
+
 ## Движки
 
 У таблицы есть **движок** — правило, что делать со строками при `compact()`:

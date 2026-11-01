@@ -282,6 +282,9 @@ function canon(rows: Row[]): string {
   assert(!SegmentMeta.skipsWhere(mSet, [{ field: 'host', op: 'in', value: ['x', 'b'] }], false), 'dims set: in с пересечением → не skip');
   assert(!SegmentMeta.skipsWhere(mSet, [{ field: 'host', op: 'isNull', value: null }], false), 'dims set: null в наборе → isNull не skip');
   assert(!SegmentMeta.skipsWhere(mSet, [{ field: 'host', op: 'ne', value: 'zz' }], false), 'dims set: ne → никогда не skip');
+  assert(SegmentMeta.skipsWhere(mSet, [{ field: 'host', op: 'startsWith', value: 'x' }], false), 'dims set: startsWith x (нет в наборе) → skip');
+  assert(!SegmentMeta.skipsWhere(mSet, [{ field: 'host', op: 'startsWith', value: 'a' }], false), 'dims set: startsWith a (есть в наборе) → не skip');
+  assert(!SegmentMeta.skipsWhere(mSet, [{ field: 'host', op: 'startsWith', value: '' }], false), 'dims set: startsWith empty → не skip (пустой префикс совпадает со всем)');
   const mRange = SegmentMeta.parse(JSON.parse(JSON.stringify({
     rowCount: 5, dims: { lvl: { t: 'range', min: 0, max: 10 } },
   })));
