@@ -7,9 +7,10 @@ import { Segment } from './Segment.ts';
 import { SegmentFileV3 } from './SegmentFileV3.ts';
 
 export class SegmentFile {
-  /** Buffer (JSDB v4 container) → in-memory segment. */
-  static read(buf: Buffer): Segment {
-    return SegmentFileV3.decode(buf);
+  /** Buffer (JSDB v4 container) → in-memory segment.
+   *  `neededColumns` projects the decode — see SegmentFileV3.decode. */
+  static read(buf: Buffer, neededColumns?: Set<string>): Segment {
+    return SegmentFileV3.decode(buf, neededColumns);
   }
 
   /** Whether the buffer is a JSDB segment file (by the "JSDB" magic bytes). */

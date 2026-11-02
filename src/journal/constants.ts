@@ -20,6 +20,10 @@ export const idFromFile = (f: string): string =>
 
 /** Default rows per segment before flush. Deliberately large: fewer files/unlinks on SSD. */
 export const DEFAULT_ROWS_PER_SEGMENT = 10_000;
+/** Default byte cap per segment before flush (approximate in-memory row size).
+ *  The row budget alone never bounds a fat-payload table: 10 000 rows of
+ *  35 KB payloads make a 350 MB segment. Whichever budget is hit first rolls. */
+export const DEFAULT_MAX_BYTES_PER_SEGMENT = 32_000_000;
 /** Default WAL batch (rows buffered in memory before a disk append). */
 export const DEFAULT_WAL_BATCH_ROWS = 512;
 /** WAL buffer byte threshold that forces a drain. */

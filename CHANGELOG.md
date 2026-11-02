@@ -1,5 +1,33 @@
 # CHANGELOG
 
+## 4.4.0
+
+### Column projection + byte-cap на переполнение сегмента
+
+- **Проекция колонок.** `SegmentFileV3.decode(buf, neededColumns?)` не
+  разжимает и не хранит blob'ы ненужных колонок (offset всё равно идёт по
+  `blobLen`, CRC — по всему телу). Хедер (schema, summaries, ts-bounds,
+  rowMap) читается полностью, поэтому summary-fast-path и ts-skip работают
+  как раньше.
+- **Aggregate/downsample/timeline/scan/percentile** загружают закрытые
+  сегменты только с нужными колонками (`{ts, ...fields}` / `{ts, field}` /
+  `{ts}`). Проекция покрывает и `percentile()` (идёт через
+  `scan({select:[field]})`).
+- **Проецированный `loadClosed` — read-through:** не кладётся в LRU-кэш и
+  не пишет `.meta` (кэш не отравляется узким проекцией, размеры не
+  проседают). Полный закэшированный сегмент всегда выигрывает.
+- **Byte-cap сегментов.** `Segment.approxBytes` копится на каждую
+  физическую строку (string→len, number/bigint→8, boolean→1, +4 на rowMap).
+  Флаш при `rowCount >= rowsPerSegment || approxBytes >=
+  maxBytesPerSegment` — раньше любого из двух. Дефолт
+  `DEFAULT_MAX_BYTES_PER_SEGMENT = 32_000_000`.
+- **Опции:** `maxBytesPerSegment` в `JournalOptions`/`OpenJournalOptions`
+  и `defaultMaxBytesPerSegment` в `StoreOptions`; валидация
+  `JRN_OPT_MAX_BYTES` (целое ≥1).
+- Тесты: byte-cap + валидация опции (`test-basic`), проекция декода
+  (`test-v3-format`), корректность проекции и целостность кэша после
+  aggregate-чтений (`test-aggregate`).
+
 ## 4.1.0
 
 ### Multi-aggregate rollup: min/max/sum/last/first живут после сгущения

@@ -30,6 +30,7 @@ import { makeEngine } from './engineFactory.ts';
 import {
   DEFAULT_CLUSTER_ROWS_PER_PASS,
   DEFAULT_COMPACT_MIN_SEGMENTS,
+  DEFAULT_MAX_BYTES_PER_SEGMENT,
   DEFAULT_ROWS_PER_SEGMENT,
   DEFAULT_WAL_BATCH_ROWS,
   LOCK_FILE,
@@ -60,6 +61,8 @@ export class Journal {
   readonly baseDir: string;
   private readonly journalsDir: string;
   readonly rowsPerSegment: number;
+  /** Byte cap per segment before flush (see JournalOptions.maxBytesPerSegment). */
+  readonly maxBytesPerSegment: number;
   readonly maxCachedSegments: number;
   readonly autoCompact: boolean;
   readonly compactMinSegments: number;
@@ -117,6 +120,9 @@ export class Journal {
     this.baseDir = baseDir;
     this.journalsDir = path.join(baseDir, 'journals');
     this.rowsPerSegment = opts.rowsPerSegment ?? DEFAULT_ROWS_PER_SEGMENT;
+    const maxBytes = opts.maxBytesPerSegment ?? DEFAULT_MAX_BYTES_PER_SEGMENT;
+    if (!Number.isInteger(maxBytes) || maxBytes < 1) throw ErrorManager.make('JRN_OPT_MAX_BYTES');
+    this.maxBytesPerSegment = maxBytes;
     this.maxCachedSegments = opts.maxCachedSegments ?? 32;
     this.autoCompact = opts.autoCompact ?? true;
     const minSeg = opts.compactMinSegments ?? DEFAULT_COMPACT_MIN_SEGMENTS;
@@ -153,6 +159,7 @@ export class Journal {
       (id) => new Segment(id, this.schema!, { ...(this.metadata ?? {}) }),
       () => this.store.newId(),
       this.rowsPerSegment,
+      this.maxBytesPerSegment,
       batch,
       this.walMode,
       (seg) => this.store.persist(seg),

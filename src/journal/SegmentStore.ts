@@ -132,8 +132,16 @@ export class SegmentStore {
     });
   }
 
-  /** Closed segment from the LRU cache or disk (refreshes its .meta entry). */
-  loadClosed(id: string): Segment {
+  /**
+   * Closed segment from the LRU cache or disk (refreshes its .meta entry).
+   *
+   * `neededColumns` projects the decode (see SegmentFileV3.decode): the
+   * segment is read through without being cached and without touching its
+   * .meta entry — a projected segment is missing columns, and caching it
+   * under the plain id would poison later full loads; refreshing .meta from
+   * it could shrink the sidecar's dims. A cached full segment always wins.
+   */
+  loadClosed(id: string, neededColumns?: Set<string>): Segment {
     const cached = this.cache.get(id);
     if (cached) return cached;
 
@@ -145,11 +153,12 @@ export class SegmentStore {
     try {
       const buf = fs.readFileSync(path.join(this.pathOf(), fileName));
       bytes = buf.length;
-      seg = SegmentFile.read(buf);
+      seg = SegmentFile.read(buf, neededColumns);
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       throw ErrorManager.make('JRN_SEG_READ', { file: fileName, message: String(message) });
     }
+    if (neededColumns) return seg;
     this.meta.set(id, SegmentMeta.fromSegment(seg, bytes, this.reusableDims(id, seg)));
     this.cache.set(id, seg);
     return seg;

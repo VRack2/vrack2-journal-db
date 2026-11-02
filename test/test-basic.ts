@@ -148,5 +148,35 @@ const schema: Schema = { ts: 'delta', val: 'dictionary' };
   j2.close();
 }
 
+// --------------------------------------------------
+// 4b. Авто-flush по байтовому лимиту (maxBytesPerSegment):
+//     жирные строки роллят сегмент задолго до строчного бюджета
+// --------------------------------------------------
+{
+  const fatSchema: Schema = { ts: 'delta', data: 'raw' };
+  const j = new Journal(baseDir, { rowsPerSegment: 10_000, maxBytesPerSegment: 5_000, autoCompact: false });
+  j.open('bytey', fatSchema);
+  const payload = 'x'.repeat(1000);
+  for (let i = 0; i < 20; i++) {
+    j.append({ ts: i, data: payload });
+  }
+
+  // 20 строк × ~1000 байт = ~20 000 байт: лимит 5000 срабатывает раньше 10 000 строк
+  const dir = path.join(baseDir, 'journals', 'bytey');
+  const files = fs.readdirSync(dir).filter(f => f.endsWith('.seg'));
+  assert(files.length >= 3, `maxBytesPerSegment=5000: сегменты роллятся по байтам (факт ${files.length})`);
+
+  j.close();
+  const j2 = new Journal(baseDir);
+  j2.open('bytey', fatSchema);
+  const rows = j2.allRows();
+  assert(rows.length === 20 && rows[19].data === payload, 'Все 20 жирных строк читаются после reopen');
+  j2.close();
+
+  let threw = false;
+  try { new Journal(baseDir, { maxBytesPerSegment: 0 }); } catch { threw = true; }
+  assert(threw, 'maxBytesPerSegment=0 → ошибка опции');
+}
+
 console.log(`\nБазовые тесты: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

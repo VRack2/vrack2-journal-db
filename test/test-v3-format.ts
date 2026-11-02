@@ -507,5 +507,25 @@ fs.rmSync(baseDir, { recursive: true, force: true });
   assert(ok, `probe на выборке: ${N} строк lossless`);
 }
 
+// Проекция декода: neededColumns пропускает разжатие и декодирование
+// ненужных колонок; заголовок (саммари, ts-границы, rowMap) остаётся полным.
+{
+  const seg = new Segment('proj', { ts: 'delta', cpu: 'auto', data: 'raw' });
+  for (let i = 0; i < 50; i++) seg.append({ ts: i * 1000, cpu: i % 7, data: 'p'.repeat(200) });
+  const buf = SegmentFileV3.encode(seg);
+
+  const proj = SegmentFileV3.decode(buf, new Set(['ts', 'cpu']));
+  assert(Object.keys(proj.columns).sort().join(',') === 'cpu,ts', 'проекция: материализованы только ts,cpu');
+  assert(proj.get('data', 0) === null, 'проекция: get(data) → null');
+  assert(proj.get('cpu', 3) === 3 && proj.get('ts', 10) === 10000, 'проекция: нужные колонки целы');
+  assert(proj.summaries.cpu.count === 50, 'проекция: саммари из заголовка целы');
+  assert(proj.minTs === 0 && proj.maxTs === 49000, 'проекция: ts-границы целы');
+  assert(proj.rowCount === 50 && proj.rowMap.length === 50, 'проекция: rowMap цел');
+
+  const full = SegmentFileV3.decode(buf);
+  assert(Object.keys(full.columns).length === 3 && full.get('data', 0) === 'p'.repeat(200),
+    'полный декод без проекции не затронут');
+}
+
 console.log(`\nТесты формата v3: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -19,6 +19,9 @@ export class JournalWriter {
   private readonly makeSegment: (id: string) => Segment;
   private readonly newId: () => string;
   private readonly rowsPerSegment: number;
+  /** Byte cap per segment (approximate in-memory row bytes): whichever of the
+   *  row/byte budgets is hit first flushes. Keeps fat-payload segments bounded. */
+  private readonly maxBytesPerSegment: number;
   private readonly persist: (seg: Segment) => void;
   /** WAL strategy: 'off' skips every WAL write (no per-row cost, no crash replay). */
   private readonly walEnabled: boolean;
@@ -31,6 +34,7 @@ export class JournalWriter {
     makeSegment: (id: string) => Segment,
     newId: () => string,
     rowsPerSegment: number,
+    maxBytesPerSegment: number,
     walBatchSize: number,
     walMode: 'on' | 'off',
     persist: (seg: Segment) => void,
@@ -39,6 +43,7 @@ export class JournalWriter {
     this.makeSegment = makeSegment;
     this.newId = newId;
     this.rowsPerSegment = rowsPerSegment;
+    this.maxBytesPerSegment = maxBytesPerSegment;
     this.persist = persist;
     this.walEnabled = walMode === 'on';
     this.wal = new Wal(() => path.join(this.pathOf(), WAL_FILE), walBatchSize);
@@ -73,7 +78,7 @@ export class JournalWriter {
     } else {
       seg.append(row);
     }
-    if (seg.rowCount >= this.rowsPerSegment) {
+    if (this._shouldRoll(seg)) {
       this.flush();
       return true;
     }
@@ -178,6 +183,11 @@ export class JournalWriter {
   private appendInMemory(row: Row): void {
     const seg = this.activeSegment!;
     seg.append(row);
-    if (seg.rowCount >= this.rowsPerSegment) this.flush();
+    if (this._shouldRoll(seg)) this.flush();
+  }
+
+  /** Whichever of the row/byte budgets is hit first rolls the segment. */
+  private _shouldRoll(seg: Segment): boolean {
+    return seg.rowCount >= this.rowsPerSegment || seg.approxBytes >= this.maxBytesPerSegment;
   }
 }

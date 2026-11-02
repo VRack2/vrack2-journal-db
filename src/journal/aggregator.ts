@@ -61,7 +61,10 @@ export function aggregate(
   for (const id of src.sortedClosedIds()) {
     const meta = src.metaOf(id);
     if (SegmentMeta.skips(meta?.minTs ?? null, meta?.maxTs ?? null, start, end, true)) continue;
-    foldSegment(src.loadClosed(id));
+    // Project the decode: only ts + the aggregated fields are materialized;
+    // the summaries fast path reads the header, so fat payload columns
+    // (never touched here) are skipped entirely.
+    foldSegment(src.loadClosed(id, new Set(['ts', ...fields])));
   }
   const active = src.activeSegment;
   if (active && active.rowCount > 0) foldSegment(active);
@@ -125,7 +128,7 @@ export function downsample(
   for (const id of src.sortedClosedIds()) {
     const meta = src.metaOf(id);
     if (SegmentMeta.skips(meta?.minTs ?? null, meta?.maxTs ?? null, start, end, false)) continue;
-    scanSegment(src.loadClosed(id));
+    scanSegment(src.loadClosed(id, new Set(['ts', field])));
   }
   const active = src.activeSegment;
   if (active && active.rowCount > 0) scanSegment(active);
@@ -207,7 +210,7 @@ export function timeline(
   for (const id of src.sortedClosedIds()) {
     const meta = src.metaOf(id);
     if (SegmentMeta.skips(meta?.minTs ?? null, meta?.maxTs ?? null, start, end, false)) continue;
-    scanSegment(src.loadClosed(id));
+    scanSegment(src.loadClosed(id, new Set(['ts'])));
   }
   const active = src.activeSegment;
   if (active && active.rowCount > 0) scanSegment(active);

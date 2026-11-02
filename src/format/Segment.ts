@@ -31,6 +31,12 @@ export class Segment {
   rowMap: number[] = [];       // logical index → physical index
   rowCount = 0;
   physicalRowCount = 0;
+  /** Rough in-memory size of the physical rows (string chars + fixed-size
+   *  numbers). Drives the byte-cap segment rollover in JournalWriter: a
+   *  fat-payload table hits this long before the row budget, keeping the
+   *  active segment (heap) and the flushed file bounded. Approximate on
+   *  purpose — a trigger threshold, not an accounting ledger. */
+  approxBytes = 0;
   /** How many rows carry a numeric ts — purge() relies on it to not delete rows without ts. */
   tsCount = 0;
   minTs: number | null = null;
@@ -118,13 +124,19 @@ export class Segment {
     if (this.physicalRowCount > 0 && this._equalsValues(values, this.physicalRowCount - 1)) {
       this.rowMap.push(this.physicalRowCount - 1);
       this.rowCount++;
+      this.approxBytes += 4; // rowMap entry only — no column data
       return;
     }
 
     // New unique row
     for (const fieldName of this._fields) {
-      this.columns[fieldName].append(values[fieldName]);
+      const v = values[fieldName];
+      this.columns[fieldName].append(v);
+      if (typeof v === 'string') this.approxBytes += v.length;
+      else if (typeof v === 'number' || typeof v === 'bigint') this.approxBytes += 8;
+      else if (typeof v === 'boolean') this.approxBytes += 1;
     }
+    this.approxBytes += 4; // rowMap entry
 
     this.rowMap.push(this.physicalRowCount);
     this.physicalRowCount++;

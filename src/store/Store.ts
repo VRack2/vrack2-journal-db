@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { Journal, DEFAULT_ROWS_PER_SEGMENT, DEFAULT_COMPACT_MIN_SEGMENTS, isSegmentFile, idFromFile } from '../journal/Journal.ts';
-import { META_SUFFIX, SEG_V3_EXT } from '../journal/constants.ts';
+import { DEFAULT_MAX_BYTES_PER_SEGMENT, META_SUFFIX, SEG_V3_EXT } from '../journal/constants.ts';
 import { SegmentMeta } from '../journal/SegmentMeta.ts';
 import type { Segment } from '../format/Segment.ts';
 import { LRUCache } from '../core/LRUCache.ts';
@@ -52,6 +52,8 @@ export class Store {
   private readonly journalsDir: string;
   readonly maxCacheSize: number;
   readonly defaultRowsPerSegment: number;
+  /** Default byte cap per segment for journals (see JournalOptions.maxBytesPerSegment). */
+  readonly defaultMaxBytesPerSegment: number;
   readonly lockMode: LockMode;
   /** Default WAL strategy for journals (validated by the Journal constructor). */
   readonly walMode: WalMode;
@@ -74,6 +76,7 @@ export class Store {
     this.journalsDir = path.join(baseDir, 'journals');
     this.maxCacheSize = opts.maxCacheSize ?? 20;
     this.defaultRowsPerSegment = opts.defaultRowsPerSegment ?? DEFAULT_ROWS_PER_SEGMENT;
+    this.defaultMaxBytesPerSegment = opts.defaultMaxBytesPerSegment ?? DEFAULT_MAX_BYTES_PER_SEGMENT;
     const lock = opts.lock ?? 'pid';
     if (lock !== 'pid' && lock !== 'off') {
       throw ErrorManager.make('STO_LOCK', { lock: String(lock) });
@@ -124,6 +127,7 @@ export class Store {
 
     const journal = new Journal(this.baseDir, {
       rowsPerSegment: opts.rowsPerSegment ?? this.defaultRowsPerSegment,
+      maxBytesPerSegment: opts.maxBytesPerSegment ?? this.defaultMaxBytesPerSegment,
       maxCachedSegments: opts.maxCachedSegments ?? this.maxCacheSize,
       lock: opts.lock ?? this.lockMode,
       wal: opts.wal ?? this.walMode,

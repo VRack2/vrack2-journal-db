@@ -504,5 +504,37 @@ function expectedDownsample(rows: Row[], start: number, end: number, bucket: num
   j2.close();
 }
 
+// --------------------------------------------------
+// L. Проекция чтений: aggregate/downsample/timeline/scan разжимают только
+//    ts + нужные поля; жирная колонка не попадает в память и не отравляет
+//    LRU-кэш (полное чтение после агрегата — целое).
+// --------------------------------------------------
+{
+  const fatSchema: Schema = { ts: 'delta', value: 'auto', data: 'raw' };
+  const j3 = new Journal(baseDir);
+  j3.open('proj', fatSchema);
+  const payload = 'p'.repeat(500);
+  for (let i = 0; i < 300; i++) j3.append({ ts: base + i, value: i, data: payload });
+  j3.flush();
+  assert(j3.closedSegmentIds().length >= 1, 'L: есть закрытые сегменты');
+
+  const agg = j3.aggregate(base - 10, base + 400, [{ field: 'value', fn: 'sum' }, { field: 'value', fn: 'max' }]);
+  assert(agg.value_sum === 44850 && agg.value_max === 299, `L: aggregate sum/max = ${agg.value_sum}/${agg.value_max}`);
+
+  const ds = j3.downsample(base - 10, base + 400, 50, 'value', ['sum']);
+  assert(ds.reduce((s, b) => s + (b.sum ?? 0), 0) === 44850, 'L: downsample sum совпадает');
+
+  const tl = j3.timeline(50, [base - 10, base + 400]);
+  assert(tl.reduce((s, b) => s + b.count, 0) === 300, 'L: timeline count совпадает');
+
+  const sc = j3.scan({ start: base, end: base + 299, select: ['value'], where: [{ field: 'value', op: 'ge', value: 290 }] });
+  assert(sc.length === 10, `L: scan с проекцией → 10 строк (факт ${sc.length})`);
+
+  const row = j3.query(base, base)[0];
+  assert(row.data === payload, 'L: жирная колонка цела после проектных чтений (кэш не отравлен)');
+  assert(j3.allRows().length === 300, 'L: allRows цел');
+  j3.close();
+}
+
 console.log(`\nТесты aggregate: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

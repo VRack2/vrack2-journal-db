@@ -368,6 +368,13 @@ export interface JournalOptions {
    *  larger — fewer FS operations and less SSD wear, but a bigger re-encoding
    *  of the "crossing" segment during purge/compact. */
   rowsPerSegment?: number;
+  /** Byte cap per segment before flush (default 32 000 000 — approximate
+   *  in-memory row size, see `Segment.approxBytes`). Whichever of the row and
+   *  byte budgets is hit first rolls: the row budget alone never bounds a
+   *  fat-payload table (10 000 rows × 35 KB payloads = a 350 MB segment).
+   *  0 or a non-integer is rejected; raise it for wide rows, lower it to
+   *  keep the active segment and each file smaller. */
+  maxBytesPerSegment?: number;
   maxCachedSegments?: number;
   /** WAL strategy (default `'off'` — see `WalMode`). `'on'`: rows are
    *  WAL-logged before the segment append and replayed after a process crash;
@@ -402,6 +409,9 @@ export interface JournalOptions {
 export interface StoreOptions {
   maxCacheSize?: number;
   defaultRowsPerSegment?: number;
+  /** Default byte cap per segment for all journals (default 32 000 000 —
+   *  see `JournalOptions.maxBytesPerSegment`). */
+  defaultMaxBytesPerSegment?: number;
   /** Default `'pid'` — see `JournalOptions.lock`. */
   lock?: LockMode;
   /** Default WAL strategy for all journals (default `'off'` — see `WalMode`). */
@@ -419,6 +429,8 @@ export interface StoreOptions {
 
 export interface OpenJournalOptions {
   rowsPerSegment?: number;
+  /** Overrides `defaultMaxBytesPerSegment` from StoreOptions for this journal. */
+  maxBytesPerSegment?: number;
   maxCachedSegments?: number;
   /** Overrides `lock` from StoreOptions for this journal. */
   lock?: LockMode;

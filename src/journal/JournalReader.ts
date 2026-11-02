@@ -44,7 +44,7 @@ export class JournalReader implements SegmentSource {
 
   metaOf(id: string): SegmentMeta | undefined { return this.store.metaOf(id); }
 
-  loadClosed(id: string): Segment { return this.store.loadClosed(id); }
+  loadClosed(id: string, neededColumns?: Set<string>): Segment { return this.store.loadClosed(id, neededColumns); }
 
   // --- Row reads ---
 

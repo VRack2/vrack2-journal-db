@@ -6,6 +6,7 @@ import ErrorManager from '../errors/ErrorManager.ts';
 ErrorManager.registerMany('Journal', [
   { short: 'JRN_OPT_COMPACT_MIN', description: 'compactMinSegments must be an integer >= 2' },
   { short: 'JRN_OPT_WAL_BATCH', description: 'walBatchSize must be an integer >= 1' },
+  { short: 'JRN_OPT_MAX_BYTES', description: 'maxBytesPerSegment must be an integer >= 1' },
   { short: 'JRN_OPT_LOCK', description: "lock must be 'pid' or 'off'" },
   { short: 'JRN_OPT_WAL', description: "wal must be 'on' or 'off'" },
   { short: 'JRN_OPT_COMPRESSION', description: "compression must be 'gzip' or 'zstd'" },

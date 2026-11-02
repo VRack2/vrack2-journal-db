@@ -74,6 +74,20 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
     return g;
   };
 
+  // Columns the plan can touch — identical for every segment. Closed segments
+  // are decoded projected (read-through, not cached): untouched columns
+  // (typically the fat payload column) are never inflated. The summaries
+  // fast path and ts skips read the header, which projection keeps complete.
+  const fieldsNeeded = new Set<string>();
+  if (plan.hasTsFilter) fieldsNeeded.add('ts');
+  for (const c of plan.where) fieldsNeeded.add(c.field);
+  if (plan.agg) {
+    for (const a of plan.aggSpec) fieldsNeeded.add(a.field);
+    for (const g of plan.groupBy) fieldsNeeded.add(g);
+  } else {
+    for (const f of plan.select) fieldsNeeded.add(f);
+  }
+
   const processSegment = (seg: Segment): void => {
     if (plan.start !== null && plan.end !== null && seg.minTs !== null && seg.maxTs !== null && (seg.maxTs < plan.start || seg.minTs > plan.end)) return;
 
@@ -95,15 +109,6 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
     const rowMap = seg.rowMap;
     const n = seg.rowCount;
     const cols: Record<string, Column | undefined> = {};
-    const fieldsNeeded = new Set<string>();
-    if (plan.hasTsFilter) fieldsNeeded.add('ts');
-    for (const c of plan.where) fieldsNeeded.add(c.field);
-    if (plan.agg) {
-      for (const a of plan.aggSpec) fieldsNeeded.add(a.field);
-      for (const g of plan.groupBy) fieldsNeeded.add(g);
-    } else {
-      for (const f of plan.select) fieldsNeeded.add(f);
-    }
     for (const f of fieldsNeeded) cols[f] = seg.columns[f];
 
     const tsCol = plan.hasTsFilter ? cols['ts'] : null;
@@ -192,7 +197,7 @@ export function executeScan(plan: ScanPlan, src: SegmentSource): Row[] {
     if (plan.start !== null && plan.end !== null && SegmentMeta.skips(meta?.minTs ?? null, meta?.maxTs ?? null, plan.start, plan.end, true)) continue;
     // Zone-map pushdown: skip segments whose column summaries rule out every row.
     if (plan.where.length > 0 && SegmentMeta.skipsWhere(meta ?? null, plan.where, plan.hasTsFilter)) continue;
-    processSegment(src.loadClosed(id));
+    processSegment(src.loadClosed(id, fieldsNeeded));
     if (canEarlyStop && rawRows!.length >= rawNeed) break;
   }
 

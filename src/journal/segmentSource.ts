@@ -11,6 +11,7 @@ export interface SegmentSource {
   sortedClosedIds(): string[];
   /** .meta sidecar of a closed segment — undefined if unknown. */
   metaOf(id: string): SegmentMeta | undefined;
-  /** Closed segment from the LRU cache or disk. */
-  loadClosed(id: string): Segment;
+  /** Closed segment from the LRU cache or disk. `neededColumns` projects the
+   *  decode (read-through, not cached) — see SegmentStore.loadClosed. */
+  loadClosed(id: string, neededColumns?: Set<string>): Segment;
 }

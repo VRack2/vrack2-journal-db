@@ -163,8 +163,20 @@ export class SegmentFileV3 {
     return Buffer.concat([body, tail]);
   }
 
-  /** Segment buffer → in-memory segment. */
-  static decode(buf: Buffer): Segment {
+  /**
+   * Segment buffer → in-memory segment.
+   *
+   * `neededColumns` projects the decode: only the named columns are
+   * decompressed and materialized; every other column blob is skipped by
+   * length (no inflate, no values) and its column is dropped from the
+   * segment, so `get()`/`columns` report it as absent (null). The header —
+   * schema, summaries, ts bounds, rowMap — is always complete, so
+   * summary-based fast paths and ts skips keep working on projected
+   * segments. Used by the aggregate/downsample/timeline/scan reads, which
+   * touch only ts + a few numeric fields while the fat payload columns
+   * (opaque `data` strings) dominate the decompressed size.
+   */
+  static decode(buf: Buffer, neededColumns?: Set<string>): Segment {
     if (!this.hasMagic(buf)) {
       throw ErrorManager.make('SFW3_NOT_V3');
     }
@@ -211,6 +223,8 @@ export class SegmentFileV3 {
         throw ErrorManager.make('SFW3_TOO_SMALL');
       }
       const blobBuf = buf.subarray(off, off + blobLen); off += blobLen;
+      // Projected decode: skip the inflate for columns the reader never touches.
+      if (neededColumns && !neededColumns.has(field)) continue;
       blobMap.set(field, Compression.decompress(blobBuf, compression));
     }
 
@@ -246,6 +260,12 @@ export class SegmentFileV3 {
       : {};
 
     for (const field of header.columnOrder) {
+      // Projected decode: drop the empty placeholder column so readers see
+      // the field as absent (Segment.get returns null, `columns[f]` undefined).
+      if (neededColumns && !neededColumns.has(field)) {
+        delete seg.columns[field];
+        continue;
+      }
       const spec = header.columns[field];
       const blob = blobMap.get(field)!;
       // Recreate the column with its declared type (header "type"; old files
